@@ -63,8 +63,7 @@ impl Trace for StoreTrace {
   fn put_payload(&mut self, bytes: &[u8]) -> Result<Option<pi_rs_core::BlobRef>, SinkError> {
     self
       .session
-      .blobs()
-      .put(bytes, None)
+      .put_recovery_blob(bytes)
       .map(Some)
       .map_err(store_error)
   }
@@ -84,9 +83,74 @@ mod tests {
     AgentEvent, EventMeta, Message, ModelRef, SessionHeader, SessionId, TraceId, TurnId,
     UserMessage, session::SESSION_SCHEMA_VERSION,
   };
-  use pi_rs_store::{Store, TempDir, TraceJournal, WritePolicy};
+  use pi_rs_store::{StateLayout, Store, TempDir, TraceJournal, WritePolicy};
 
   use super::*;
+
+  #[test]
+  fn durable_messages_trace_and_recovery_blobs_share_redaction_policy() {
+    let temp = TempDir::new("runtime-store-redaction");
+    let secret = "configured-secret-91f7";
+    let recognized = "sk-1234567890123456";
+    let mut policy = WritePolicy::default();
+    policy.redaction.scan_environment = false;
+    policy.redaction.literals = vec![secret.into()];
+    let store = Store::open(temp.path(), policy).unwrap();
+    let session_id = SessionId::new();
+    let model = ModelRef::new("local", "model");
+    let session = store
+      .begin(SessionHeader {
+        session_id: session_id.clone(),
+        version: SESSION_SCHEMA_VERSION,
+        started_at_ms: 1,
+        working_dir: "/workspace".into(),
+        model: model.clone(),
+        parent_session: None,
+        branched_from_event: None,
+        imported_from: None,
+      })
+      .unwrap();
+    let turn_id = TurnId::new();
+    let mut meta = EventMeta::new(session_id.clone(), TraceId::new());
+    meta.turn_id = Some(turn_id);
+    meta.model_epoch = Some(0);
+    meta.model = Some(model);
+    let text = format!("do not persist {secret} or {recognized}");
+    let mut envelope = EventEnvelope::new(
+      meta,
+      AgentEvent::UserMessage(UserMessage {
+        text: text.clone(),
+        attachments: 0,
+      }),
+    );
+    let mut trace = StoreTrace::new(session);
+    trace.emit(&mut envelope).unwrap();
+    trace
+      .record_message(&AttributedMessage {
+        envelope,
+        message: Message::user(text),
+      })
+      .unwrap();
+    let blob = trace
+      .put_payload(format!("recovery {secret} or {recognized}").as_bytes())
+      .unwrap()
+      .unwrap();
+    trace.flush().unwrap();
+
+    let layout = StateLayout::new(temp.path());
+    let session_bytes = std::fs::read(layout.session_path(&session_id)).unwrap();
+    let trace_bytes = std::fs::read(layout.trace_path(&session_id)).unwrap();
+    let blob_bytes = std::fs::read(layout.blob_path(&session_id, &blob)).unwrap();
+    for bytes in [&session_bytes, &trace_bytes, &blob_bytes] {
+      let durable = String::from_utf8_lossy(bytes);
+      assert!(!durable.contains(secret), "secret persisted in {durable}");
+      assert!(
+        !durable.contains(recognized),
+        "recognized key persisted in {durable}"
+      );
+      assert!(durable.contains("[redacted:"), "{durable}");
+    }
+  }
 
   #[test]
   fn store_assigns_the_event_sequence_used_by_the_session_message() {

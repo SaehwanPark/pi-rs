@@ -279,8 +279,9 @@ impl std::fmt::Display for ToolError {
 
 /// Progress sink passed to a running tool.
 ///
-/// Tools stream through this rather than writing to stdout, so that output is
-/// journaled and rendered consistently.
+/// Tools stream through this rather than writing to stdout. Progress chunks are
+/// transient surface output; durable history records the final bounded tool
+/// result under its lifecycle event.
 pub trait ToolProgress: Send {
   fn emit(&mut self, chunk: &ToolChunk);
 }

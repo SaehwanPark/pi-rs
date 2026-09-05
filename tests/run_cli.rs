@@ -5,6 +5,7 @@ use std::{
   path::{Path, PathBuf},
   process::{Command, Output},
   thread,
+  time::{Duration, Instant},
 };
 
 use pi_rs_core::{
@@ -22,11 +23,25 @@ impl FakeServer {
   fn answer(responses: Vec<String>) -> Self {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider");
     let addr = listener.local_addr().expect("fake provider address");
+    listener.set_nonblocking(true).unwrap();
     let handle = thread::spawn(move || {
       responses
         .into_iter()
         .map(|response| {
-          let (mut socket, _) = listener.accept().expect("accept provider request");
+          let deadline = Instant::now() + Duration::from_secs(5);
+          let mut socket = loop {
+            match listener.accept() {
+              Ok((socket, _)) => break socket,
+              Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                  Instant::now() < deadline,
+                  "timed out waiting for provider request"
+                );
+                thread::sleep(Duration::from_millis(5));
+              }
+              Err(error) => panic!("accept provider request: {error}"),
+            }
+          };
           let request = drain_request(&mut socket);
           socket
             .write_all(response.as_bytes())
@@ -353,6 +368,50 @@ fn mutating_tools_are_denied_without_explicit_auto_approval() {
     AgentEvent::ToolFailed(failed)
       if failed.call_id.as_str() == "call_denied" && failed.message.contains("approval is required")
   )));
+  assert!(!trace.iter().any(|entry| matches!(
+    &entry.envelope.event,
+    AgentEvent::ToolStarted(started) if started.call_id.as_str() == "call_denied"
+  )));
+}
+
+#[test]
+fn one_shot_read_cannot_escape_the_workspace_or_leak_secret_bytes() {
+  let temp = TempDir::new().unwrap();
+  let workspace = temp.path().join("workspace");
+  fs::create_dir(&workspace).unwrap();
+  let secret = "outside-secret-value-91f7";
+  let outside = temp.path().join("secret.txt");
+  fs::write(&outside, secret).unwrap();
+  let absolute_arguments = serde_json::json!({"path": outside.to_string_lossy()}).to_string();
+  let server = FakeServer::answer(vec![
+    tool_response("call_absolute", "read", &absolute_arguments, None),
+    tool_response("call_parent", "read", r#"{"path":"../secret.txt"}"#, None),
+    text_response("outside reads refused"),
+  ]);
+  let config = write_config(temp.path(), &server.base_url(), true);
+
+  let output = run(&config, &workspace, "read outside");
+  let requests = server.requests();
+  assert!(
+    output.status.success(),
+    "{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert_eq!(requests.len(), 3);
+  assert!(requests.iter().all(|request| !request.contains(secret)));
+
+  let layout = StateLayout::new(temp.path().join("state"));
+  let session_id = layout.list_session_ids().unwrap().pop().unwrap();
+  let trace = TraceJournal::read(&layout.trace_path(&session_id))
+    .unwrap()
+    .items;
+  for call_id in ["call_absolute", "call_parent"] {
+    assert!(trace.iter().any(|entry| matches!(
+      &entry.envelope.event,
+      AgentEvent::ToolFailed(failed)
+        if failed.call_id.as_str() == call_id && failed.message.contains("outside the workspace")
+    )));
+  }
 }
 
 #[test]
@@ -370,6 +429,35 @@ fn invalid_workspace_is_rejected_before_any_provider_request() {
   assert!(!output.status.success());
   assert!(
     String::from_utf8_lossy(&output.stderr).contains("invalid workspace"),
+    "{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert_eq!(
+    listener.accept().unwrap_err().kind(),
+    std::io::ErrorKind::WouldBlock
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_workspace_is_rejected_before_any_provider_request() {
+  use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+  let temp = TempDir::new().unwrap();
+  let workspace = temp.path().join(OsString::from_vec(vec![b'w', 0xff]));
+  fs::create_dir(&workspace).unwrap();
+  let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+  listener.set_nonblocking(true).unwrap();
+  let config = write_config(
+    temp.path(),
+    &format!("http://{}/v1", listener.local_addr().unwrap()),
+    true,
+  );
+
+  let output = run(&config, &workspace, "hello");
+  assert!(!output.status.success());
+  assert!(
+    String::from_utf8_lossy(&output.stderr).contains("not valid UTF-8"),
     "{}",
     String::from_utf8_lossy(&output.stderr)
   );

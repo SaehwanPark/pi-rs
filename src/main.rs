@@ -2,7 +2,7 @@ mod cli;
 mod run;
 
 fn main() {
-  let command = match cli::parse(std::env::args().skip(1)) {
+  let command = match cli::parse(std::env::args_os().skip(1)) {
     Ok(command) => command,
     Err(error) => {
       eprintln!("error: {error}");

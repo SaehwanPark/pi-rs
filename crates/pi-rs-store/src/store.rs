@@ -144,9 +144,10 @@ impl Store {
     StateLayout::validate_session_id(&header.session_id)?;
     self.layout.ensure_session_dirs(&header.session_id)?;
     let journal = self.open_journal(&header.session_id)?;
-    let log = SessionLog::create(
+    let log = SessionLog::create_with_policy(
       &self.layout.session_path(&header.session_id),
       header.clone(),
+      self.policy.redaction.clone(),
     )?;
     Ok(self.session(header, log, journal))
   }
@@ -155,7 +156,10 @@ impl Store {
   pub fn resume(&self, session: &SessionId) -> Result<Session, StoreError> {
     let header = SessionLog::read_header(&self.layout.session_path(session))?;
     let journal = self.open_journal(session)?;
-    let log = SessionLog::resume(&self.layout.session_path(session))?;
+    let log = SessionLog::resume_with_policy(
+      &self.layout.session_path(session),
+      self.policy.redaction.clone(),
+    )?;
     Ok(self.session(header, log, journal))
   }
 
@@ -433,12 +437,24 @@ impl Session {
     Ok(record)
   }
 
-  /// Store a payload, choosing inline or blob by the configured threshold.
+  /// Store a payload, redacting it at this boundary before choosing inline or
+  /// blob storage by the configured threshold.
   pub fn put_payload(&mut self, bytes: &[u8]) -> Result<Payload, StoreError> {
+    let redacted = self.policy.redaction.apply(&String::from_utf8_lossy(bytes));
+    let bytes = redacted.text.as_bytes();
     if (bytes.len() as u64) < self.policy.inline_threshold_bytes {
-      return Ok(Payload::Inline(String::from_utf8_lossy(bytes).into_owned()));
+      return Ok(Payload::Inline(redacted.text));
     }
     Ok(Payload::Blob(self.blobs.put(bytes, None)?))
+  }
+
+  /// Store recovery bytes after applying the configured durable redaction policy.
+  ///
+  /// Unlike [`Self::put_payload`], this always returns a blob because runtime
+  /// reduction events need a stable recovery reference even for a small payload.
+  pub fn put_recovery_blob(&self, bytes: &[u8]) -> Result<BlobRef, StoreError> {
+    let redacted = self.policy.redaction.apply(&String::from_utf8_lossy(bytes));
+    self.blobs.put(redacted.text.as_bytes(), None)
   }
 
   /// Flush both logs.

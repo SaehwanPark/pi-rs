@@ -8,7 +8,8 @@
 //! Every line is written durably. Unlike trace deltas, a lost message is not a
 //! cosmetic loss: it silently changes what the next model request believes
 //! happened. Bounding resume cost is the checkpoint barrier's job, not the
-//! writer's.
+//! writer's. Every new header and semantic record is sanitized by the store's
+//! configured redaction policy immediately before serialization.
 
 use std::path::Path;
 
@@ -16,6 +17,7 @@ use pi_rs_core::{
   capability::ModelRef,
   event::AgentEvent,
   ids::{EventSeq, SessionId},
+  redact::RedactionPolicy,
   session::{SESSION_SCHEMA_VERSION, SessionHeader, SessionMessage, SessionRecord, SessionSummary},
 };
 
@@ -33,6 +35,7 @@ pub struct SessionLog {
   writer: LineWriter,
   header: SessionHeader,
   records: usize,
+  redaction: RedactionPolicy,
 }
 
 impl SessionLog {
@@ -41,12 +44,25 @@ impl SessionLog {
   /// The header is written through immediately: a session that exists at all
   /// must be listable, even if the process dies before the first message.
   pub fn create(path: &Path, header: SessionHeader) -> Result<Self, StoreError> {
+    Self::create_with_policy(path, header, RedactionPolicy::default())
+  }
+
+  /// Create a session log protected by the store's configured redaction policy.
+  pub fn create_with_policy(
+    path: &Path,
+    header: SessionHeader,
+    redaction: RedactionPolicy,
+  ) -> Result<Self, StoreError> {
     if read_first_line(path)?.is_some() {
       return Err(StoreError::Invalid(format!(
         "session {} already exists; a session log is never truncated",
         path.display()
       )));
     }
+    let sanitized = sanitize_record(&SessionRecord::Header(header), &redaction)?;
+    let SessionRecord::Header(header) = sanitized else {
+      unreachable!("sanitizing a header preserves its record variant")
+    };
     let header_line = serde_json::to_string(&SessionRecord::Header(header.clone()))?;
     let mut writer = LineWriter::create(path)?;
     writer.write_line(&header_line, true)?;
@@ -54,17 +70,24 @@ impl SessionLog {
       writer,
       header,
       records: 1,
+      redaction,
     })
   }
 
   /// Reopen an existing session log for appending.
   pub fn resume(path: &Path) -> Result<Self, StoreError> {
+    Self::resume_with_policy(path, RedactionPolicy::default())
+  }
+
+  /// Resume a session using the currently configured redaction policy for new records.
+  pub fn resume_with_policy(path: &Path, redaction: RedactionPolicy) -> Result<Self, StoreError> {
     let header = Self::read_header(path)?;
     let records = read_jsonl::<SessionRecord>(path)?.items.len();
     Ok(Self {
       writer: LineWriter::create(path)?,
       header,
       records: records.max(1),
+      redaction,
     })
   }
 
@@ -92,7 +115,7 @@ impl SessionLog {
         "a session header is written exactly once, at creation".into(),
       ));
     }
-    let line = serde_json::to_string(record)?;
+    let line = serde_json::to_string(&sanitize_record(record, &self.redaction)?)?;
     self.writer.write_line(&line, true)?;
     self.records += 1;
     Ok(())
@@ -188,6 +211,15 @@ impl SessionLog {
     }
     Ok(last)
   }
+}
+
+fn sanitize_record(
+  record: &SessionRecord,
+  policy: &RedactionPolicy,
+) -> Result<SessionRecord, StoreError> {
+  let mut value = serde_json::to_value(record)?;
+  policy.apply_json(&mut value);
+  serde_json::from_value(value).map_err(StoreError::from)
 }
 
 fn validate_header(header: &SessionHeader, path: &Path) -> Result<(), StoreError> {

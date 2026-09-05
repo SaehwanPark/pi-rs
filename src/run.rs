@@ -33,12 +33,17 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
     .map_err(|error| format!("invalid primary endpoint: {error}"))?;
 
   let workspace = Workspace::new(&args.cwd)
-    .map_err(|error| format!("invalid workspace '{}': {error}", args.cwd.display()))?;
-  let canonical_cwd = workspace.root().to_string_lossy().into_owned();
+    .map_err(|error| format!("invalid workspace '{}': {error}", args.cwd.display()))?
+    .with_read_outside(false);
+  let canonical_cwd = workspace
+    .root()
+    .to_str()
+    .ok_or_else(|| "invalid workspace: canonical path is not valid UTF-8".to_string())?
+    .to_string();
   let mut tool_policy = config.tools.clone();
   // The command-line workspace is the explicit authority for this invocation;
-  // a config file cannot redirect tools to a second root.
-  tool_policy.cwd = Some(canonical_cwd.clone());
+  // policy application must not recreate a second, more permissive workspace.
+  tool_policy.cwd = None;
   let tools = ToolRegistry::new(workspace)
     .with_policy(&tool_policy)
     .with_builtins();
@@ -67,6 +72,9 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
   let write_policy = WritePolicy::from_retention(&config.trace, &config.redaction);
   let store = Store::open(&config.state_dir, write_policy)
     .map_err(|error| format!("cannot open durable state: {error}"))?;
+  store
+    .apply_retention(&config.trace, now_millis(), 1)
+    .map_err(|error| format!("cannot apply trace retention: {error}"))?;
   let session_id = SessionId::new();
   let session = store
     .begin(SessionHeader {
@@ -139,6 +147,10 @@ impl TurnProgress for CliProgress {
       call.name,
       call.arguments
     );
+  }
+
+  fn on_tool_progress(&mut self, call: &pi_rs_core::ToolCallBlock, text: &str) {
+    let _ = writeln!(io::stderr(), "[tool output] {} {text}", call.name);
   }
 
   fn on_tool_finished(&mut self, call: &pi_rs_core::ToolCallBlock, executed: &Executed) {

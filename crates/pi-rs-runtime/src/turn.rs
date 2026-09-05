@@ -50,6 +50,7 @@ pub trait TurnProgress: Send {
   fn on_reasoning(&mut self, _text: &str, _provenance: ReasoningProvenance) {}
   fn on_text_delta(&mut self, _text: &str) {}
   fn on_tool_requested(&mut self, _call: &ToolCallBlock) {}
+  fn on_tool_progress(&mut self, _call: &ToolCallBlock, _text: &str) {}
   fn on_tool_finished(&mut self, _call: &ToolCallBlock, _executed: &Executed) {}
 }
 
@@ -626,13 +627,29 @@ impl<'a> TurnLoop<'a> {
       progress.on_request_started(&model);
 
       let clock = Instant::now();
-      let mut collector = Collector::new(progress);
-      let outcome = self.provider().stream(&request, &mut collector, cancel);
+      let attribution = StreamAttribution {
+        turn_id: turn_id.clone(),
+        session_id: self.session_id.clone(),
+        trace_id: self.trace_id.clone(),
+        epoch,
+        model: model.clone(),
+      };
+      let provider = self.provider();
+      let mut collector = Collector::new(progress, &mut *self.trace, attribution, cancel.clone());
+      let outcome = provider.stream(&request, &mut collector, cancel);
       let duration_ms = elapsed_ms(clock);
-      let provenance = collector.reasoning_provenance;
-      let assistant_introduced_by = self
-        .record_provider_output(turn_id.clone(), &collector)
-        .map_err(TurnFailure::from)?;
+      let Collector {
+        text,
+        calls,
+        committed,
+        reasoning_provenance: provenance,
+        assistant_introduced_by,
+        sink_error,
+        ..
+      } = collector;
+      if let Some(error) = sink_error {
+        return Err(TurnFailure::Sink(error));
+      }
 
       let failure = match outcome {
         // Transport said done. Whether the *model* finished is a separate
@@ -641,12 +658,12 @@ impl<'a> TurnLoop<'a> {
         Ok(usage) => {
           // "Produced" means *content the user would see*. Tool calls alone do not
           // make an unfinished response a truncation of an answer.
-          let produced = !collector.text.is_empty();
-          match collector.completion(&usage, produced) {
+          let produced = !text.is_empty();
+          match completion_failure(&usage, produced, committed) {
             Some(failure) => failure,
             None => {
               self.measured_input_tokens = usage.input_tokens;
-              let tool_calls = collector.calls.len() as u32;
+              let tool_calls = calls.len() as u32;
               let introduced_by = self
                 .emit(
                   Some(turn_id.clone()),
@@ -662,7 +679,6 @@ impl<'a> TurnLoop<'a> {
                   }),
                 )
                 .map_err(TurnFailure::from)?;
-              let Collector { text, calls, .. } = collector;
               return Ok(Response {
                 epoch,
                 text: (!text.is_empty()).then_some(text),
@@ -676,7 +692,7 @@ impl<'a> TurnLoop<'a> {
           // Output reached the user the moment it was emitted, so it is recorded on
           // the failure rather than inferred afterwards.
           let mut failure = failure;
-          failure.partial_output_emitted = collector.committed;
+          failure.partial_output_emitted = committed;
           failure
         }
       };
@@ -696,9 +712,17 @@ impl<'a> TurnLoop<'a> {
             input_tokens: None,
             output_tokens: None,
             duration_ms,
-            tool_calls: 0,
+            tool_calls: calls.len() as u32,
             reasoning_provenance: provenance,
           }),
+        )
+        .map_err(TurnFailure::from)?;
+      self
+        .record_unexecuted_calls(
+          turn_id.clone(),
+          &calls,
+          progress,
+          "model response did not complete; tool was not executed",
         )
         .map_err(TurnFailure::from)?;
       self
@@ -932,39 +956,45 @@ impl<'a> TurnLoop<'a> {
     Ok(request)
   }
 
-  /// Persist normalized provider deltas inside their request span.
-  fn record_provider_output(
+  /// Close fully decoded calls from a response that cannot be acted on.
+  fn record_unexecuted_calls(
     &mut self,
     turn_id: TurnId,
-    collector: &Collector<'_>,
-  ) -> Result<Option<EventEnvelope>, TurnError> {
-    for (chunk_index, (text, provenance)) in collector.reasoning_chunks.iter().enumerate() {
+    calls: &[ToolCallBlock],
+    progress: &mut dyn TurnProgress,
+    reason: &str,
+  ) -> Result<(), TurnError> {
+    for call in calls {
+      let read_only = self
+        .tools
+        .metadata_for(&call.name)
+        .map(|metadata| metadata.read_only)
+        .unwrap_or(false);
+      progress.on_tool_requested(call);
       self.emit(
         Some(turn_id.clone()),
-        AgentEvent::ReasoningDelta(ReasoningDelta {
-          text: text.clone(),
-          provenance: *provenance,
-          chunk_index: chunk_index as u32,
+        AgentEvent::ToolRequested(ToolRequested {
+          call_id: call.id.clone(),
+          name: call.name.clone(),
+          arguments: call.arguments.clone(),
+          read_only,
         }),
       )?;
-    }
-    let mut introduced_by = None;
-    for (chunk_index, text) in collector.text_chunks.iter().enumerate() {
-      let envelope = self.emit(
+      self.emit(
         Some(turn_id.clone()),
-        AgentEvent::AssistantDelta(AssistantDelta {
-          text: text.clone(),
-          chunk_index: chunk_index as u32,
+        AgentEvent::ToolFailed(ToolFailed {
+          call_id: call.id.clone(),
+          name: call.name.clone(),
+          message: reason.to_string(),
+          duration_ms: 0,
+          status: None,
         }),
       )?;
-      if introduced_by.is_none() {
-        introduced_by = Some(envelope);
-      }
     }
-    Ok(introduced_by)
+    Ok(())
   }
 
-  /// Execute the calls one request asked for, in the order it asked.
+  /// Execute the calls one completed request asked for, in declaration order.
   fn execute_calls(
     &mut self,
     turn_id: TurnId,
@@ -1016,23 +1046,12 @@ impl<'a> TurnLoop<'a> {
         break;
       }
 
-      self.emit(
-        Some(turn_id.clone()),
-        AgentEvent::ToolStarted(ToolStarted {
-          call_id: call.id.clone(),
-          name: call.name.clone(),
-        }),
-      )?;
       let request = pi_rs_core::ToolRequest {
         call_id: call.id.clone(),
         name: call.name.clone(),
         arguments: call.arguments.clone(),
       };
-      // The attribution block is computed first, then the trace is the only live
-      // borrow while the tool runs: `execute` needs the registry immutably and the
-      // sink needs it mutably, and mixing the two through one `&mut self` would make
-      // them conflict.
-      let attribution = ToolAttribution {
+      let attribution = StreamAttribution {
         turn_id: turn_id.clone(),
         session_id: self.session_id.clone(),
         trace_id: self.trace_id.clone(),
@@ -1040,12 +1059,27 @@ impl<'a> TurnLoop<'a> {
         model: self.active_model(),
       };
       let executed = {
-        let mut sink = ToolSink {
-          trace: &mut *self.trace,
-          attribution,
+        let mut sink = LiveToolSink { progress, call };
+        let trace = &mut *self.trace;
+        let mut on_started = || {
+          let mut meta =
+            EventMeta::new(attribution.session_id.clone(), attribution.trace_id.clone());
+          meta.turn_id = Some(attribution.turn_id.clone());
+          meta.model_epoch = Some(attribution.epoch);
+          meta.model = Some(attribution.model.clone());
+          let mut envelope = EventEnvelope::new(
+            meta,
+            AgentEvent::ToolStarted(ToolStarted {
+              call_id: call.id.clone(),
+              name: call.name.clone(),
+            }),
+          );
+          trace.emit(&mut envelope)
         };
         let clock = Instant::now();
-        let executed = self.tools.execute(&request, &mut sink, cancel);
+        let executed = self
+          .tools
+          .execute_observed(&request, &mut sink, cancel, &mut on_started)?;
         (executed, elapsed_ms(clock))
       };
       let block = self.record_tool_outcome(turn_id.clone(), call, &executed.0, executed.1)?;
@@ -1177,91 +1211,8 @@ impl From<TurnError> for TurnFailure {
   }
 }
 
-/// Accumulates one streamed response and answers the only question that matters at
-/// the end: did the model actually finish?
-struct Collector<'p> {
-  progress: &'p mut dyn TurnProgress,
-  text: String,
-  text_chunks: Vec<String>,
-  reasoning_chunks: Vec<(String, ReasoningProvenance)>,
-  calls: Vec<ToolCallBlock>,
-  committed: bool,
-  reasoning_provenance: Option<ReasoningProvenance>,
-}
-
-impl<'p> Collector<'p> {
-  fn new(progress: &'p mut dyn TurnProgress) -> Self {
-    Self {
-      progress,
-      text: String::new(),
-      text_chunks: Vec::new(),
-      reasoning_chunks: Vec::new(),
-      calls: Vec::new(),
-      committed: false,
-      reasoning_provenance: None,
-    }
-  }
-}
-
-impl<'p> pi_rs_core::ProviderEventSink for Collector<'p> {
-  fn emit(&mut self, event: &pi_rs_core::ProviderEvent) {
-    match event {
-      pi_rs_core::ProviderEvent::ReasoningDelta { text, provenance } => {
-        // Provenance is carried, not collapsed: a provider's own summary and a
-        // reconstructed rationale must remain distinguishable forever.
-        self.reasoning_provenance = Some(*provenance);
-        self.reasoning_chunks.push((text.clone(), *provenance));
-        self.progress.on_reasoning(text, *provenance);
-      }
-      pi_rs_core::ProviderEvent::TextDelta(text) => {
-        // The moment text reaches the surface it is committed content, and a
-        // committed response is never restarted.
-        self.committed = true;
-        self.text.push_str(text);
-        self.text_chunks.push(text.clone());
-        self.progress.on_text_delta(text);
-      }
-      pi_rs_core::ProviderEvent::ToolCall(call) => {
-        self.committed = true;
-        self.calls.push(call.clone());
-      }
-    }
-  }
-}
-
-impl Collector<'_> {
-  /// A failure when the response was not a completion, `None` when it was.
-  ///
-  /// A tool call counts as real output: a response that asked for a tool finished
-  /// its turn even with no prose.
-  fn completion(
-    &self,
-    usage: &pi_rs_core::CompletionUsage,
-    produced: bool,
-  ) -> Option<ModelFailure> {
-    if usage.is_certain() {
-      return None;
-    }
-    let mut failure = ModelFailure::new(
-      if produced {
-        // The model got partway through what it wanted to say; that is truncation,
-        // not an outage.
-        // The model answered, and the answer is not usable. That is explicitly not
-        // an availability failure, so it is never retried or failed over.
-        ModelFailureKind::Semantic
-      } else {
-        ModelFailureKind::Protocol
-      },
-      FailurePhase::Streaming,
-      "the response stream ended without a definitive completion signal",
-    );
-    failure.partial_output_emitted = self.committed;
-    Some(failure)
-  }
-}
-
-/// Attribution every event emitted during one tool call carries.
-struct ToolAttribution {
+/// Attribution used while normalized provider deltas are received.
+struct StreamAttribution {
   turn_id: TurnId,
   session_id: SessionId,
   trace_id: TraceId,
@@ -1269,20 +1220,51 @@ struct ToolAttribution {
   model: ModelRef,
 }
 
-/// Forwards tool progress into the trace as `assistant_delta` chunks.
-struct ToolSink<'a> {
+/// Tees provider output to the durable trace at receipt time and to the surface
+/// only after the trace accepted it. The provider sink is infallible, so the
+/// first sink error is retained and cancellation asks the transport to stop.
+struct Collector<'a> {
+  progress: &'a mut dyn TurnProgress,
   trace: &'a mut dyn Trace,
-  attribution: ToolAttribution,
+  attribution: StreamAttribution,
+  cancel: CancelToken,
+  text: String,
+  calls: Vec<ToolCallBlock>,
+  committed: bool,
+  reasoning_index: u32,
+  text_index: u32,
+  reasoning_provenance: Option<ReasoningProvenance>,
+  assistant_introduced_by: Option<EventEnvelope>,
+  sink_error: Option<SinkError>,
 }
 
-impl ToolProgress for ToolSink<'_> {
-  fn emit(&mut self, chunk: &pi_rs_core::ToolChunk) {
-    // Infallible by contract: a tool's progress stream is transient, so a trace
-    // write that fails must not stop the tool. The durable result event is where
-    // failure is allowed to surface.
-    // Streaming tool output is transient by policy: it renders live and reaches the
-    // model only through the final result. Recording it as a delta keeps the trace
-    // able to replay what the user watched.
+impl<'a> Collector<'a> {
+  fn new(
+    progress: &'a mut dyn TurnProgress,
+    trace: &'a mut dyn Trace,
+    attribution: StreamAttribution,
+    cancel: CancelToken,
+  ) -> Self {
+    Self {
+      progress,
+      trace,
+      attribution,
+      cancel,
+      text: String::new(),
+      calls: Vec::new(),
+      committed: false,
+      reasoning_index: 0,
+      text_index: 0,
+      reasoning_provenance: None,
+      assistant_introduced_by: None,
+      sink_error: None,
+    }
+  }
+
+  fn trace_event(&mut self, event: AgentEvent) -> Option<EventEnvelope> {
+    if self.sink_error.is_some() {
+      return None;
+    }
     let mut meta = EventMeta::new(
       self.attribution.session_id.clone(),
       self.attribution.trace_id.clone(),
@@ -1290,16 +1272,88 @@ impl ToolProgress for ToolSink<'_> {
     meta.turn_id = Some(self.attribution.turn_id.clone());
     meta.model_epoch = Some(self.attribution.epoch);
     meta.model = Some(self.attribution.model.clone());
-    let mut envelope = EventEnvelope::new(
-      meta,
-      AgentEvent::AssistantDelta(AssistantDelta {
-        text: chunk.text.clone(),
-        // Chunk index is not counted here: tool chunks are transient output, and the
-        // authoritative text is the final result the model receives.
-        chunk_index: 0,
-      }),
-    );
-    let _ = self.trace.emit(&mut envelope);
+    let mut envelope = EventEnvelope::new(meta, event);
+    if let Err(error) = self.trace.emit(&mut envelope) {
+      self.sink_error = Some(error);
+      self.cancel.cancel();
+      return None;
+    }
+    Some(envelope)
+  }
+}
+
+impl pi_rs_core::ProviderEventSink for Collector<'_> {
+  fn emit(&mut self, event: &pi_rs_core::ProviderEvent) {
+    match event {
+      pi_rs_core::ProviderEvent::ReasoningDelta { text, provenance } => {
+        let traced = self.trace_event(AgentEvent::ReasoningDelta(ReasoningDelta {
+          text: text.clone(),
+          provenance: *provenance,
+          chunk_index: self.reasoning_index,
+        }));
+        if traced.is_some() {
+          self.reasoning_index = self.reasoning_index.saturating_add(1);
+          self.reasoning_provenance = Some(*provenance);
+          self.progress.on_reasoning(text, *provenance);
+        }
+      }
+      pi_rs_core::ProviderEvent::TextDelta(text) => {
+        let traced = self.trace_event(AgentEvent::AssistantDelta(AssistantDelta {
+          text: text.clone(),
+          chunk_index: self.text_index,
+        }));
+        if let Some(envelope) = traced {
+          self.text_index = self.text_index.saturating_add(1);
+          self.committed = true;
+          self.text.push_str(text);
+          if self.assistant_introduced_by.is_none() {
+            self.assistant_introduced_by = Some(envelope);
+          }
+          self.progress.on_text_delta(text);
+        }
+      }
+      pi_rs_core::ProviderEvent::ToolCall(call) => {
+        if self.sink_error.is_none() {
+          self.committed = true;
+          self.calls.push(call.clone());
+        }
+      }
+    }
+  }
+}
+
+/// A failure when the response was not a completion, `None` when it was.
+fn completion_failure(
+  usage: &pi_rs_core::CompletionUsage,
+  produced: bool,
+  committed: bool,
+) -> Option<ModelFailure> {
+  if usage.is_certain() {
+    return None;
+  }
+  let mut failure = ModelFailure::new(
+    if produced {
+      ModelFailureKind::Semantic
+    } else {
+      ModelFailureKind::Protocol
+    },
+    FailurePhase::Streaming,
+    "the response stream ended without a definitive completion signal",
+  );
+  failure.partial_output_emitted = committed;
+  Some(failure)
+}
+
+/// Tool chunks are transient surface output in this slice. The canonical trace
+/// records only the final reduced result under its tool lifecycle event.
+struct LiveToolSink<'a> {
+  progress: &'a mut dyn TurnProgress,
+  call: &'a ToolCallBlock,
+}
+
+impl ToolProgress for LiveToolSink<'_> {
+  fn emit(&mut self, chunk: &pi_rs_core::ToolChunk) {
+    self.progress.on_tool_progress(self.call, &chunk.text);
   }
 }
 
@@ -1435,6 +1489,8 @@ mod tests {
     /// Fail *every* request. `fail` is per-request-index and can run out, which
     /// cannot express a provider that is simply down.
     always: Option<ModelFailureKind>,
+    /// Emit a fully normalized scripted round, then report a transport failure.
+    fail_after_stream: Option<ModelFailureKind>,
   }
 
   impl Scripted {
@@ -1454,6 +1510,7 @@ mod tests {
         calls: Arc::new(Mutex::new(Vec::new())),
         unfinished: false,
         always: None,
+        fail_after_stream: None,
       }
     }
 
@@ -1465,6 +1522,11 @@ mod tests {
     /// Fail *every* request with `kind`, however often the loop retries.
     fn always_fails(mut self, kind: ModelFailureKind) -> Self {
       self.always = Some(kind);
+      self
+    }
+
+    fn fails_after_stream(mut self, kind: ModelFailureKind) -> Self {
+      self.fail_after_stream = Some(kind);
       self
     }
 
@@ -1569,6 +1631,13 @@ mod tests {
             ProviderEvent::ReasoningDelta { .. } => {}
           }
           sink.emit(event);
+        }
+        if let Some(kind) = self.fail_after_stream {
+          return Err(ModelFailure::new(
+            kind,
+            FailurePhase::Streaming,
+            "stream failed after decoded output",
+          ));
         }
         usage
       } else {
@@ -1688,6 +1757,83 @@ mod tests {
     assert_eq!(trace.events, 3, "session, epoch, then user event");
   }
 
+  struct FailingSecondDelta {
+    kinds: Vec<String>,
+    deltas: usize,
+  }
+
+  impl Trace for FailingSecondDelta {
+    fn emit(&mut self, envelope: &mut EventEnvelope) -> Result<(), SinkError> {
+      let kind = serde_json::to_value(&envelope.event)
+        .ok()
+        .and_then(|value| value["type"].as_str().map(str::to_string))
+        .unwrap_or_default();
+      if kind == "assistant_delta" {
+        self.deltas += 1;
+        if self.deltas == 2 {
+          return Err(SinkError("trace delta write failed".into()));
+        }
+      }
+      self.kinds.push(kind);
+      Ok(())
+    }
+  }
+
+  #[derive(Default)]
+  struct TextSpy(Vec<String>);
+
+  impl TurnProgress for TextSpy {
+    fn on_text_delta(&mut self, text: &str) {
+      self.0.push(text.to_string());
+    }
+  }
+
+  #[test]
+  fn provider_delta_sink_failure_is_retained_and_cancels_streaming() {
+    let provider = Scripted::new(
+      "two-deltas",
+      vec![vec![
+        ProviderEvent::TextDelta("first".into()),
+        ProviderEvent::TextDelta("second".into()),
+      ]],
+    );
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = FailingSecondDelta {
+      kinds: Vec::new(),
+      deltas: 0,
+    };
+    let mut progress = TextSpy::default();
+    let cancel = CancelToken::new();
+
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn("hello", &cancel, &mut progress)
+    .unwrap_err();
+
+    assert!(matches!(error, TurnError::Sink(message) if message.contains("delta write")));
+    assert!(cancel.is_cancelled());
+    assert_eq!(progress.0, vec!["first"]);
+    assert_eq!(trace.deltas, 2);
+    assert_eq!(
+      trace
+        .kinds
+        .iter()
+        .filter(|kind| kind.as_str() == "assistant_delta")
+        .count(),
+      1
+    );
+  }
+
   #[test]
   fn a_plain_answer_emits_the_canonical_turn_shape() {
     let provider = Scripted::new("capable", vec![text("done")]);
@@ -1737,11 +1883,12 @@ mod tests {
       .iter()
       .position(|k| k == "model_request_started")
       .unwrap();
+    let delta = kinds.iter().position(|k| k == "assistant_delta").unwrap();
     let completed = kinds
       .iter()
       .position(|k| k == "model_request_completed")
       .unwrap();
-    assert!(started < completed);
+    assert!(started < delta && delta < completed);
     // The turn owns its events, which is what makes a per-turn query possible.
     assert!(trace.0.lock().unwrap().iter().all(|(turn, kind, _)| {
       matches!(kind.as_str(), "session_started" | "model_epoch_started") || turn.is_some()
@@ -1874,6 +2021,11 @@ mod tests {
     assert_eq!(trace.count("tool_requested"), 1);
     assert_eq!(trace.count("tool_started"), 1);
     assert_eq!(trace.count("tool_completed"), 1);
+    assert_eq!(
+      trace.count("assistant_delta"),
+      1,
+      "tool progress must not masquerade as assistant output"
+    );
 
     // And in order, which is what a replay needs to reconstruct the call honestly.
     let kinds = trace.kinds();
@@ -1882,6 +2034,91 @@ mod tests {
       at("tool_requested") < at("tool_started") && at("tool_started") < at("tool_completed"),
       "{kinds:?}"
     );
+  }
+
+  struct FailingToolStart;
+
+  impl Trace for FailingToolStart {
+    fn emit(&mut self, envelope: &mut EventEnvelope) -> Result<(), SinkError> {
+      if matches!(envelope.event, AgentEvent::ToolStarted(_)) {
+        return Err(SinkError("cannot persist tool start".into()));
+      }
+      Ok(())
+    }
+  }
+
+  #[test]
+  fn tool_does_not_run_when_its_start_cannot_be_persisted() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![Box::new(Spy(Arc::clone(&seen)))]);
+    let provider = Scripted::new(
+      "tool-start-failure",
+      vec![tool_call("spy", serde_json::json!({}))],
+    );
+    let mut trace = FailingToolStart;
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn("go", &CancelToken::new(), &mut SilentProgress)
+    .unwrap_err();
+
+    assert!(matches!(error, TurnError::Sink(message) if message.contains("tool start")));
+    assert!(seen.lock().unwrap().is_empty());
+  }
+
+  #[test]
+  fn unknown_and_invalid_calls_never_claim_they_started() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![Box::new(Spy(Arc::clone(&seen)))]);
+    let provider = Scripted::new(
+      "bad-calls",
+      vec![
+        vec![
+          ProviderEvent::ToolCall(ToolCallBlock {
+            id: pi_rs_core::ToolCallId::from_string("unknown-call"),
+            name: "missing".into(),
+            arguments: serde_json::json!({}),
+          }),
+          ProviderEvent::ToolCall(ToolCallBlock {
+            id: pi_rs_core::ToolCallId::from_string("invalid-call"),
+            name: "spy".into(),
+            arguments: serde_json::json!("not an object"),
+          }),
+        ],
+        text("done"),
+      ],
+    );
+    let mut trace = Recorder::default();
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn("go", &CancelToken::new(), &mut SilentProgress)
+    .unwrap();
+
+    assert!(seen.lock().unwrap().is_empty());
+    assert_eq!(trace.count("tool_requested"), 2);
+    assert_eq!(trace.count("tool_failed"), 2);
+    assert_eq!(trace.count("tool_started"), 0);
   }
 
   #[test]
@@ -2057,6 +2294,72 @@ mod tests {
       serde_json::Value::Null,
       "no finish reason was ever observed"
     );
+  }
+
+  #[test]
+  fn decoded_call_on_transport_failure_is_closed_without_execution() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![Box::new(Spy(Arc::clone(&seen)))]);
+    let provider = Scripted::new(
+      "broken-after-call",
+      vec![tool_call("spy", serde_json::json!({"value": 1}))],
+    )
+    .fails_after_stream(ModelFailureKind::Transport);
+    let mut trace = Recorder::default();
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn("go", &CancelToken::new(), &mut SilentProgress)
+    .unwrap_err();
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::Transport));
+    assert!(seen.lock().unwrap().is_empty());
+    assert_eq!(trace.count("tool_requested"), 1);
+    assert_eq!(trace.count("tool_failed"), 1);
+    assert_eq!(trace.count("tool_started"), 0);
+  }
+
+  #[test]
+  fn decoded_call_on_uncertain_completion_is_closed_without_execution() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![Box::new(Spy(Arc::clone(&seen)))]);
+    let mut provider = Scripted::new(
+      "uncertain-call",
+      vec![tool_call("spy", serde_json::json!({"value": 1}))],
+    );
+    provider.unfinished = true;
+    let mut trace = Recorder::default();
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn("go", &CancelToken::new(), &mut SilentProgress)
+    .unwrap_err();
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::Protocol));
+    assert!(seen.lock().unwrap().is_empty());
+    assert_eq!(trace.count("tool_requested"), 1);
+    assert_eq!(trace.count("tool_failed"), 1);
+    assert_eq!(trace.count("tool_started"), 0);
   }
 
   #[test]
