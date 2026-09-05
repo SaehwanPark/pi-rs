@@ -1,0 +1,16 @@
+[package]
+name = "pi-rs-runtime"
+description = "Runtime orchestration for pi-rs: turn loop, event production, context policy, retries, failover, and tool execution."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+pi-rs-core.workspace = true
+pi-rs-store.workspace = true
+pi-rs-provider.workspace = true
+pi-rs-tools.workspace = true
+serde_json.workspace = true

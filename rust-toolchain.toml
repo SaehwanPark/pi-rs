@@ -1,0 +1,11 @@
+# Pinned toolchain for reproducible builds.
+#
+# The exact verified toolchain for this repository is `rustc 1.98.1
+# (48a229cea 2026-09-01)` with `cargo 1.98.1 (797e8a9bc 2026-08-05)`.
+# The channel is expressed as `stable` so that hosts with only a `stable`
+# install resolve the pinned version without a second toolchain download.
+# `rust-version` in the workspace `Cargo.toml` is the MSRV contract.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

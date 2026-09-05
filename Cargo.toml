@@ -1,6 +1,58 @@
-[package]
-name = "pi-rs"
+[workspace]
+resolver = "3"
+members = [
+  "crates/pi-rs-core",
+  "crates/pi-rs-store",
+  "crates/pi-rs-provider",
+  "crates/pi-rs-tools",
+  "crates/pi-rs-runtime",
+  "crates/pi-rs-tui",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/saehwan/pi-rs"
+authors = ["pi-rs contributors"]
+
+[workspace.dependencies]
+pi-rs-core = { path = "crates/pi-rs-core" }
+pi-rs-store = { path = "crates/pi-rs-store" }
+pi-rs-provider = { path = "crates/pi-rs-provider" }
+pi-rs-tools = { path = "crates/pi-rs-tools" }
+pi-rs-runtime = { path = "crates/pi-rs-runtime" }
+pi-rs-tui = { path = "crates/pi-rs-tui" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+getrandom = "0.3"
+ureq = { version = "2.10", default-features = false, features = ["tls", "json"] }
+crossterm = "0.28"
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+
+[package]
+name = "pi-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dependencies]
+pi-rs-core.workspace = true
+pi-rs-store.workspace = true
+pi-rs-provider.workspace = true
+pi-rs-tools.workspace = true
+pi-rs-runtime.workspace = true
+pi-rs-tui.workspace = true
+serde_json.workspace = true
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+panic = "abort"
+strip = true

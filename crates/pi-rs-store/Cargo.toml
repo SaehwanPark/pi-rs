@@ -1,0 +1,14 @@
+[package]
+name = "pi-rs-store"
+description = "Durable session records, JSONL event journals, checkpoints, content-addressed blobs, and bounded trace retention for pi-rs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+pi-rs-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
