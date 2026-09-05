@@ -40,6 +40,28 @@ Read these before substantial changes:
 14. Keep compatibility behavior covered by fixtures.
 15. Avoid adding dependencies without a concrete reason.
 
+## Orchestrator Guidelines
+
+- You are the primary orchestrator running on a model from internal or external providers. When you are a model from an external provider, you should be careful about the usage limit. See the External Provider Usage Limits section below.
+- Decompose complex implementation tasks, difficult refactors, and test generation into bounded subtasks.
+- Spawn `worker` (see below for which models to use) using the `subagent` tool for deep code generation and verification.
+- Run multiple independent workers in parallel where feasible.
+- Synthesize worker outcomes, review diffs, and report final status to the user.
+- If code is reviewed before opening PR, skip the review step and open the PR directly.
+
+## Available AI Subscription Identification
+
+- Orchestrator can spawn subagents (workers, reviewers, etc.) from the external providers `openai-codex` and Antigravity (both from subscription) as well as internal provider `local-vulcan`.
+- Subagent models to use: `gpt-5.6-luna` from `openai-codex` provider (supported by this harness), Gemini 3.8 Fresh from Antigravity (note: this model should be used by `agy` headless mode), or `qwen3.8-flash` from `local-vulcan` internal provider (supported by this harness).
+- Subagent models priority (in spawning): `gpt-5.6-luna`, Gemini 3.8 Fresh, `qwen3.8-flash`. (higher priority = earlier in the list)
+
+## External Provider Usage Limits
+
+- External providers set 5-hour and weekly usage limits.
+- Therefore, you should carefully monitor them. When limits are approaching, you should gracefully wrap up ongoing tasks or wait until the limit is reset.
+- Refer to [codexbar document](docs/codexbar.md) for details.
+- Note internal providers are limitless because they run locally on this machine.
+
 ## Coding style
 
 Use idiomatic stable Rust.
