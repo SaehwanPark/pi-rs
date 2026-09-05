@@ -64,9 +64,9 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### CLI and TUI
 
-- [ ] Implement executable entry point.
+- [x] Implement executable entry point (`pi-rs run` one-shot headless turn).
 - [ ] Implement minimal terminal editor.
-- [ ] Implement streamed assistant rendering.
+- [x] Implement streamed assistant rendering for the one-shot command.
 - [ ] Implement cancel/interrupt.
 - [ ] Implement compact status line.
 - [ ] Implement syntax-aware command parsing.
@@ -115,6 +115,11 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [x] Gate mutating tools behind policy and approval.
 
 ### Sessions
+
+> The one-shot `pi-rs run --config <file> --cwd <workspace> --prompt <text>`
+> composition root now drives the provider/tool loop and writes attributed
+> messages plus the store-sequenced canonical trace. Interactive resume UX
+> remains outside this slice.
 
 - [x] Persist user/assistant/tool messages.
 - [x] Resume latest session.

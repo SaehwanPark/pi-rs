@@ -6,7 +6,7 @@ this document records **what exists, what is proven, and what is deliberately no
 Verification for everything marked *done* below:
 
 ```
-cargo test --workspace      # 320 tests
+cargo test --workspace      # 332 tests
 cargo clippy --workspace --all-targets --all-features   # 0 warnings
 cargo fmt --all -- --check
 cargo doc --workspace --no-deps      # 0 warnings
@@ -20,9 +20,24 @@ cargo doc --workspace --no-deps      # 0 warnings
 | Durability | `pi-rs-store` | done | 66 |
 | Model I/O | `pi-rs-provider` | done, verified against a real endpoint | 70 |
 | Native tools | `pi-rs-tools` | done | 87 |
-| Turn loop + recovery | `pi-rs-runtime` | **done in this slice** | 21 |
+| Turn loop + recovery | `pi-rs-runtime` | done | 23 |
 | Surface | `pi-rs-tui` | not started | – |
-| Composition root | `pi-rs` binary | not started | – |
+| Composition root | `pi-rs` binary | one-shot command done | 10 |
+
+## What the one-shot command added
+
+`pi-rs run --config <file> --cwd <workspace> --prompt <text>` composes the
+configured primary `OpenAiCompat` provider, profile context policy,
+workspace-confined built-ins, durable store session, and `TurnLoop`. It streams
+assistant text to stdout and sends provenance-labeled reasoning, tool activity,
+diagnostics, and failures to stderr. Input and endpoint validation complete
+before the first provider request, and mutating tools stay denied unless
+`auto_approve_mutating` is explicitly true.
+
+`StoreTrace` is the runtime/store bridge: the store stamps the sole durable event
+sequence, and `AttributedMessage` binds semantic session messages to their real
+introducing event, model, and epoch. The canonical trace and resumable session
+projection remain separate files.
 
 ## What the runtime slice added
 
@@ -99,8 +114,9 @@ generate retries forever.
 ## Not done yet
 
 1. `pi-rs-tui` — ratatui transcript rendering.
-2. Binary composition root — config → provider → runtime → surface.
-3. End-to-end agent loop against the local endpoint (single completions are verified;
+2. Interactive binary composition root/TUI (the headless one-shot path is complete).
+3. End-to-end agent loop against the real local endpoint (the one-shot tool loop is
+   covered against a fake OpenAI server; single completions are verified live;
    tool round-trips through the real provider are not).
 4. Startup benchmarks with full composition root (`bench/startup.sh` harness implemented).
 5. Phase 6 Pi compatibility fixtures.
@@ -113,5 +129,6 @@ model `qwen3.8-flash`, `reasoning_content` exposed):
 * SSE parsing, `reasoning_content` → `Declared` provenance, finish reason `stop`.
 * Tool schema serialization and request body shape.
 
-The runtime's tool loop is covered by scripted-provider tests only. It has not yet been
-exercised against a live model.
+The runtime's tool loop is covered by scripted-provider unit tests and the one-shot
+command's fake OpenAI server integration test. It has not yet been exercised against a
+live model.

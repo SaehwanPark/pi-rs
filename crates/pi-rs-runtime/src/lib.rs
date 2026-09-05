@@ -28,9 +28,11 @@
 #![allow(clippy::result_large_err)]
 
 pub mod failover;
+pub mod store_trace;
 pub mod turn;
 
 pub use failover::{FailoverPolicy, Recovery};
+pub use store_trace::StoreTrace;
 pub use turn::{
   MAX_MODEL_REQUESTS_PER_TURN, SilentProgress, Trace, TraceSink, TurnError, TurnLoop, TurnProgress,
   TurnReport,

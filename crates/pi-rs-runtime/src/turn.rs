@@ -22,14 +22,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use pi_rs_core::{
-  AgentEvent, AssistantDelta, BlobRef, CancelToken, CapabilityGap, ContentBlock, ContextAction,
-  ContextPolicy, ContextReduced, ContextState, Diagnostic, DiagnosticLevel, EpochReason,
-  EventEnvelope, EventMeta, EventSink, FailurePhase, Message, ModelCapabilities, ModelEpochStarted,
-  ModelFailover, ModelFailure, ModelFailureKind, ModelProvider, ModelRef, ModelRequest,
-  ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningProvenance, ReductionReason,
-  Role, SessionEndReason, SessionEnded, SessionId, SessionStarted, SinkError, ToolCallBlock,
-  ToolCompleted, ToolExecutionState, ToolFailed, ToolProgress, ToolRequested, ToolResultBlock,
-  ToolStarted, ToolUnknown, TraceId, TurnCompleted, TurnId, TurnStatus, UserMessage,
+  AgentEvent, AssistantDelta, AttributedMessage, BlobRef, CancelToken, CapabilityGap, ContentBlock,
+  ContextAction, ContextPolicy, ContextReduced, ContextState, Diagnostic, DiagnosticLevel,
+  EpochReason, EventEnvelope, EventMeta, EventSink, FailurePhase, Message, ModelCapabilities,
+  ModelEpochStarted, ModelFailover, ModelFailure, ModelFailureKind, ModelProvider, ModelRef,
+  ModelRequest, ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta,
+  ReasoningProvenance, ReductionReason, Role, SessionEndReason, SessionEnded, SessionId,
+  SessionStarted, SinkError, ThinkingLevel, ToolCallBlock, ToolCompleted, ToolExecutionState,
+  ToolFailed, ToolProgress, ToolRequested, ToolResultBlock, ToolStarted, ToolUnknown, TraceId,
+  TurnCompleted, TurnId, TurnStatus, UserMessage,
 };
 use pi_rs_tools::{Executed, ToolRegistry};
 
@@ -62,8 +63,15 @@ impl TurnProgress for SilentProgress {}
 /// test, or both. Sequence numbers are assigned by the store, so the loop leaves
 /// `meta.seq` unset.
 pub trait Trace: Send {
-  /// Deliver one event.
-  fn emit(&mut self, envelope: &EventEnvelope) -> Result<(), SinkError>;
+  /// Deliver one event. A durable implementation stamps its assigned sequence
+  /// back into the envelope.
+  fn emit(&mut self, envelope: &mut EventEnvelope) -> Result<(), SinkError>;
+
+  /// Persist one semantic message against the event that introduced it.
+  fn record_message(&mut self, attributed: &AttributedMessage) -> Result<(), SinkError> {
+    let _ = attributed;
+    Ok(())
+  }
 
   /// Persist model-visible bytes so a reduction can be recovered.
   ///
@@ -82,8 +90,12 @@ pub trait Trace: Send {
 }
 
 impl<T: Trace + ?Sized> Trace for &mut T {
-  fn emit(&mut self, envelope: &EventEnvelope) -> Result<(), SinkError> {
+  fn emit(&mut self, envelope: &mut EventEnvelope) -> Result<(), SinkError> {
     <T as Trace>::emit(self, envelope)
+  }
+
+  fn record_message(&mut self, attributed: &AttributedMessage) -> Result<(), SinkError> {
+    <T as Trace>::record_message(self, attributed)
   }
 
   fn put_payload(&mut self, bytes: &[u8]) -> Result<Option<BlobRef>, SinkError> {
@@ -102,7 +114,7 @@ impl<T: Trace + ?Sized> Trace for &mut T {
 pub struct TraceSink<S: EventSink>(pub S);
 
 impl<S: EventSink> Trace for TraceSink<S> {
-  fn emit(&mut self, envelope: &EventEnvelope) -> Result<(), SinkError> {
+  fn emit(&mut self, envelope: &mut EventEnvelope) -> Result<(), SinkError> {
     self.0.emit(envelope)
   }
 
@@ -214,6 +226,7 @@ struct Response {
   epoch: u32,
   text: Option<String>,
   calls: Vec<ToolCallBlock>,
+  introduced_by: EventEnvelope,
 }
 
 /// Drives turns against one primary model, with an optional backup.
@@ -232,6 +245,8 @@ pub struct TurnLoop<'a> {
   epochs: Vec<Epoch>,
   messages: Vec<Message>,
   system: Option<String>,
+  working_dir: String,
+  thinking: ThinkingLevel,
   max_requests: usize,
   /// Model requests spent by the current turn, retries and takeovers included.
   ///
@@ -273,6 +288,8 @@ impl<'a> TurnLoop<'a> {
       epochs: vec![epoch],
       messages: Vec::new(),
       system: None,
+      working_dir: String::new(),
+      thinking: ThinkingLevel::default(),
       max_requests: MAX_MODEL_REQUESTS_PER_TURN,
       requests: AtomicUsize::new(0),
       session_started: false,
@@ -301,6 +318,18 @@ impl<'a> TurnLoop<'a> {
   /// Set the system prompt.
   pub fn with_system(mut self, system: impl Into<String>) -> Self {
     self.system = Some(system.into());
+    self
+  }
+
+  /// Set the canonical workspace recorded when the session starts.
+  pub fn with_working_dir(mut self, working_dir: impl Into<String>) -> Self {
+    self.working_dir = working_dir.into();
+    self
+  }
+
+  /// Set the configured reasoning effort for provider requests.
+  pub fn with_thinking(mut self, thinking: ThinkingLevel) -> Self {
+    self.thinking = thinking;
     self
   }
 
@@ -347,14 +376,16 @@ impl<'a> TurnLoop<'a> {
     self.requests.store(0, Ordering::SeqCst);
 
     self.ensure_session_started()?;
-    self.emit(
+    let user = Message::user(input);
+    self.emit_message(
       Some(turn_id.clone()),
       AgentEvent::UserMessage(UserMessage {
         text: input.to_string(),
         attachments: 0,
       }),
+      &user,
     )?;
-    self.messages.push(Message::user(input));
+    self.messages.push(user);
     progress.on_user_message(input);
 
     // The loop is bounded by *requests*, not rounds: a turn that keeps asking for
@@ -398,7 +429,12 @@ impl<'a> TurnLoop<'a> {
         }));
       }
       if !blocks.is_empty() {
-        self.messages.push(Message::new(Role::Assistant, blocks));
+        let message = Message::new(Role::Assistant, blocks);
+        self.trace.record_message(&AttributedMessage {
+          envelope: response.introduced_by.clone(),
+          message: message.clone(),
+        })?;
+        self.messages.push(message);
       }
 
       if response.calls.is_empty() {
@@ -407,11 +443,7 @@ impl<'a> TurnLoop<'a> {
       }
 
       report.tool_calls += response.calls.len() as u32;
-      let results = self.execute_calls(turn_id.clone(), &response.calls, cancel, progress)?;
-      self.messages.push(Message::new(
-        Role::Tool,
-        results.into_iter().map(ContentBlock::ToolResult).collect(),
-      ));
+      self.execute_calls(turn_id.clone(), &response.calls, cancel, progress)?;
     }
 
     // Out of requests, not out of options: the distinction belongs in the trace.
@@ -460,26 +492,32 @@ impl<'a> TurnLoop<'a> {
     self.emit(
       None,
       AgentEvent::SessionStarted(SessionStarted {
-        working_dir: String::new(),
+        working_dir: self.working_dir.clone(),
         model: epoch.model.clone(),
         capabilities: epoch.capabilities.clone(),
         resumed: false,
       }),
     )?;
-    self.emit(
-      None,
-      AgentEvent::ModelEpochStarted(ModelEpochStarted {
-        epoch: epoch.index,
-        model: epoch.model,
-        reason: epoch.reason,
-        capabilities: epoch.capabilities,
-      }),
-    )
+    self
+      .emit(
+        None,
+        AgentEvent::ModelEpochStarted(ModelEpochStarted {
+          epoch: epoch.index,
+          model: epoch.model,
+          reason: epoch.reason,
+          capabilities: epoch.capabilities,
+        }),
+      )
+      .map(|_| ())
   }
 }
 
 impl<'a> TurnLoop<'a> {
-  fn emit(&mut self, turn_id: Option<TurnId>, event: AgentEvent) -> Result<(), TurnError> {
+  fn emit(
+    &mut self,
+    turn_id: Option<TurnId>,
+    event: AgentEvent,
+  ) -> Result<EventEnvelope, TurnError> {
     let epoch = &self.epochs[self.epochs.len() - 1];
     let mut meta = EventMeta::new(self.session_id.clone(), self.trace_id.clone());
     meta.model_epoch = Some(epoch.index);
@@ -487,8 +525,23 @@ impl<'a> TurnLoop<'a> {
     if let Some(turn_id) = turn_id {
       meta.turn_id = Some(turn_id);
     }
-    self.trace.emit(&EventEnvelope::new(meta, event))?;
-    Ok(())
+    let mut envelope = EventEnvelope::new(meta, event);
+    self.trace.emit(&mut envelope)?;
+    Ok(envelope)
+  }
+
+  fn emit_message(
+    &mut self,
+    turn_id: Option<TurnId>,
+    event: AgentEvent,
+    message: &Message,
+  ) -> Result<EventEnvelope, TurnError> {
+    let envelope = self.emit(turn_id, event)?;
+    self.trace.record_message(&AttributedMessage {
+      envelope: envelope.clone(),
+      message: message.clone(),
+    })?;
+    Ok(envelope)
   }
 
   fn diagnostic(
@@ -497,13 +550,15 @@ impl<'a> TurnLoop<'a> {
     level: DiagnosticLevel,
     message: impl Into<String>,
   ) -> Result<(), TurnError> {
-    self.emit(
-      turn_id,
-      AgentEvent::Diagnostic(Diagnostic {
-        level,
-        message: message.into(),
-      }),
-    )
+    self
+      .emit(
+        turn_id,
+        AgentEvent::Diagnostic(Diagnostic {
+          level,
+          message: message.into(),
+        }),
+      )
+      .map(|_| ())
   }
 
   fn finish(
@@ -575,6 +630,9 @@ impl<'a> TurnLoop<'a> {
       let outcome = self.provider().stream(&request, &mut collector, cancel);
       let duration_ms = elapsed_ms(clock);
       let provenance = collector.reasoning_provenance;
+      let assistant_introduced_by = self
+        .record_provider_output(turn_id.clone(), &collector)
+        .map_err(TurnFailure::from)?;
 
       let failure = match outcome {
         // Transport said done. Whether the *model* finished is a separate
@@ -589,7 +647,7 @@ impl<'a> TurnLoop<'a> {
             None => {
               self.measured_input_tokens = usage.input_tokens;
               let tool_calls = collector.calls.len() as u32;
-              self
+              let introduced_by = self
                 .emit(
                   Some(turn_id.clone()),
                   AgentEvent::ModelRequestCompleted(ModelRequestCompleted {
@@ -609,6 +667,7 @@ impl<'a> TurnLoop<'a> {
                 epoch,
                 text: (!text.is_empty()).then_some(text),
                 calls,
+                introduced_by: assistant_introduced_by.unwrap_or(introduced_by),
               });
             }
           }
@@ -864,12 +923,45 @@ impl<'a> TurnLoop<'a> {
     } else {
       Vec::new()
     };
-    let mut request =
-      ModelRequest::new(self.active_model(), capabilities, self.messages.clone()).with_tools(tools);
+    let mut request = ModelRequest::new(self.active_model(), capabilities, self.messages.clone())
+      .with_tools(tools)
+      .with_thinking(self.thinking);
     if let Some(system) = self.system.clone() {
       request = request.with_system(system);
     }
     Ok(request)
+  }
+
+  /// Persist normalized provider deltas inside their request span.
+  fn record_provider_output(
+    &mut self,
+    turn_id: TurnId,
+    collector: &Collector<'_>,
+  ) -> Result<Option<EventEnvelope>, TurnError> {
+    for (chunk_index, (text, provenance)) in collector.reasoning_chunks.iter().enumerate() {
+      self.emit(
+        Some(turn_id.clone()),
+        AgentEvent::ReasoningDelta(ReasoningDelta {
+          text: text.clone(),
+          provenance: *provenance,
+          chunk_index: chunk_index as u32,
+        }),
+      )?;
+    }
+    let mut introduced_by = None;
+    for (chunk_index, text) in collector.text_chunks.iter().enumerate() {
+      let envelope = self.emit(
+        Some(turn_id.clone()),
+        AgentEvent::AssistantDelta(AssistantDelta {
+          text: text.clone(),
+          chunk_index: chunk_index as u32,
+        }),
+      )?;
+      if introduced_by.is_none() {
+        introduced_by = Some(envelope);
+      }
+    }
+    Ok(introduced_by)
   }
 
   /// Execute the calls one request asked for, in the order it asked.
@@ -879,8 +971,7 @@ impl<'a> TurnLoop<'a> {
     calls: &[ToolCallBlock],
     cancel: &CancelToken,
     progress: &mut dyn TurnProgress,
-  ) -> Result<Vec<ToolResultBlock>, TurnError> {
-    let mut results = Vec::with_capacity(calls.len());
+  ) -> Result<(), TurnError> {
     for call in calls {
       let metadata = self.tools.metadata_for(&call.name);
       let read_only = metadata
@@ -901,7 +992,16 @@ impl<'a> TurnLoop<'a> {
       if cancel.is_cancelled() {
         // A call the model asked for but that never ran is still recorded: it is
         // part of what the model decided.
-        self.emit(
+        let block = ToolResultBlock {
+          id: call.id.clone(),
+          name: call.name.clone(),
+          state: ToolExecutionState::Requested,
+          text: "not executed: the turn was cancelled".to_string(),
+          is_error: true,
+          reduced: false,
+        };
+        let message = Message::new(Role::Tool, vec![ContentBlock::ToolResult(block)]);
+        self.emit_message(
           Some(turn_id.clone()),
           AgentEvent::ToolFailed(ToolFailed {
             call_id: call.id.clone(),
@@ -910,15 +1010,9 @@ impl<'a> TurnLoop<'a> {
             duration_ms: 0,
             status: None,
           }),
+          &message,
         )?;
-        results.push(ToolResultBlock {
-          id: call.id.clone(),
-          name: call.name.clone(),
-          state: ToolExecutionState::Requested,
-          text: "not executed: the turn was cancelled".to_string(),
-          is_error: true,
-          reduced: false,
-        });
+        self.messages.push(message);
         break;
       }
 
@@ -956,9 +1050,12 @@ impl<'a> TurnLoop<'a> {
       };
       let block = self.record_tool_outcome(turn_id.clone(), call, &executed.0, executed.1)?;
       progress.on_tool_finished(call, &executed.0);
-      results.push(block);
+      self.messages.push(Message::new(
+        Role::Tool,
+        vec![ContentBlock::ToolResult(block)],
+      ));
     }
-    Ok(results)
+    Ok(())
   }
 
   /// Turn one executed call into its session block and its terminal event.
@@ -1030,16 +1127,21 @@ impl<'a> TurnLoop<'a> {
         })
       }
     };
-    self.emit(Some(turn_id.clone()), event)?;
-
-    Ok(ToolResultBlock {
+    let block = ToolResultBlock {
       id: call.id.clone(),
       name: call.name.clone(),
       state: executed.state,
       text,
       is_error: outcome.is_error,
       reduced,
-    })
+    };
+    self.emit_message(
+      Some(turn_id.clone()),
+      event,
+      &Message::new(Role::Tool, vec![ContentBlock::ToolResult(block.clone())]),
+    )?;
+
+    Ok(block)
   }
 }
 
@@ -1080,6 +1182,8 @@ impl From<TurnError> for TurnFailure {
 struct Collector<'p> {
   progress: &'p mut dyn TurnProgress,
   text: String,
+  text_chunks: Vec<String>,
+  reasoning_chunks: Vec<(String, ReasoningProvenance)>,
   calls: Vec<ToolCallBlock>,
   committed: bool,
   reasoning_provenance: Option<ReasoningProvenance>,
@@ -1090,6 +1194,8 @@ impl<'p> Collector<'p> {
     Self {
       progress,
       text: String::new(),
+      text_chunks: Vec::new(),
+      reasoning_chunks: Vec::new(),
       calls: Vec::new(),
       committed: false,
       reasoning_provenance: None,
@@ -1104,6 +1210,7 @@ impl<'p> pi_rs_core::ProviderEventSink for Collector<'p> {
         // Provenance is carried, not collapsed: a provider's own summary and a
         // reconstructed rationale must remain distinguishable forever.
         self.reasoning_provenance = Some(*provenance);
+        self.reasoning_chunks.push((text.clone(), *provenance));
         self.progress.on_reasoning(text, *provenance);
       }
       pi_rs_core::ProviderEvent::TextDelta(text) => {
@@ -1111,6 +1218,7 @@ impl<'p> pi_rs_core::ProviderEventSink for Collector<'p> {
         // committed response is never restarted.
         self.committed = true;
         self.text.push_str(text);
+        self.text_chunks.push(text.clone());
         self.progress.on_text_delta(text);
       }
       pi_rs_core::ProviderEvent::ToolCall(call) => {
@@ -1182,7 +1290,7 @@ impl ToolProgress for ToolSink<'_> {
     meta.turn_id = Some(self.attribution.turn_id.clone());
     meta.model_epoch = Some(self.attribution.epoch);
     meta.model = Some(self.attribution.model.clone());
-    let _ = self.trace.emit(&EventEnvelope::new(
+    let mut envelope = EventEnvelope::new(
       meta,
       AgentEvent::AssistantDelta(AssistantDelta {
         text: chunk.text.clone(),
@@ -1190,7 +1298,8 @@ impl ToolProgress for ToolSink<'_> {
         // authoritative text is the final result the model receives.
         chunk_index: 0,
       }),
-    ));
+    );
+    let _ = self.trace.emit(&mut envelope);
   }
 }
 
@@ -1286,7 +1395,7 @@ mod tests {
   }
 
   impl Trace for Recorder {
-    fn emit(&mut self, envelope: &EventEnvelope) -> Result<(), SinkError> {
+    fn emit(&mut self, envelope: &mut EventEnvelope) -> Result<(), SinkError> {
       // `AgentEvent` is internally tagged, so the discriminator is the `type`
       // field rather than a wrapper key. Reading any other key is what produced
       // payload field names instead of event names.
@@ -1534,6 +1643,49 @@ mod tests {
       registry.register(tool);
     }
     registry
+  }
+
+  struct FailingMessageSink {
+    events: usize,
+  }
+
+  impl Trace for FailingMessageSink {
+    fn emit(&mut self, _envelope: &mut EventEnvelope) -> Result<(), SinkError> {
+      self.events += 1;
+      Ok(())
+    }
+
+    fn record_message(&mut self, _attributed: &AttributedMessage) -> Result<(), SinkError> {
+      Err(SinkError("session log is unavailable".into()))
+    }
+  }
+
+  #[test]
+  fn a_message_sink_failure_stops_before_the_provider_request() {
+    let provider = Scripted::new("unused", vec![text("must not run")]);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = FailingMessageSink { events: 0 };
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn("hello", &CancelToken::new(), &mut SilentProgress)
+    .unwrap_err();
+
+    assert!(matches!(error, TurnError::Sink(message) if message.contains("session log")));
+    assert!(
+      provider.requests().is_empty(),
+      "sink failure must be terminal"
+    );
+    assert_eq!(trace.events, 3, "session, epoch, then user event");
   }
 
   #[test]
