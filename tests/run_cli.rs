@@ -438,7 +438,7 @@ fn invalid_workspace_is_rejected_before_any_provider_request() {
   );
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn non_utf8_workspace_is_rejected_before_any_provider_request() {
   use std::{ffi::OsString, os::unix::ffi::OsStringExt};
