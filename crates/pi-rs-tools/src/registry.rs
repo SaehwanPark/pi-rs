@@ -288,8 +288,8 @@ impl ToolRegistry {
 
   /// Execute one call and report the exact execution-start boundary.
   ///
-  /// The observer runs after policy, argument, and approval checks but before
-  /// tool code. If durable recording fails, the tool is not invoked.
+  /// The observer runs after policy, argument, preflight, and approval checks
+  /// but before tool code. If durable recording fails, the tool is not invoked.
   pub fn execute_observed(
     &self,
     request: &ToolRequest,
@@ -372,6 +372,9 @@ impl ToolRegistry {
       validate_arguments(&metadata, &request.arguments, &tool.arguments_schema())
     {
       return Ok(Executed::refused(request.clone(), message));
+    }
+    if let Err(error) = tool.preflight(request) {
+      return Ok(Executed::refused(request.clone(), error.message));
     }
     if !metadata.read_only {
       // `Ask` refuses here as well: nothing in this type can deliver a prompt, so

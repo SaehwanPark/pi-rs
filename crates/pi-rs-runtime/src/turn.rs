@@ -1103,12 +1103,14 @@ impl<'a> TurnLoop<'a> {
     let outcome = &executed.outcome;
     let text = outcome.text.clone();
     let mut reduced = outcome.reduced;
+    let mut recovery_blob = None;
 
     if let Some(full) = executed.full_output.as_ref() {
       // Reduction already happened in the registry. Here the full bytes become
       // recoverable, and the event records that the model saw a summary.
       if let Some(blob) = self.trace.put_payload(full)? {
         reduced = true;
+        recovery_blob = Some(blob.clone());
         self.emit(
           Some(turn_id.clone()),
           AgentEvent::ContextReduced(ContextReduced {
@@ -1139,7 +1141,7 @@ impl<'a> TurnLoop<'a> {
         duration_ms,
         status: outcome.status,
         reduced,
-        blob: None,
+        blob: recovery_blob,
         visible_bytes: text.len() as u64,
       }),
       ToolExecutionState::Failed => AgentEvent::ToolFailed(ToolFailed {
@@ -1294,6 +1296,7 @@ impl pi_rs_core::ProviderEventSink for Collector<'_> {
         if traced.is_some() {
           self.reasoning_index = self.reasoning_index.saturating_add(1);
           self.reasoning_provenance = Some(*provenance);
+          self.committed = true;
           self.progress.on_reasoning(text, *provenance);
         }
       }
@@ -1402,10 +1405,11 @@ mod tests {
   use super::*;
   use std::sync::{Arc, Mutex};
 
+  use crate::StoreTrace;
   use pi_rs_core::Tool;
   use pi_rs_core::{
-    CompletionUsage, ProviderEvent, ProviderEventSink, ThinkingLevel, ToolChunk, ToolMetadata,
-    ToolOutcome, ToolRequest,
+    CompletionUsage, ProviderEvent, ProviderEventSink, SessionHeader, ThinkingLevel, ToolChunk,
+    ToolMetadata, ToolOutcome, ToolPolicy, ToolRequest,
   };
   use pi_rs_tools::Workspace;
 
@@ -1960,6 +1964,52 @@ mod tests {
     }
   }
 
+  #[test]
+  fn reasoning_only_output_on_failure_is_committed_without_recovery() {
+    let primary = Scripted::new(
+      "reasoning-fails",
+      vec![vec![ProviderEvent::ReasoningDelta {
+        text: "already shown".into(),
+        provenance: ReasoningProvenance::Native,
+      }]],
+    )
+    .fails_after_stream(ModelFailureKind::Transport);
+    let backup = Scripted::new("backup", vec![text("fallback")]);
+    let tools = registry_with(Vec::new());
+    let mut trace = Recorder::default();
+    let mut seen = ProvenanceSpy::default();
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      primary.capabilities().context_window,
+    );
+
+    let error = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_backup(&backup)
+    .run_turn("reason", &CancelToken::new(), &mut seen)
+    .expect_err("a mid-stream provider failure is terminal after output");
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::Transport));
+    assert_eq!(
+      primary.requests().len(),
+      1,
+      "reasoning was already committed"
+    );
+    assert!(
+      backup.requests().is_empty(),
+      "committed output forbids takeover"
+    );
+    assert_eq!(seen.reasoning.len(), 1, "reasoning must not be duplicated");
+    assert!(trace.find("model_retry").is_none());
+    assert!(trace.find("model_failover").is_none());
+  }
+
   /// Everything a test needs to drive one loop.
   ///
   /// Built in one place so a test that asserts behavior is not also asserting
@@ -2036,6 +2086,98 @@ mod tests {
     );
   }
 
+  #[test]
+  fn reduced_builtin_output_is_archived_and_redacted() {
+    let temp = pi_rs_store::TempDir::new("runtime-reduced-read");
+    let secret = "recovery-secret-91f7";
+    let body: String = (1..=20_000)
+      .map(|line| format!("{secret} line {line}\n"))
+      .collect();
+    std::fs::write(temp.child("large.txt"), body).unwrap();
+
+    let mut write_policy = pi_rs_store::WritePolicy::default();
+    write_policy.redaction.scan_environment = false;
+    write_policy.redaction.literals = vec![secret.into()];
+    let store = pi_rs_store::Store::open(temp.path(), write_policy).unwrap();
+    let session_id = SessionId::new();
+    let model = ModelRef::new("test", "read");
+    let session = store
+      .begin(SessionHeader {
+        session_id: session_id.clone(),
+        version: pi_rs_core::session::SESSION_SCHEMA_VERSION,
+        started_at_ms: 1,
+        working_dir: temp.path().display().to_string(),
+        model: model.clone(),
+        parent_session: None,
+        branched_from_event: None,
+        imported_from: None,
+      })
+      .unwrap();
+    let mut trace = StoreTrace::new(session);
+    let tools = ToolRegistry::new(
+      Workspace::new(temp.path())
+        .unwrap()
+        .with_read_outside(false),
+    )
+    .with_policy(&ToolPolicy {
+      max_output_bytes: 1_024,
+      ..ToolPolicy::default()
+    })
+    .with_builtins();
+    let provider = Scripted::new(
+      "read",
+      vec![
+        tool_call("read", serde_json::json!({"path": "large.txt"})),
+        text("done"),
+      ],
+    );
+    let context = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &context,
+      &mut trace,
+      session_id,
+      TraceId::new(),
+    )
+    .run_turn(
+      "read the large file",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .unwrap();
+    assert_eq!(report.text, "done");
+
+    let trace_path = trace.session().trace_path().to_path_buf();
+    let session_path = trace.session().path().to_path_buf();
+    let entries = pi_rs_store::TraceJournal::read(&trace_path).unwrap().items;
+    let reduced = entries
+      .iter()
+      .find_map(|entry| match &entry.envelope.event {
+        AgentEvent::ContextReduced(reduced) => Some(reduced.clone()),
+        _ => None,
+      })
+      .expect("a reduced built-in result must have a recovery event");
+    assert!(reduced.original_bytes > reduced.visible_bytes);
+    assert!(reduced.recovery_ref.contains("blobs/"));
+    let blob_path = trace.session().blobs().path_for(&reduced.blob);
+    let blob_text = std::fs::read_to_string(blob_path).unwrap();
+    assert!(blob_text.contains("[redacted:field]"), "{blob_text}");
+    assert!(
+      !blob_text.contains(secret),
+      "secret leaked into recovery blob"
+    );
+
+    let trace_text = std::fs::read_to_string(trace_path).unwrap();
+    let session_text = std::fs::read_to_string(session_path).unwrap();
+    assert!(!trace_text.contains(secret), "secret leaked into trace");
+    assert!(!session_text.contains(secret), "secret leaked into session");
+  }
+
   struct FailingToolStart;
 
   impl Trace for FailingToolStart {
@@ -2074,6 +2216,93 @@ mod tests {
 
     assert!(matches!(error, TurnError::Sink(message) if message.contains("tool start")));
     assert!(seen.lock().unwrap().is_empty());
+  }
+
+  #[test]
+  fn workspace_path_refusals_do_not_emit_tool_started() {
+    let workspace_dir = pi_rs_store::TempDir::new("runtime-workspace");
+    let outside = pi_rs_store::TempDir::new("runtime-outside");
+    let outside_file = outside.child("outside.txt");
+    std::fs::write(&outside_file, "outside\n").unwrap();
+    let outside_file = outside_file.display().to_string();
+    let outside_dir = outside.path().display().to_string();
+    let call = |id: &str, name: &str, arguments: serde_json::Value| {
+      ProviderEvent::ToolCall(ToolCallBlock {
+        id: pi_rs_core::ToolCallId::from_string(id),
+        name: name.into(),
+        arguments,
+      })
+    };
+    let calls = vec![
+      call(
+        "read-outside",
+        "read",
+        serde_json::json!({"path": outside_file.clone()}),
+      ),
+      call(
+        "write-outside",
+        "write",
+        serde_json::json!({"path": format!("{outside_dir}/new.txt"), "contents": "no"}),
+      ),
+      call(
+        "edit-outside",
+        "edit",
+        serde_json::json!({"path": outside_file.clone(), "find": "outside", "replace": "changed"}),
+      ),
+      call(
+        "grep-outside",
+        "grep",
+        serde_json::json!({"pattern": "outside", "path": outside_dir}),
+      ),
+      call(
+        "exec-outside",
+        "exec",
+        serde_json::json!({"command": "pwd", "cwd": outside_dir}),
+      ),
+    ];
+    let provider = Scripted::new("path-policy", vec![calls, text("done")]);
+    let tools = ToolRegistry::new(
+      Workspace::new(workspace_dir.path())
+        .unwrap()
+        .with_read_outside(false),
+    )
+    .with_policy(&ToolPolicy {
+      auto_approve_mutating: true,
+      ..ToolPolicy::default()
+    })
+    .with_builtins();
+    let mut trace = Recorder::default();
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn(
+      "stay in the workspace",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .unwrap();
+
+    assert_eq!(report.tool_calls, 5);
+    assert_eq!(report.text, "done");
+    assert_eq!(trace.count("tool_requested"), 5);
+    assert_eq!(trace.count("tool_failed"), 5);
+    assert_eq!(
+      trace.count("tool_started"),
+      0,
+      "refusals never began execution"
+    );
+    assert_eq!(std::fs::read_to_string(&outside_file).unwrap(), "outside\n");
+    assert!(!outside.child("new.txt").exists());
   }
 
   #[test]
@@ -2324,6 +2553,54 @@ mod tests {
 
     assert_eq!(error.kind(), Some(ModelFailureKind::Transport));
     assert!(seen.lock().unwrap().is_empty());
+    assert_eq!(trace.count("tool_requested"), 1);
+    assert_eq!(trace.count("tool_failed"), 1);
+    assert_eq!(trace.count("tool_started"), 0);
+  }
+
+  #[test]
+  fn decoded_mutating_call_on_uncertain_completion_is_not_executed() {
+    let temp = pi_rs_store::TempDir::new("runtime-uncertain-write");
+    let target = temp.child("must-not-exist.txt");
+    let tools = ToolRegistry::new(Workspace::new(temp.path()).unwrap())
+      .with_policy(&ToolPolicy {
+        auto_approve_mutating: true,
+        ..ToolPolicy::default()
+      })
+      .with_builtins();
+    let provider = {
+      let mut provider = Scripted::new(
+        "uncertain-write",
+        vec![tool_call(
+          "write",
+          serde_json::json!({"path": "must-not-exist.txt", "contents": "unsafe"}),
+        )],
+      );
+      provider.unfinished = true;
+      provider
+    };
+    let mut trace = Recorder::default();
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn("write it", &CancelToken::new(), &mut SilentProgress)
+    .unwrap_err();
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::Protocol));
+    assert!(
+      !target.exists(),
+      "an uncertain decoded call must not mutate"
+    );
     assert_eq!(trace.count("tool_requested"), 1);
     assert_eq!(trace.count("tool_failed"), 1);
     assert_eq!(trace.count("tool_started"), 0);

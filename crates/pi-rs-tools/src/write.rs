@@ -53,6 +53,16 @@ impl Tool for WriteTool {
     })
   }
 
+  fn preflight(&self, request: &ToolRequest) -> Result<(), ToolError> {
+    let path = arg_str(request, "path")?;
+    self
+      .runtime
+      .workspace
+      .write_path(path)
+      .map(|_| ())
+      .map_err(|error| ToolError::new(error.to_string()))
+  }
+
   fn execute(
     &self,
     request: &ToolRequest,

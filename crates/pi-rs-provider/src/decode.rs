@@ -177,9 +177,9 @@ impl Decoder {
       }
       // EOF without the sentinel: the connection ended, the provider did not.
       StreamEnd::EndedWithoutSentinel => {
-        if reported_completion || produced_a_call {
+        if reported_completion {
           CompletionCertainty::Certain
-        } else if self.emitted_output {
+        } else if self.emitted_output || produced_a_call {
           // Nothing was done wrong here, and retrying is not this layer's call: a
           // half-answer is already committed content. Report the boundary as
           // uncertain and let the runtime decide what unfinished means.

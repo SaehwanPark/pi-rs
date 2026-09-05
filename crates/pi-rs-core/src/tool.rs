@@ -302,6 +302,16 @@ pub trait Tool: Send + Sync {
   /// JSON Schema for arguments, handed to tool-capable providers.
   fn arguments_schema(&self) -> serde_json::Value;
 
+  /// Validate the call at the pre-execution boundary.
+  ///
+  /// This hook is for tool-specific checks, such as workspace confinement, that
+  /// prove the tool must not run. The registry invokes it before emitting
+  /// `ToolStarted`; implementations must not perform the operation itself.
+  /// The default keeps existing extension tools source-compatible.
+  fn preflight(&self, _request: &ToolRequest) -> Result<(), ToolError> {
+    Ok(())
+  }
+
   /// Execute the call. Implementations must return
   /// [`ToolOutcome::unknown`] rather than `failed` when completion cannot be
   /// observed, and must not swallow cancellation into a success.
