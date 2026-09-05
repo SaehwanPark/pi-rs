@@ -280,14 +280,31 @@ impl ToolRegistry {
     progress: &mut dyn ToolProgress,
     cancel: &CancelToken,
   ) -> Executed {
+    let mut started = || Ok(());
+    self
+      .execute_observed(request, progress, cancel, &mut started)
+      .expect("the default execution-start observer is infallible")
+  }
+
+  /// Execute one call and report the exact execution-start boundary.
+  ///
+  /// The observer runs after policy, argument, preflight, and approval checks
+  /// but before tool code. If durable recording fails, the tool is not invoked.
+  pub fn execute_observed(
+    &self,
+    request: &ToolRequest,
+    progress: &mut dyn ToolProgress,
+    cancel: &CancelToken,
+    on_started: &mut dyn FnMut() -> Result<(), pi_rs_core::SinkError>,
+  ) -> Result<Executed, pi_rs_core::SinkError> {
     match self.default_gate {
       DefaultGate::Allow => {
         let mut approve = AutoApprove;
-        self.dispatch(request, progress, cancel, &mut approve)
+        self.dispatch(request, progress, cancel, &mut approve, on_started)
       }
       DefaultGate::Deny => {
         let mut refuse = DenyMutating;
-        self.dispatch(request, progress, cancel, &mut refuse)
+        self.dispatch(request, progress, cancel, &mut refuse, on_started)
       }
     }
   }
@@ -304,7 +321,10 @@ impl ToolRegistry {
     cancel: &CancelToken,
     gate: &mut dyn ApprovalGate,
   ) -> Executed {
-    self.dispatch(request, progress, cancel, gate)
+    let mut started = || Ok(());
+    self
+      .dispatch(request, progress, cancel, gate, &mut started)
+      .expect("the interactive execution-start observer is infallible")
   }
 
   /// The single execution path: policy, validation, approval, bounds, reduction,
@@ -319,9 +339,10 @@ impl ToolRegistry {
     progress: &mut dyn ToolProgress,
     cancel: &CancelToken,
     gate: &mut dyn ApprovalGate,
-  ) -> Executed {
+    on_started: &mut dyn FnMut() -> Result<(), pi_rs_core::SinkError>,
+  ) -> Result<Executed, pi_rs_core::SinkError> {
     if cancel.is_cancelled() {
-      return Executed {
+      return Ok(Executed {
         request: request.clone(),
         outcome: ToolOutcome::failed(format!(
           "'{}' not executed: the turn was cancelled before it started",
@@ -332,25 +353,28 @@ impl ToolRegistry {
         refusal: Some("cancelled before execution".to_string()),
         full_output: None,
         cancelled: true,
-      };
+      });
     }
     let Some(tool) = self.tools.get(&request.name) else {
-      return Executed::refused(
+      return Ok(Executed::refused(
         request.clone(),
         unknown_tool(&request.name, &self.allowed_names()),
-      );
+      ));
     };
     let metadata = tool.metadata();
     if !self.is_allowed(&metadata.name) {
-      return Executed::refused(
+      return Ok(Executed::refused(
         request.clone(),
         format!("tool '{}' is denied by policy", metadata.name),
-      );
+      ));
     }
     if let Err(message) =
       validate_arguments(&metadata, &request.arguments, &tool.arguments_schema())
     {
-      return Executed::refused(request.clone(), message);
+      return Ok(Executed::refused(request.clone(), message));
+    }
+    if let Err(error) = tool.preflight(request) {
+      return Ok(Executed::refused(request.clone(), error.message));
     }
     if !metadata.read_only {
       // `Ask` refuses here as well: nothing in this type can deliver a prompt, so
@@ -359,10 +383,11 @@ impl ToolRegistry {
       if let Approval::Deny(reason) | Approval::Ask(reason) =
         gate.decide(&metadata, &request.arguments)
       {
-        return Executed::refused(request.clone(), reason);
+        return Ok(Executed::refused(request.clone(), reason));
       }
     }
 
+    on_started()?;
     let mut sink = Sink {
       inner: progress,
       forwarded: false,
@@ -381,7 +406,7 @@ impl ToolRegistry {
         if state != outcome.state {
           outcome.state = state;
         }
-        Executed {
+        Ok(Executed {
           request: request.clone(),
           outcome,
           state,
@@ -389,7 +414,7 @@ impl ToolRegistry {
           refusal: None,
           full_output,
           cancelled: cancel.is_cancelled(),
-        }
+        })
       }
       Err(error) => {
         // A harness-level error still has to land in a lifecycle state, because
@@ -406,7 +431,7 @@ impl ToolRegistry {
           blob: None,
           status: None,
         };
-        Executed {
+        Ok(Executed {
           request: request.clone(),
           outcome,
           state,
@@ -414,7 +439,7 @@ impl ToolRegistry {
           refusal: Some(error.message),
           full_output: None,
           cancelled: cancel.is_cancelled(),
-        }
+        })
       }
     }
   }

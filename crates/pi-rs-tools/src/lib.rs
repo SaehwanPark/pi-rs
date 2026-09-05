@@ -53,7 +53,9 @@ impl Runtime {
   /// it shows so the reduction has real head and tail to work with, and the
   /// capture ceiling is what stops a runaway process from consuming memory.
   pub(crate) fn exec_capture_limit(&self) -> usize {
-    (self.max_output_bytes as usize) * 8
+    usize::try_from(self.max_output_bytes)
+      .unwrap_or(usize::MAX)
+      .saturating_mul(8)
   }
 
   pub(crate) fn new(workspace: Workspace) -> Self {
@@ -65,19 +67,13 @@ impl Runtime {
     }
   }
 
-  /// Reduce a result to the configured model-visible budget.
+  /// Return the complete result to the registry.
   ///
-  /// Every tool ends the same way, so the reduction lives here rather than in
-  /// each tool: one place to audit for "did anything reach the model unbounded?"
+  /// The registry is the reduction boundary because it owns the `Executed`
+  /// record and can preserve the original bytes for durable recovery before
+  /// handing the bounded form to the runtime.
   pub(crate) fn finish(&self, text: String) -> ToolOutcome {
-    match reduce::reduce(&text, self.max_output_bytes) {
-      Some(reduced) => {
-        let mut outcome = ToolOutcome::succeeded(reduced.text);
-        outcome.reduced = true;
-        outcome
-      }
-      None => ToolOutcome::succeeded(text),
-    }
+    ToolOutcome::succeeded(text)
   }
 
   pub(crate) fn with_policy(mut self, policy: &pi_rs_core::ToolPolicy) -> Self {
@@ -253,5 +249,13 @@ pub(crate) mod testutil {
 
   pub(crate) fn runtime(dir: &tempfile::TempDir) -> Runtime {
     Runtime::new(Workspace::new(dir.path()).unwrap())
+  }
+
+  #[test]
+  fn extreme_output_limit_saturates_exec_capture_arithmetic() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut runtime = runtime(&dir);
+    runtime.max_output_bytes = u64::MAX;
+    assert_eq!(runtime.exec_capture_limit(), usize::MAX);
   }
 }

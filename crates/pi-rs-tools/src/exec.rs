@@ -64,6 +64,22 @@ impl Tool for ExecTool {
     })
   }
 
+  fn preflight(&self, request: &ToolRequest) -> Result<(), ToolError> {
+    let Some(cwd) = request
+      .arguments
+      .get("cwd")
+      .and_then(|value| value.as_str())
+    else {
+      return Ok(());
+    };
+    self
+      .runtime
+      .workspace
+      .search_path(cwd)
+      .map(|_| ())
+      .map_err(|error| ToolError::new(error.to_string()))
+  }
+
   fn execute(
     &self,
     request: &ToolRequest,

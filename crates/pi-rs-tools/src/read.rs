@@ -54,6 +54,16 @@ impl Tool for ReadTool {
     })
   }
 
+  fn preflight(&self, request: &ToolRequest) -> Result<(), ToolError> {
+    let path = arg_str(request, "path")?;
+    self
+      .runtime
+      .workspace
+      .read_path(path)
+      .map(|_| ())
+      .map_err(|error| ToolError::new(error.to_string()))
+  }
+
   fn execute(
     &self,
     request: &ToolRequest,
@@ -264,29 +274,31 @@ mod tests {
   }
 
   #[test]
-  fn a_large_file_is_reduced_not_dumped() {
+  fn a_large_file_is_returned_for_registry_reduction() {
     let dir = tempfile::tempdir().unwrap();
     let body: String = (1..=20_000)
       .map(|i| format!("line {i}: payload\n"))
       .collect();
     std::fs::write(dir.path().join("huge.txt"), &body).unwrap();
     let outcome = read(&dir, "huge.txt", json!({}));
-    assert!(outcome.reduced, "reduced flag must be set");
-    // The visible form must fit the budget *including* the elision notice.
-    assert!(outcome.text.len() < 9 * 1024, "{}", outcome.text.len());
-    assert!(outcome.text.contains("bytes elided"));
+    assert!(!outcome.reduced, "the registry owns reduction");
+    assert!(
+      outcome.text.len() > 9 * 1024,
+      "the complete result reaches the registry: {}",
+      outcome.text.len()
+    );
   }
 
   #[test]
-  fn reduction_keeps_both_ends_of_the_file() {
+  fn the_result_keeps_the_complete_requested_window() {
     let dir = tempfile::tempdir().unwrap();
     let body: String = (1..=20_000)
       .map(|i| format!("line {i}: payload\n"))
       .collect();
     std::fs::write(dir.path().join("h2.txt"), &body).unwrap();
     let outcome = read(&dir, "h2.txt", json!({}));
-    // The point of reduction is context protection, so the visible form must be
-    // strictly smaller than the source it replaced.
+    // The read window is a tool-level bound; context reduction happens later at
+    // the registry boundary where the complete result can be archived.
     assert!(outcome.text.len() < body.len());
     assert!(outcome.text.contains("line 1: payload"), "head retained");
     assert!(
@@ -298,7 +310,7 @@ mod tests {
       "tells where the window ended: {}",
       &outcome.text[..200]
     );
-    assert!(outcome.text.contains("full output is archived"));
+    assert!(!outcome.text.contains("full output is archived"));
   }
 
   #[test]

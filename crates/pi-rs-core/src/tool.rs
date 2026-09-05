@@ -279,8 +279,9 @@ impl std::fmt::Display for ToolError {
 
 /// Progress sink passed to a running tool.
 ///
-/// Tools stream through this rather than writing to stdout, so that output is
-/// journaled and rendered consistently.
+/// Tools stream through this rather than writing to stdout. Progress chunks are
+/// transient surface output; durable history records the final bounded tool
+/// result under its lifecycle event.
 pub trait ToolProgress: Send {
   fn emit(&mut self, chunk: &ToolChunk);
 }
@@ -300,6 +301,16 @@ pub trait Tool: Send + Sync {
 
   /// JSON Schema for arguments, handed to tool-capable providers.
   fn arguments_schema(&self) -> serde_json::Value;
+
+  /// Validate the call at the pre-execution boundary.
+  ///
+  /// This hook is for tool-specific checks, such as workspace confinement, that
+  /// prove the tool must not run. The registry invokes it before emitting
+  /// `ToolStarted`; implementations must not perform the operation itself.
+  /// The default keeps existing extension tools source-compatible.
+  fn preflight(&self, _request: &ToolRequest) -> Result<(), ToolError> {
+    Ok(())
+  }
 
   /// Execute the call. Implementations must return
   /// [`ToolOutcome::unknown`] rather than `failed` when completion cannot be

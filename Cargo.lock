@@ -494,6 +494,7 @@ dependencies = [
  "pi-rs-tools",
  "pi-rs-tui",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

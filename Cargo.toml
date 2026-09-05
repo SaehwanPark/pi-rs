@@ -51,6 +51,9 @@ pi-rs-runtime.workspace = true
 pi-rs-tui.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [profile.release]
 codegen-units = 1
 lto = "thin"

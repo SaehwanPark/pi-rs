@@ -353,6 +353,26 @@ fn a_mid_stream_disconnect_reports_an_uncertain_completion() {
 }
 
 #[test]
+fn a_decoded_tool_call_without_done_is_an_uncertain_completion() {
+  // A complete tool call is still unsafe to execute when the socket closes
+  // before the provider's stream sentinel arrives.
+  let server = FakeServer::answer(sse(
+    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_uncertain\",\"function\":{\"name\":\"write\",\"arguments\":\"{\\\"path\\\":\\\"out.txt\\\",\\\"contents\\\":\\\"x\\\"}\"}}]}}]}\n\n",
+  ));
+  let adapter = adapter(&server.base_url(), None);
+  let (result, collector) = stream(&adapter, &request("write it"));
+  let usage = result.expect("the decoded call has an uncertain boundary");
+
+  assert_eq!(usage.certainty, CompletionCertainty::Unknown);
+  assert_eq!(usage.finish_reason, None);
+  assert!(matches!(
+    collector.events().first(),
+    Some(ProviderEvent::ToolCall(call)) if call.name == "write"
+  ));
+  server.request();
+}
+
+#[test]
 fn a_non_streaming_endpoint_is_supported() {
   let server = FakeServer::answer(status(
     200,

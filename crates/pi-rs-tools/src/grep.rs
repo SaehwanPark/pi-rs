@@ -76,6 +76,20 @@ impl Tool for GrepTool {
     })
   }
 
+  fn preflight(&self, request: &ToolRequest) -> Result<(), ToolError> {
+    let requested_root = request
+      .arguments
+      .get("path")
+      .and_then(|value| value.as_str())
+      .unwrap_or(".");
+    self
+      .runtime
+      .workspace
+      .search_path(requested_root)
+      .map(|_| ())
+      .map_err(|error| ToolError::new(error.to_string()))
+  }
+
   fn execute(
     &self,
     request: &ToolRequest,

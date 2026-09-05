@@ -58,6 +58,29 @@ Rust is the implementation substrate, not the main differentiator.
              external systems
 ```
 
+## One-shot agent command
+
+Run one complete, durable turn against an explicitly configured OpenAI-compatible
+endpoint:
+
+```text
+pi-rs run --config <file> --cwd <workspace> --prompt <text>
+```
+
+The JSON file is parsed as `RuntimeConfig`; no project-local config is discovered.
+`--cwd` is canonicalized and becomes the confinement root for the built-in tools.
+Assistant text is streamed to stdout. Provenance-labeled reasoning, tool activity,
+diagnostics, and errors use stderr. Mutating tools, including `write`, `edit`, and
+`exec`, are refused unless the config explicitly sets
+`tools.auto_approve_mutating` to `true`. Outside-workspace file reads are denied
+for this command. An explicitly approved `exec` still invokes a shell and is an
+intentional escape hatch, not an OS sandbox; use operating-system isolation when
+untrusted commands require containment.
+
+Each invocation creates a session under `state_dir` and persists attributed user,
+assistant, and tool messages separately from the ordered canonical trace. The
+command does not provide an interactive approval prompt, session resume, or a REPL.
+
 ## Major runtime capabilities
 
 ### Provider abstraction
