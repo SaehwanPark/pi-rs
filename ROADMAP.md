@@ -16,8 +16,8 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 ### Project setup
 
 - [x] Create Cargo workspace.
-- [ ] Add pinned Rust toolchain.
-- [ ] Add formatting, clippy, test, and documentation CI.
+- [x] Add pinned Rust toolchain.
+- [x] Add formatting, clippy, test, and documentation CI.
 - [x] Add `README.md`.
 - [x] Add `ARCHITECTURE.md`.
 - [x] Add `COMPATIBILITY.md`.
@@ -25,23 +25,23 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [x] Add `AGENTS.md`.
 - [x] Add canonical project design under `docs/`.
 - [ ] Define contribution and issue templates.
-- [ ] Add benchmark harness directory.
+- [x] Add benchmark harness directory.
 
 ### Core contracts
 
-- [ ] Define provider trait.
-- [ ] Define model capability schema.
-- [ ] Define typed provider failure classes.
-- [ ] Define `AgentEvent`.
-- [ ] Define event identity/order metadata.
-- [ ] Define session ID / turn ID / tool-call ID types.
-- [ ] Define tool lifecycle state.
-- [ ] Define reasoning provenance enum.
-- [ ] Define model epoch schema.
-- [ ] Define initial session storage schema.
-- [ ] Define initial trace storage schema.
-- [ ] Define redaction boundary.
-- [ ] Define project-trust boundary.
+- [x] Define provider trait.
+- [x] Define model capability schema.
+- [x] Define typed provider failure classes.
+- [x] Define `AgentEvent`.
+- [x] Define event identity/order metadata.
+- [x] Define session ID / turn ID / tool-call ID types.
+- [x] Define tool lifecycle state.
+- [x] Define reasoning provenance enum.
+- [x] Define model epoch schema.
+- [x] Define initial session storage schema.
+- [x] Define initial trace storage schema.
+- [x] Define redaction boundary.
+- [x] Define project-trust boundary.
 
 ### Performance baseline
 
@@ -77,29 +77,50 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Providers
 
-- [ ] Implement one local/OpenAI-compatible provider.
+> `pi-rs-provider` implements one OpenAI-compatible adapter (`OpenAiCompat`) used
+> against local llama.cpp. Streaming, tool-call, exposed-reasoning, and failure
+> normalization are covered by unit tests plus wire-level integration tests
+> against a fake OpenAI server (`crates/pi-rs-provider/tests/transport.rs`), and
+> verified against the real local endpoint: reasoning arrived as a separate typed
+> event with `Native` provenance, the visible answer stayed separate, and the
+> turn reported `finish_reason=stop` with usage. "One remote/cloud-compatible
+> provider" stays open until verified against a real remote endpoint; credential
+> handling (`api_key`, `api_key_env`, redaction) is implemented and tested.
+
+- [x] Implement one local/OpenAI-compatible provider.
 - [ ] Implement one remote/cloud-compatible provider.
-- [ ] Normalize streaming output.
-- [ ] Normalize tool-call output.
-- [ ] Normalize exposed reasoning.
-- [ ] Normalize provider failures.
+- [x] Normalize streaming output.
+- [x] Normalize tool-call output.
+- [x] Normalize exposed reasoning.
+- [x] Normalize provider failures.
 
 ### Basic tools
 
-- [ ] Implement file read.
-- [ ] Implement file write/edit.
-- [ ] Implement shell command execution.
-- [ ] Implement grep/search.
-- [ ] Emit tool lifecycle events.
-- [ ] Mark read-only vs mutating tools.
+> `pi-rs-tools` provides the built-in set (`read`, `write`, `edit`, `grep`,
+> `exec`) behind a `ToolRegistry`. Every path is confined to an explicit
+> workspace root; every result passes one reduction boundary; every call lands in
+> a typed lifecycle state. Two invariants carry the safety weight and are tested
+> directly: a mutating tool that claims success while cancellation was observed
+> is coerced to `Unknown`, and an approval question that nobody answers is a
+> refusal rather than a permission.
+
+- [x] Implement file read.
+- [x] Implement file write/edit.
+- [x] Implement shell command execution.
+- [x] Implement grep/search.
+- [x] Emit tool lifecycle events.
+- [x] Mark read-only vs mutating tools.
+- [x] Confine tools to an explicit workspace root.
+- [x] Bound tool output before it reaches context.
+- [x] Gate mutating tools behind policy and approval.
 
 ### Sessions
 
-- [ ] Persist user/assistant/tool messages.
-- [ ] Resume latest session.
-- [ ] Create new session.
-- [ ] Preserve model identity per turn.
-- [ ] Avoid deep trace loading during startup.
+- [x] Persist user/assistant/tool messages.
+- [x] Resume latest session.
+- [x] Create new session.
+- [x] Preserve model identity per turn.
+- [x] Avoid deep trace loading during startup.
 
 ### Stage gate
 
@@ -114,22 +135,22 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Event store
 
-- [ ] Persist typed event stream.
-- [ ] Guarantee stable event ordering.
-- [ ] Add model request start/end events.
-- [ ] Add native reasoning events.
-- [ ] Add tool request/start/completion events.
-- [ ] Add provider failure/retry events.
-- [ ] Add model epoch events.
+- [x] Persist typed event stream.
+- [x] Guarantee stable event ordering.
+- [x] Add model request start/end events.
+- [x] Add native reasoning events.
+- [x] Add tool request/start/completion events.
+- [x] Add provider failure/retry events.
+- [x] Add model epoch events.
 
 ### Trace storage
 
-- [ ] Add `trace.jsonl`.
-- [ ] Add blob storage for large payloads.
-- [ ] Add content hashing for stored payloads.
+- [x] Add `trace.jsonl`.
+- [x] Add blob storage for large payloads.
+- [x] Add content hashing for stored payloads.
 - [ ] Add optional compression.
-- [ ] Add trace retention configuration.
-- [ ] Keep raw provider payload capture disabled by default.
+- [x] Add trace retention configuration.
+- [x] Keep raw provider payload capture disabled by default.
 
 ### Provenance
 
