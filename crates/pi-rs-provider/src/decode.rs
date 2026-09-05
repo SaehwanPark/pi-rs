@@ -10,8 +10,8 @@
 use std::io;
 
 use pi_rs_core::{
-  CancelToken, FailurePhase, ProviderEvent, ProviderEventSink, ReasoningProvenance, ToolCallBlock,
-  ToolCallId, provider::CompletionUsage,
+  CancelToken, CompletionCertainty, FailurePhase, ProviderEvent, ProviderEventSink,
+  ReasoningProvenance, ToolCallBlock, ToolCallId, provider::CompletionUsage,
 };
 use serde_json::Value;
 
@@ -160,36 +160,48 @@ impl Decoder {
     // reason or producing output, is an interrupted turn; reporting success
     // there is how a harness silently truncates answers.
     let reported_completion = self.finish_reason.is_some();
-    let authoritative_end = match end {
+    let certainty = match end {
       // The whole body parsed, so the server answered in full.
-      StreamEnd::CompleteBody => true,
-      // `[DONE]` is the provider's own end-of-stream sentinel, so it is
-      // authoritative for a stream that produced something. An empty stream
-      // that merely says `[DONE]` says nothing about completion.
-      StreamEnd::DoneSentinel => reported_completion || self.emitted_output || produced_a_call,
-      // EOF without the sentinel: the connection ended, the provider did not.
-      StreamEnd::EndedWithoutSentinel => reported_completion || produced_a_call,
-    };
-    if !authoritative_end {
-      return Err(match end {
-        StreamEnd::DoneSentinel => {
-          decode_failure("stream ended without a finish reason and without any output".to_string())
+      StreamEnd::CompleteBody => CompletionCertainty::Certain,
+      // `[DONE]` is the provider's own end-of-stream sentinel, so it settles
+      // completion for a stream that produced something. An empty stream that
+      // merely says `[DONE]` says nothing about completion.
+      StreamEnd::DoneSentinel => {
+        if reported_completion || self.emitted_output || produced_a_call {
+          CompletionCertainty::Certain
+        } else {
+          return Err(decode_failure(
+            "stream ended without a finish reason and without any output".to_string(),
+          ));
         }
-        _ => {
+      }
+      // EOF without the sentinel: the connection ended, the provider did not.
+      StreamEnd::EndedWithoutSentinel => {
+        if reported_completion || produced_a_call {
+          CompletionCertainty::Certain
+        } else if self.emitted_output {
+          // Nothing was done wrong here, and retrying is not this layer's call: a
+          // half-answer is already committed content. Report the boundary as
+          // uncertain and let the runtime decide what unfinished means.
+          CompletionCertainty::Unknown
+        } else {
+          // Nothing was committed, so a retry cannot duplicate anything. That is an
+          // availability failure, which is what the transport layer is for.
           let mut failure = pi_rs_core::ModelFailure::new(
             pi_rs_core::ModelFailureKind::Transport,
             pi_rs_core::FailurePhase::Streaming,
             "stream ended before the provider reported completion",
           );
-          failure.partial_output_emitted = self.emitted_output;
-          failure
+          failure.partial_output_emitted = false;
+          return Err(failure);
         }
-      });
-    }
+      }
+    };
     Ok(CompletionUsage {
       input_tokens: self.input_tokens,
       output_tokens: self.output_tokens,
       finish_reason: self.finish_reason,
+      certainty,
     })
   }
 

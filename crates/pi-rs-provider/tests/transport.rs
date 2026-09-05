@@ -13,8 +13,9 @@ use std::{
 };
 
 use pi_rs_core::{
-  CancelToken, Collector, CompletionUsage, FailurePhase, Message, ModelCapabilities, ModelFailure,
-  ModelFailureKind, ModelProvider, ModelRef, ModelRequest, ProviderEvent, ReasoningExposure,
+  CancelToken, Collector, CompletionCertainty, CompletionUsage, FailurePhase, Message,
+  ModelCapabilities, ModelFailure, ModelFailureKind, ModelProvider, ModelRef, ModelRequest,
+  ProviderEvent, ReasoningExposure,
 };
 use pi_rs_provider::{MaxTokensField, OpenAiCompat, ProviderConfig, ThinkingInput};
 
@@ -328,29 +329,26 @@ fn a_stream_that_reports_nothing_is_not_a_completion() {
 }
 
 #[test]
-fn a_mid_stream_disconnect_reports_the_partial_output() {
+fn a_mid_stream_disconnect_reports_an_uncertain_completion() {
   // Headers and one delta, then the socket closes without DONE and without a
-  // finish_reason: exactly the mid-turn failure the roadmap requires coverage
-  // for.
+  // finish_reason: exactly the mid-turn case the roadmap requires coverage for.
   let server = FakeServer::answer(sse(
     "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
   ));
   let adapter = adapter(&server.base_url(), None);
   let (result, collector) = stream(&adapter, &request("stream then die"));
-  let failure = result.unwrap_err();
-  assert_eq!(failure.kind, ModelFailureKind::Transport);
-  assert_eq!(
-    failure.phase,
-    FailurePhase::Streaming,
-    "the turn produced output before it broke"
-  );
-  assert!(failure.partial_output_emitted);
-  assert!(
-    !failure.safe_to_retry(),
-    "replaying would duplicate the delta"
-  );
+  let usage = result.expect("a truncated stream is a fact, not a transport fault");
+
+  // Two separate facts, kept separate: the connection ended, and the provider never
+  // said it was finished. Collapsing them into a transport error would let a
+  // runtime treat "retry" as safe when a delta is already committed content.
+  assert_eq!(usage.certainty, CompletionCertainty::Unknown);
   let events = collector.events();
   assert_eq!(events.len(), 1);
+  assert!(
+    !usage.is_certain(),
+    "the runtime must be able to see the turn did not finish"
+  );
   server.request();
 }
 
