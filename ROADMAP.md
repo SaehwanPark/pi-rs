@@ -96,12 +96,23 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Basic tools
 
-- [ ] Implement file read.
-- [ ] Implement file write/edit.
-- [ ] Implement shell command execution.
-- [ ] Implement grep/search.
-- [ ] Emit tool lifecycle events.
-- [ ] Mark read-only vs mutating tools.
+> `pi-rs-tools` provides the built-in set (`read`, `write`, `edit`, `grep`,
+> `exec`) behind a `ToolRegistry`. Every path is confined to an explicit
+> workspace root; every result passes one reduction boundary; every call lands in
+> a typed lifecycle state. Two invariants carry the safety weight and are tested
+> directly: a mutating tool that claims success while cancellation was observed
+> is coerced to `Unknown`, and an approval question that nobody answers is a
+> refusal rather than a permission.
+
+- [x] Implement file read.
+- [x] Implement file write/edit.
+- [x] Implement shell command execution.
+- [x] Implement grep/search.
+- [x] Emit tool lifecycle events.
+- [x] Mark read-only vs mutating tools.
+- [x] Confine tools to an explicit workspace root.
+- [x] Bound tool output before it reaches context.
+- [x] Gate mutating tools behind policy and approval.
 
 ### Sessions
 

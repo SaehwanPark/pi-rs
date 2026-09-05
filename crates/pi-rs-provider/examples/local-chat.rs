@@ -13,8 +13,9 @@ use pi_rs_core::{
 use pi_rs_provider::{OpenAiCompat, ProviderConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-  let base_url =
-    std::env::args().nth(1).unwrap_or_else(|| "http://127.0.0.1:8080/v1".to_string());
+  let base_url = std::env::args()
+    .nth(1)
+    .unwrap_or_else(|| "http://127.0.0.1:8080/v1".to_string());
   let model_id = std::env::args()
     .nth(2)
     .unwrap_or_else(|| "qwen3.8-flash".to_string());
@@ -50,7 +51,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let mut provenance = None;
   for event in collector.events() {
     match event {
-      ProviderEvent::ReasoningDelta { text, provenance: source } => {
+      ProviderEvent::ReasoningDelta {
+        text,
+        provenance: source,
+      } => {
         reasoning.push_str(text);
         provenance = Some(*source);
       }
@@ -87,14 +91,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       // A failure must be legible, not swallowed: kind, phase, and whether the
       // caller already saw output are the three facts that drive recovery.
       let _ = std::io::stdout().flush();
-      Err(format!(
-        "{} in {:?} (partial_output={}, retryable={})",
-        failure.message,
-        failure.phase,
-        failure.partial_output_emitted,
-        failure.safe_to_retry()
+      Err(
+        format!(
+          "{} in {:?} (partial_output={}, retryable={})",
+          failure.message,
+          failure.phase,
+          failure.partial_output_emitted,
+          failure.safe_to_retry()
+        )
+        .into(),
       )
-      .into())
     }
   }
 }
