@@ -137,7 +137,7 @@ impl TraceJournal {
     self.writer.flush()
   }
 
-  /// Read the whole journal. Prefer [`read_after`] for resumption.
+  /// Read the whole journal. Prefer [`TraceJournal::read_tail`] for resumption.
   pub fn read(path: &Path) -> Result<ReadReport<TraceEntry>, StoreError> {
     read_jsonl(path)
   }
