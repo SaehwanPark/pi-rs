@@ -267,8 +267,8 @@ mod tests {
 
   #[test]
   fn an_absolute_in_root_path_is_accepted_for_writing() {
-    let (dir, workspace) = root();
-    let target = dir.path().join("inside.txt");
+    let (_dir, workspace) = root();
+    let target = workspace.root().join("inside.txt");
     assert_eq!(
       workspace.write_path(&target.to_string_lossy()).unwrap(),
       target
@@ -283,10 +283,10 @@ mod tests {
 
   #[test]
   fn dot_dot_is_applied_lexically_and_cannot_escape_the_root() {
-    let (dir, workspace) = root();
+    let (_dir, workspace) = root();
     // Same-directory indirection stays inside.
     let inside = workspace.write_path("src/../inside.txt").unwrap();
-    assert_eq!(inside, dir.path().join("inside.txt"));
+    assert_eq!(inside, workspace.root().join("inside.txt"));
     // Climbing out is refused rather than resolved to a system path.
     let error = workspace.write_path("../../../etc/passwd").unwrap_err();
     assert!(
@@ -301,17 +301,17 @@ mod tests {
     // trace would make a claim the check never verified. A symlinked directory
     // inside the root resolves lexically and is therefore allowed; the reported
     // path is the path under the root.
-    let (dir, workspace) = root();
+    let (_dir, workspace) = root();
     let outside = tempfile::tempdir().unwrap();
-    std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), workspace.root().join("link")).unwrap();
     let resolved = workspace.write_path("link/file.txt").unwrap();
     assert!(resolved.starts_with(workspace.root()), "{resolved:?}");
-    assert_eq!(resolved, dir.path().join("link/file.txt"));
+    assert_eq!(resolved, workspace.root().join("link/file.txt"));
   }
 
   #[test]
   fn a_search_root_may_not_escape_the_root_even_though_reads_may() {
-    let (dir, mut workspace) = root();
+    let (_dir, mut workspace) = root();
     let outside = tempfile::tempdir().unwrap();
     fs::write(outside.path().join("secret.txt"), "x").unwrap();
     // Same policy that permits a single outside read still confines the walk.
@@ -333,7 +333,6 @@ mod tests {
         .search_path(&outside_root_str)
         .is_ok()
     );
-    let _ = dir;
   }
 
   #[test]

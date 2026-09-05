@@ -102,7 +102,7 @@ generate retries forever.
 2. Binary composition root — config → provider → runtime → surface.
 3. End-to-end agent loop against the local endpoint (single completions are verified;
    tool round-trips through the real provider are not).
-4. Startup benchmarks (`bench/startup.sh`).
+4. Startup benchmarks with full composition root (`bench/startup.sh` harness implemented).
 5. Phase 6 Pi compatibility fixtures.
 
 ## Real-endpoint verification
