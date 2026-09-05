@@ -63,7 +63,7 @@ pub struct DenyMutating;
 impl ApprovalGate for DenyMutating {
   fn decide(&mut self, metadata: &ToolMetadata, _arguments: &Value) -> Approval {
     Approval::Deny(format!(
-      "'{name}' is mutating and approval is required. Nothing was changed. Grant        this tool by name under tool.allow_mutating, or run a surface that can ask.",
+      "'{name}' is mutating and approval is required. Nothing was changed. Grant this tool by name under tool.allow_mutating, or run a surface that can ask.",
       name = metadata.name
     ))
   }
