@@ -16,8 +16,8 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 ### Project setup
 
 - [x] Create Cargo workspace.
-- [ ] Add pinned Rust toolchain.
-- [ ] Add formatting, clippy, test, and documentation CI.
+- [x] Add pinned Rust toolchain.
+- [x] Add formatting, clippy, test, and documentation CI.
 - [x] Add `README.md`.
 - [x] Add `ARCHITECTURE.md`.
 - [x] Add `COMPATIBILITY.md`.
@@ -25,23 +25,23 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [x] Add `AGENTS.md`.
 - [x] Add canonical project design under `docs/`.
 - [ ] Define contribution and issue templates.
-- [ ] Add benchmark harness directory.
+- [x] Add benchmark harness directory.
 
 ### Core contracts
 
-- [ ] Define provider trait.
-- [ ] Define model capability schema.
-- [ ] Define typed provider failure classes.
-- [ ] Define `AgentEvent`.
-- [ ] Define event identity/order metadata.
-- [ ] Define session ID / turn ID / tool-call ID types.
-- [ ] Define tool lifecycle state.
-- [ ] Define reasoning provenance enum.
-- [ ] Define model epoch schema.
-- [ ] Define initial session storage schema.
-- [ ] Define initial trace storage schema.
-- [ ] Define redaction boundary.
-- [ ] Define project-trust boundary.
+- [x] Define provider trait.
+- [x] Define model capability schema.
+- [x] Define typed provider failure classes.
+- [x] Define `AgentEvent`.
+- [x] Define event identity/order metadata.
+- [x] Define session ID / turn ID / tool-call ID types.
+- [x] Define tool lifecycle state.
+- [x] Define reasoning provenance enum.
+- [x] Define model epoch schema.
+- [x] Define initial session storage schema.
+- [x] Define initial trace storage schema.
+- [x] Define redaction boundary.
+- [x] Define project-trust boundary.
 
 ### Performance baseline
 
@@ -95,11 +95,11 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Sessions
 
-- [ ] Persist user/assistant/tool messages.
-- [ ] Resume latest session.
-- [ ] Create new session.
-- [ ] Preserve model identity per turn.
-- [ ] Avoid deep trace loading during startup.
+- [x] Persist user/assistant/tool messages.
+- [x] Resume latest session.
+- [x] Create new session.
+- [x] Preserve model identity per turn.
+- [x] Avoid deep trace loading during startup.
 
 ### Stage gate
 
@@ -114,22 +114,22 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Event store
 
-- [ ] Persist typed event stream.
-- [ ] Guarantee stable event ordering.
-- [ ] Add model request start/end events.
-- [ ] Add native reasoning events.
-- [ ] Add tool request/start/completion events.
-- [ ] Add provider failure/retry events.
-- [ ] Add model epoch events.
+- [x] Persist typed event stream.
+- [x] Guarantee stable event ordering.
+- [x] Add model request start/end events.
+- [x] Add native reasoning events.
+- [x] Add tool request/start/completion events.
+- [x] Add provider failure/retry events.
+- [x] Add model epoch events.
 
 ### Trace storage
 
-- [ ] Add `trace.jsonl`.
-- [ ] Add blob storage for large payloads.
-- [ ] Add content hashing for stored payloads.
+- [x] Add `trace.jsonl`.
+- [x] Add blob storage for large payloads.
+- [x] Add content hashing for stored payloads.
 - [ ] Add optional compression.
-- [ ] Add trace retention configuration.
-- [ ] Keep raw provider payload capture disabled by default.
+- [x] Add trace retention configuration.
+- [x] Keep raw provider payload capture disabled by default.
 
 ### Provenance
 
