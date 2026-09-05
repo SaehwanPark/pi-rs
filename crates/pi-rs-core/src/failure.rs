@@ -194,6 +194,21 @@ impl ModelFailure {
     self
   }
 
+  /// Whether replaying the failed request is permitted.
+  ///
+  /// This is the single rule the runtime should consult rather than
+  /// re-deriving it from scattered fields. Two conditions must hold: the
+  /// failure is an availability failure (or an explicit override says so), and
+  /// the caller has not already seen output.
+  ///
+  /// The second condition is the one that is easy to get wrong: replaying after
+  /// deltas were emitted duplicates visible text, and replaying past a tool
+  /// boundary risks repeating a mutation. A caller that has already surfaced
+  /// output must fail the turn, or fail over, instead of silently retrying.
+  pub fn safe_to_retry(&self) -> bool {
+    self.kind.is_retryable() && !self.partial_output_emitted
+  }
+
   /// Map an HTTP status plus a short provider message to a failure kind.
   ///
   /// Context overflow is checked first because providers commonly report it as
@@ -235,8 +250,11 @@ fn looks_like_context_overflow(message: &str) -> bool {
     || lowered.contains("context_length")
     || lowered.contains("maximum context")
     || lowered.contains("context window")
+    || lowered.contains("context size")
+    || lowered.contains("exceeds the supported")
     || lowered.contains("too many tokens")
     || lowered.contains("prompt is too long")
+    || lowered.contains("reduce the length of the messages")
 }
 
 /// Classification of tool-completion certainty, shared by the tool runtime and
@@ -292,6 +310,12 @@ mod tests {
       "This model's maximum context length is 8192 tokens",
       "prompt is too long: 40000 tokens",
       "request exceeds context window",
+      // llama.cpp and llama-server phrase it this way, and treating it as a
+      // generic 400 would hide the one overflow a local runtime actually hits.
+      // Captured from llama.cpp llama-server, with its real error type
+      // (`exceed_context_size_error`) in the body.
+      "request (300010 tokens) exceeds the available context size (131072 tokens), try increasing it",
+      "Please reduce the length of the messages or completion",
     ] {
       assert_eq!(
         ModelFailure::classify_http(400, message),
@@ -321,6 +345,78 @@ mod tests {
     // `is_retryable`, takeover uses `is_failover_candidate`.
     assert!(ModelFailureKind::Protocol.is_failover_candidate());
     assert!(!ModelFailureKind::Protocol.is_retryable());
+  }
+
+  #[test]
+  fn a_mid_turn_failure_keeps_phase_and_partial_output_separate_from_kind() {
+    // The three facts answer three different questions: `kind` is whether the
+    // provider is at fault and worth retrying; `phase` is where the boundary
+    // sits; `partial_output_emitted` is whether the user already saw something.
+    let interrupted = ModelFailure::new(
+      ModelFailureKind::Transport,
+      FailurePhase::Streaming,
+      "connection reset mid-stream",
+    )
+    .with_partial_output(true);
+    assert_eq!(interrupted.kind, ModelFailureKind::Transport);
+    assert!(interrupted.kind.is_retryable());
+    assert!(
+      !interrupted.safe_to_retry(),
+      "replay would duplicate visible text"
+    );
+    assert!(interrupted.partial_output_emitted);
+
+    let before_request = ModelFailure::new(
+      ModelFailureKind::Transport,
+      FailurePhase::WaitingForResponse,
+      "connection refused",
+    );
+    assert!(
+      before_request.safe_to_retry(),
+      "nothing was sent, so retry is safe"
+    );
+    assert!(!before_request.partial_output_emitted);
+
+    // A model that answered badly is not an availability failure, and a
+    // cancelled turn is never retried.
+    let rejected = ModelFailure::new(
+      ModelFailureKind::Semantic,
+      FailurePhase::Normalizing,
+      "model produced an incoherent answer",
+    );
+    assert!(!rejected.kind.is_retryable());
+    assert!(!rejected.safe_to_retry());
+    let cancelled = ModelFailure::new(
+      ModelFailureKind::Cancelled,
+      FailurePhase::Streaming,
+      "user aborted",
+    )
+    .with_partial_output(true);
+    assert_eq!(cancelled.kind, ModelFailureKind::Cancelled);
+    assert!(!cancelled.safe_to_retry());
+  }
+
+  #[test]
+  fn retry_after_survives_the_round_trip_as_a_duration() {
+    let failure = ModelFailure::new(
+      ModelFailureKind::RateLimited,
+      FailurePhase::WaitingForResponse,
+      "slow down",
+    )
+    .with_retry_after_ms(2_500);
+    let decoded: ModelFailure =
+      serde_json::from_str(&serde_json::to_string(&failure).unwrap()).unwrap();
+    assert_eq!(decoded.retry_after_ms, Some(2_500));
+    let decoded: ModelFailure = serde_json::from_str(
+      &serde_json::to_string(&ModelFailure::new(
+        ModelFailureKind::Transport,
+        FailurePhase::PreRequest,
+        "no hint",
+      ))
+      .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(decoded.retry_after_ms, None);
   }
 
   #[test]

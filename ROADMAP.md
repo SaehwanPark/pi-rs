@@ -77,12 +77,22 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Providers
 
-- [ ] Implement one local/OpenAI-compatible provider.
+> `pi-rs-provider` implements one OpenAI-compatible adapter (`OpenAiCompat`) used
+> against local llama.cpp. Streaming, tool-call, exposed-reasoning, and failure
+> normalization are covered by unit tests plus wire-level integration tests
+> against a fake OpenAI server (`crates/pi-rs-provider/tests/transport.rs`), and
+> verified against the real local endpoint: reasoning arrived as a separate typed
+> event with `Native` provenance, the visible answer stayed separate, and the
+> turn reported `finish_reason=stop` with usage. "One remote/cloud-compatible
+> provider" stays open until verified against a real remote endpoint; credential
+> handling (`api_key`, `api_key_env`, redaction) is implemented and tested.
+
+- [x] Implement one local/OpenAI-compatible provider.
 - [ ] Implement one remote/cloud-compatible provider.
-- [ ] Normalize streaming output.
-- [ ] Normalize tool-call output.
-- [ ] Normalize exposed reasoning.
-- [ ] Normalize provider failures.
+- [x] Normalize streaming output.
+- [x] Normalize tool-call output.
+- [x] Normalize exposed reasoning.
+- [x] Normalize provider failures.
 
 ### Basic tools
 
