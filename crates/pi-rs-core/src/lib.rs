@@ -51,7 +51,7 @@ pub use context::{
   ContextPolicy, ContextProfile, ContextState, ContextThresholds, ProfilePolicy, ReductionReason,
 };
 pub use event::{
-  AgentEvent, AttributedMessage, CheckpointCreated, ContextCompactionCompleted,
+  AgentEvent, AssistantDelta, AttributedMessage, CheckpointCreated, ContextCompactionCompleted,
   ContextCompactionStarted, ContextReduced, Diagnostic, DiagnosticLevel, EventEnvelope, EventMeta,
   ExternalContextRetrieved, ModelEpochStarted, ModelFailover, ModelRequestCompleted,
   ModelRequestStarted, ModelRetry, ReasoningDelta, SessionEndReason, SessionEnded, SessionStarted,

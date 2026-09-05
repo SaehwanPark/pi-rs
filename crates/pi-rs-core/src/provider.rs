@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
   capability::{ModelCapabilities, ModelRef},
-  failure::ModelFailure,
+  failure::{CompletionCertainty, ModelFailure},
   message::{Message, ToolCallBlock},
   provenance::ReasoningProvenance,
 };
@@ -173,6 +173,20 @@ pub struct CompletionUsage {
   pub output_tokens: Option<u64>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub finish_reason: Option<String>,
+  /// Whether the adapter actually observed the end of the response.
+  ///
+  /// Usage counts are optional and a missing count is normal; an *unobserved*
+  /// completion is not. Without this field the trait signature would silently turn
+  /// "the stream stopped mid-sentence" into "the turn succeeded", and a runtime
+  /// cannot recover a distinction its contract erased. Defaults to
+  /// [`CompletionCertainty::Certain`] so traces written before the field existed
+  /// still load, and loading them means trusting what they claimed.
+  #[serde(default = "certain")]
+  pub certainty: CompletionCertainty,
+}
+
+fn certain() -> CompletionCertainty {
+  CompletionCertainty::Certain
 }
 
 impl CompletionUsage {
@@ -181,7 +195,27 @@ impl CompletionUsage {
       input_tokens: None,
       output_tokens: None,
       finish_reason: None,
+      certainty: CompletionCertainty::Certain,
     }
+  }
+
+  /// A response whose completion was never observed.
+  ///
+  /// This is the shape an adapter returns when the transport ended cleanly enough
+  /// to count tokens but never said the turn was over. It is not a failure by
+  /// itself; it is the runtime's cue to decide what an unfinished answer means.
+  pub fn unfinished() -> Self {
+    Self {
+      input_tokens: None,
+      output_tokens: None,
+      finish_reason: None,
+      certainty: CompletionCertainty::Unknown,
+    }
+  }
+
+  /// `true` when the adapter saw a definitive end of response.
+  pub fn is_certain(&self) -> bool {
+    self.certainty == CompletionCertainty::Certain
   }
 }
 
@@ -353,6 +387,7 @@ mod tests {
         input_tokens: Some(request.estimate_tokens()),
         output_tokens: Some(4),
         finish_reason: Some("stop".into()),
+        certainty: CompletionCertainty::Certain,
       })
     }
   }
