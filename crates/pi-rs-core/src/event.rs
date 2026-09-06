@@ -446,10 +446,20 @@ pub struct ContextReduced {
   pub reason: ReductionReason,
   pub original_bytes: u64,
   pub visible_bytes: u64,
-  pub blob: BlobRef,
+  /// Where the withheld bytes went, when somewhere could hold them.
+  ///
+  /// `None` means the bytes are gone and only this record remains. The event is
+  /// still emitted, because "the model was shown less" is the fact that has to
+  /// survive; whether it can be undone is a second question, and a record that only
+  /// existed when recovery was possible would silently delete itself in exactly the
+  /// case that needs auditing.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub blob: Option<BlobRef>,
   /// Human-usable pointer back to the full payload, for example
-  /// `blobs/7f2c…`. Recovery must be possible from this string alone.
-  pub recovery_ref: String,
+  /// `blobs/7f2c…`. Recovery must be possible from this string alone, and its
+  /// absence says plainly that there is nothing to recover from.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub recovery_ref: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub tool_call_id: Option<ToolCallId>,
 }
@@ -513,6 +523,40 @@ mod tests {
 
   fn model() -> ModelRef {
     ModelRef::new("local", "qwen")
+  }
+
+  /// A reduction record must read both ways.
+  ///
+  /// Older journals always carried a blob and a reference; a new one may carry
+  /// neither, when the bytes were withheld and nowhere could hold them. Requiring
+  /// either field would make an existing session unreadable, and emitting two nulls
+  /// on every ordinary reduction would tax every line for a fact that is usually
+  /// absent.
+  #[test]
+  fn a_reduction_record_reads_both_ways() {
+    let reduced = ContextReduced {
+      reason: ReductionReason::RecentTargetExceeded { target_tokens: 64 },
+      original_bytes: 12_000,
+      visible_bytes: 300,
+      blob: Some(BlobRef::for_bytes(b"payload".as_slice(), None)),
+      recovery_ref: Some("blobs/aa:aa".into()),
+      tool_call_id: None,
+    };
+    let recorded = serde_json::to_value(&reduced).unwrap();
+    assert_eq!(recorded["recovery_ref"], "blobs/aa:aa", "{recorded}");
+    let decoded: ContextReduced = serde_json::from_value(recorded).unwrap();
+    assert_eq!(decoded, reduced, "a line that had both still reads");
+
+    let unrecoverable = ContextReduced {
+      blob: None,
+      recovery_ref: None,
+      ..reduced
+    };
+    let stored = serde_json::to_value(&unrecoverable).unwrap();
+    assert!(stored.get("blob").is_none(), "{stored}");
+    assert!(stored.get("recovery_ref").is_none(), "{stored}");
+    let decoded: ContextReduced = serde_json::from_value(stored).unwrap();
+    assert_eq!(decoded.recovery_ref, None, "absence decodes as absence");
   }
 
   #[test]

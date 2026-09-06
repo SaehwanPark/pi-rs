@@ -379,6 +379,15 @@ Before failover:
 4. record failover boundary;
 5. continue from committed execution state.
 
+When step 2 fails, failover is refused rather than attempted: the refusal names the
+backup and the capability it lacks, and no request reaches that endpoint. An abstention
+that is never stated is indistinguishable from a backup that was never configured, and
+the operator cannot act on a decision they cannot see.
+
+A context-window shortfall alone is not a refusal. It is a cost, and the takeover records
+which gaps remained and whether history was actually shortened — not merely that the
+backup's window was smaller.
+
 After failover, the backup remains active until the user explicitly changes model.
 
 Do not auto-ping-pong.

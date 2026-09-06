@@ -125,6 +125,8 @@ The runtime retries eligible transient failures first, then fails over only when
 
 A configured backup adapter is built the first time a request actually needs it. Configuring a backup that is never used costs nothing, and a backup that cannot be built fails at the moment it is needed, naming itself.
 
+Before a backup takes over, its declared capabilities are compared with what the session is doing. A backup that cannot do the work in flight — no tool calling, or no image input when the session needs it — is refused by name, with the missing capability stated, and is never contacted. A backup with a smaller context window does take over, because history can be shortened to fit, and the transcript says what was given up.
+
 ### MCP
 
 `pi-rs` should:

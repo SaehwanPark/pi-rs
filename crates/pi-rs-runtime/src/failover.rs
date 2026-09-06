@@ -24,6 +24,14 @@ pub enum Recovery {
     to: ModelRef,
     gaps: Vec<CapabilityGap>,
   },
+  /// A backup is attached and *named*, but it cannot do this work, so it is not
+  /// asked. Distinct from [`Recovery::Abort`], where there was no candidate to
+  /// reject: "the backup has no tool calling" is a decision the operator can act
+  /// on, and "no backup is configured" is not that decision.
+  Refused {
+    to: ModelRef,
+    gaps: Vec<CapabilityGap>,
+  },
   /// Stop and report. Nothing further is safe to try automatically.
   Abort,
 }
@@ -126,8 +134,11 @@ impl FailoverPolicy {
     };
     let gaps = capabilities.gaps(&self.required);
     if ModelCapabilities::has_hard_gap(&gaps) {
-      // The backup cannot do this work at all. Refuse the switch.
-      return Recovery::Abort;
+      // The backup cannot do this work at all. Refuse it by name, with the gaps
+      // that made it impossible: silently giving up on the primary instead reads
+      // as one provider failure, and the operator never learns that a configured
+      // backup was never a candidate.
+      return Recovery::Refused { to: backup, gaps };
     }
     // A context-window gap alone is not a blocker: compaction closes it, and the
     // caller is told which gaps remain so the cost of takeover stays visible.
@@ -235,13 +246,50 @@ mod tests {
   }
 
   #[test]
-  fn a_backup_that_cannot_do_the_work_is_not_used() {
+  fn a_backup_that_cannot_do_the_work_is_refused_by_name() {
     let policy = backup(false, 128_000).with_max_attempts(1);
     let decision = policy.decide(ModelFailureKind::ProviderUnavailable, 1, false);
+    match decision {
+      Recovery::Refused { to, gaps } => {
+        assert_eq!(to, model("backup"), "the refusal names what was refused");
+        assert_eq!(gaps, vec![CapabilityGap::Tools]);
+      }
+      other => panic!("expected a named refusal, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn a_backup_that_cannot_see_the_required_modalities_is_refused() {
+    // The session needs text and images; a text-only backup would answer *something*,
+    // which is worse than failing: the image would simply be missing from the request
+    // the backup receives, and nothing would say so.
+    let policy = FailoverPolicy::default()
+      .with_backup(model("backup"), caps(true, 128_000))
+      .requiring(ModelCapabilities {
+        text: true,
+        images: true,
+        tools: false,
+        exposed_reasoning: ReasoningExposure::None,
+        context_window: 128_000,
+        max_output_tokens: None,
+      })
+      .with_max_attempts(1);
+    match policy.decide(ModelFailureKind::ProviderUnavailable, 1, false) {
+      Recovery::Refused { gaps, .. } => assert_eq!(gaps, vec![CapabilityGap::Images]),
+      other => panic!("expected a named refusal, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn no_candidate_is_a_different_decision_from_a_refused_one() {
+    // Both stop the turn, and collapsing them would report "the backup cannot do
+    // this" when no backup was configured at all.
+    let policy = FailoverPolicy::default()
+      .with_max_attempts(1)
+      .requiring(tool_use_primary());
     assert_eq!(
-      decision,
-      Recovery::Abort,
-      "a backup without tool calling trades one failure for a silent regression"
+      policy.decide(ModelFailureKind::ProviderUnavailable, 1, false),
+      Recovery::Abort
     );
   }
 

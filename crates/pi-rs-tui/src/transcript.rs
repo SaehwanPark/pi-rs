@@ -409,11 +409,13 @@ pub fn render_event(event: &AgentEvent, options: &TranscriptOptions) -> Vec<Rend
           format_bytes(e.visible_bytes)
         ),
       );
-      fact(
-        &mut line,
-        Role::Path,
-        &format!("recover {}", e.recovery_ref),
-      );
+      match e.recovery_ref.as_deref() {
+        Some(reference) => fact(&mut line, Role::Path, &format!("recover {reference}")),
+        // The withheld bytes are gone. That belongs on the line: a record which only
+        // mentioned the size change would make a lost payload look like a harmless
+        // summary.
+        None => fact(&mut line, Role::StateUnknown, "not recoverable"),
+      };
       vec![line]
     }
     E::ContextCompactionStarted(e) => {
@@ -1086,13 +1088,29 @@ mod tests {
       reason: ReductionReason::OversizedToolOutput { limit_bytes: 4096 },
       original_bytes: 40_960,
       visible_bytes: 2048,
-      blob: BlobRef::for_bytes(b"x".as_slice(), None),
-      recovery_ref: "blobs/aa:aa".into(),
+      blob: Some(BlobRef::for_bytes(b"x".as_slice(), None)),
+      recovery_ref: Some("blobs/aa:aa".into()),
       tool_call_id: Some(ToolCallId::new()),
     });
     let text = plain(&render_event(&event, &options()));
     assert!(text.contains("40 KiB → 2.0 KiB"), "{text}");
     assert!(text.contains("recover blobs/aa:aa"), "{text}");
+  }
+
+  #[test]
+  fn a_reduction_that_cannot_be_undone_says_so() {
+    // The absence of a pointer is information, not a formatting gap.
+    let event = AgentEvent::ContextReduced(pi_rs_core::ContextReduced {
+      reason: ReductionReason::RecentTargetExceeded { target_tokens: 76 },
+      original_bytes: 12_000,
+      visible_bytes: 300,
+      blob: None,
+      recovery_ref: None,
+      tool_call_id: None,
+    });
+    let text = plain(&render_event(&event, &options()));
+    assert!(text.contains("not recoverable"), "{text}");
+    assert!(!text.contains("recover "), "{text}");
   }
 
   #[test]
@@ -1233,8 +1251,8 @@ mod tests {
         },
         original_bytes: 40_960,
         visible_bytes: 2048,
-        blob: BlobRef::for_bytes(b"x".as_slice(), None),
-        recovery_ref: "blobs/aa:aa".into(),
+        blob: Some(BlobRef::for_bytes(b"x".as_slice(), None)),
+        recovery_ref: Some("blobs/aa:aa".into()),
         tool_call_id: None,
       }),
       AgentEvent::ContextCompactionStarted(pi_rs_core::ContextCompactionStarted {

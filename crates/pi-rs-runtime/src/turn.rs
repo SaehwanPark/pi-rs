@@ -852,9 +852,11 @@ impl<'a> TurnLoop<'a> {
         let narrow = gaps
           .iter()
           .any(|gap| matches!(gap, CapabilityGap::ContextWindow { .. }));
-        if narrow {
-          self.rebudget(turn_id.clone())?;
-        }
+        let dropped = if narrow {
+          self.rebudget(turn_id.clone())?
+        } else {
+          0
+        };
         let from = self.active_model();
         let epoch = Epoch {
           index: self.epoch_index() + 1,
@@ -869,7 +871,11 @@ impl<'a> TurnLoop<'a> {
             to: to.clone(),
             kind: failure.kind,
             gaps,
-            compacted: narrow,
+            // Whether history was actually shortened, not whether the backup's window
+            // is smaller: with one turn in flight there is nothing to drop, and a
+            // recorded reduction that never happened is exactly the false provenance
+            // this codebase refuses elsewhere.
+            compacted: dropped > 0,
           }),
         )?;
         self.emit(
@@ -884,6 +890,19 @@ impl<'a> TurnLoop<'a> {
         self.epochs.push(epoch);
         Ok(Action::Takeover)
       }
+      Recovery::Refused { to, gaps } => {
+        let gaps = gaps
+          .iter()
+          .map(|gap| gap.to_string())
+          .collect::<Vec<_>>()
+          .join(", ");
+        self.diagnostic(
+          Some(turn_id.clone()),
+          DiagnosticLevel::Error,
+          format!("failover to {to} refused: the backup cannot do this work ({gaps})"),
+        )?;
+        Ok(Action::Stop)
+      }
       Recovery::Abort => Ok(Action::Stop),
     }
   }
@@ -896,7 +915,10 @@ impl<'a> TurnLoop<'a> {
   /// is the one that is failing. Oldest turns are dropped and the fact is
   /// recorded, because a silently shortened history is indistinguishable from a
   /// lost one.
-  fn rebudget(&mut self, turn_id: TurnId) -> Result<(), TurnError> {
+  ///
+  /// Returns how many turns were dropped, which is the difference between reporting
+  /// a rebudget and performing one.
+  fn rebudget(&mut self, turn_id: TurnId) -> Result<u32, TurnError> {
     let target = self
       .failover
       .backup_capabilities
@@ -912,26 +934,25 @@ impl<'a> TurnLoop<'a> {
     }
     if dropped > 0 {
       self.context_epoch += 1;
-      if let Some(blob) = self
+      let blob = self
         .trace
-        .put_payload(format!("dropped {dropped} oldest turns for rebudget").as_bytes())?
-      {
-        self.emit(
-          Some(turn_id.clone()),
-          AgentEvent::ContextReduced(ContextReduced {
-            reason: ReductionReason::RecentTargetExceeded {
-              target_tokens: target,
-            },
-            original_bytes: before,
-            visible_bytes: estimate_messages(&self.messages),
-            recovery_ref: blob.recovery_ref(),
-            blob,
-            tool_call_id: None,
-          }),
-        )?;
-      }
+        .put_payload(format!("dropped {dropped} oldest turns for rebudget").as_bytes())?;
+      let recovery_ref = blob.as_ref().map(BlobRef::recovery_ref);
+      self.emit(
+        Some(turn_id.clone()),
+        AgentEvent::ContextReduced(ContextReduced {
+          reason: ReductionReason::RecentTargetExceeded {
+            target_tokens: target,
+          },
+          original_bytes: before,
+          visible_bytes: estimate_messages(&self.messages),
+          recovery_ref,
+          blob,
+          tool_call_id: None,
+        }),
+      )?;
     }
-    Ok(())
+    Ok(dropped)
   }
 
   /// Build the model request, consulting the context policy first.
@@ -1146,23 +1167,23 @@ impl<'a> TurnLoop<'a> {
     if let Some(full) = executed.full_output.as_ref() {
       // Reduction already happened in the registry. Here the full bytes become
       // recoverable, and the event records that the model saw a summary.
-      if let Some(blob) = self.trace.put_payload(full)? {
-        reduced = true;
-        recovery_blob = Some(blob.clone());
-        self.emit(
-          Some(turn_id.clone()),
-          AgentEvent::ContextReduced(ContextReduced {
-            reason: ReductionReason::OversizedToolOutput {
-              limit_bytes: full.len() as u64,
-            },
-            original_bytes: full.len() as u64,
-            visible_bytes: text.len() as u64,
-            recovery_ref: blob.recovery_ref(),
-            blob,
-            tool_call_id: Some(call.id.clone()),
-          }),
-        )?;
-      }
+      let blob = self.trace.put_payload(full)?;
+      reduced = true;
+      recovery_blob = blob.clone();
+      let recovery_ref = blob.as_ref().map(BlobRef::recovery_ref);
+      self.emit(
+        Some(turn_id.clone()),
+        AgentEvent::ContextReduced(ContextReduced {
+          reason: ReductionReason::OversizedToolOutput {
+            limit_bytes: full.len() as u64,
+          },
+          original_bytes: full.len() as u64,
+          visible_bytes: text.len() as u64,
+          recovery_ref,
+          blob,
+          tool_call_id: Some(call.id.clone()),
+        }),
+      )?;
     }
 
     let mutating = !self
@@ -2219,8 +2240,14 @@ mod tests {
       })
       .expect("a reduced built-in result must have a recovery event");
     assert!(reduced.original_bytes > reduced.visible_bytes);
-    assert!(reduced.recovery_ref.contains("blobs/"));
-    let blob_path = trace.session().blobs().path_for(&reduced.blob);
+    // A store-backed reduction is the recoverable case, and this asserts it as such:
+    // the pointer and the reference are both present.
+    let reference = reduced
+      .recovery_ref
+      .expect("a reduction with a blob store is recoverable");
+    assert!(reference.contains("blobs/"), "{reference}");
+    let blob = reduced.blob.expect("the reference travels with the blob");
+    let blob_path = trace.session().blobs().path_for(&blob);
     let blob_text = std::fs::read_to_string(blob_path).unwrap();
     assert!(blob_text.contains("[redacted:field]"), "{blob_text}");
     assert!(
@@ -2606,6 +2633,161 @@ mod tests {
     );
     // Two attempts each, then stop: the guard also ends the request-budget bleed.
     assert_eq!(primary.levels().len() + backup.levels().len(), 4);
+  }
+
+  #[test]
+  fn a_backup_without_tool_calling_is_refused_by_name_and_never_asked() {
+    // The capability gate end to end, inside the loop: the session ran on a model
+    // that calls tools, the configured backup cannot, and so the backup is not used.
+    // What is new is that the refusal is *said*. Silent abstention looks identical to
+    // "no backup was configured", and the operator has no way to learn that the
+    // backup they set up was never a candidate for this work.
+    let primary =
+      Scripted::new("primary", Vec::new()).always_fails(ModelFailureKind::ProviderUnavailable);
+    let mut backup = Scripted::new("backup", vec![text("unused")]);
+    backup.capabilities.tools = false;
+    let tools = registry_with(Vec::new());
+    let mut trace = Recorder::default();
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      primary.capabilities().context_window,
+    );
+    let error = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_backup(&backup)
+    .run_turn("hi", &CancelToken::new(), &mut SilentProgress)
+    .expect_err("a backup that cannot do the work is not a rescue");
+
+    assert!(matches!(error, TurnError::Unavailable(_)), "{error:?}");
+    assert_eq!(
+      backup.levels().len(),
+      0,
+      "a refused backup is never addressed, so no cost is paid for it"
+    );
+    assert_eq!(
+      trace.count("model_failover"),
+      0,
+      "a refusal is not a takeover, and must not be recorded as one"
+    );
+    assert!(
+      trace
+        .diagnostics()
+        .iter()
+        .any(|message| message.contains("test/backup") && message.contains("tool calling")),
+      "the refusal names the backup and the missing capability: {:?}",
+      trace.diagnostics()
+    );
+  }
+
+  #[test]
+  fn a_narrower_backup_is_not_credited_with_a_shortening_it_did_not_do() {
+    // One turn is in flight, so there is no older history to drop. The takeover is
+    // still correct and the window gap is still reported; what may not be reported
+    // is a reduction that never happened.
+    let primary =
+      Scripted::new("primary", Vec::new()).always_fails(ModelFailureKind::ProviderUnavailable);
+    let mut backup = Scripted::new("backup", vec![text("from a small window")]);
+    backup.capabilities.context_window = 1_024;
+    let tools = registry_with(Vec::new());
+    let mut trace = Recorder::default();
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      primary.capabilities().context_window,
+    );
+    let report = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_backup(&backup)
+    .run_turn("hi", &CancelToken::new(), &mut SilentProgress)
+    .expect("a narrower backup may still take over");
+
+    assert_eq!(report.text, "from a small window");
+    let failover = trace.find("model_failover").expect("takeover recorded");
+    assert_eq!(
+      failover["compacted"], false,
+      "nothing was dropped, so nothing may claim it was: {failover}"
+    );
+    assert!(
+      failover["gaps"].to_string().contains("context_window"),
+      "the cost of the switch is still recorded: {failover}"
+    );
+    assert_eq!(
+      trace.count("context_reduced"),
+      0,
+      "{kinds:?}",
+      kinds = trace.kinds()
+    );
+  }
+
+  #[test]
+  fn a_narrower_backup_drops_older_turns_before_it_takes_over() {
+    // The other side of the same line: with real history in flight, takeover into a
+    // small window shortens it, says so, and records what was given up.
+    let primary =
+      Scripted::new("primary", Vec::new()).always_fails(ModelFailureKind::ProviderUnavailable);
+    let mut backup = Scripted::new("backup", vec![text("from a small window")]);
+    // Target is the window less a kilotoken, so this backup can hold the newest turn
+    // and little else.
+    backup.capabilities.context_window = 1_100;
+    let history = vec![
+      Message::user("a".repeat(20_000)),
+      Message::assistant("b".repeat(20_000)),
+    ];
+    let tools = registry_with(Vec::new());
+    let mut trace = Recorder::default();
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      primary.capabilities().context_window,
+    );
+    let report = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_backup(&backup)
+    .with_messages(history)
+    .run_turn("continue", &CancelToken::new(), &mut SilentProgress)
+    .expect("a narrower backup may still take over");
+
+    assert_eq!(report.text, "from a small window");
+    let failover = trace.find("model_failover").expect("takeover recorded");
+    assert_eq!(
+      failover["compacted"], true,
+      "history really was shortened: {failover}"
+    );
+    let reduced = trace
+      .find("context_reduced")
+      .expect("a dropped history is recorded, not silently lost");
+    assert!(
+      reduced["original_bytes"].as_u64().unwrap_or_default()
+        > reduced["visible_bytes"].as_u64().unwrap_or_default(),
+      "the record shows what was given up: {reduced}"
+    );
+    // And the backup is asked with what it can actually hold.
+    let served = backup
+      .requests()
+      .into_iter()
+      .last()
+      .expect("the backup was asked");
+    assert_eq!(
+      served.messages.len(),
+      1,
+      "only the turn in flight survives a window that small"
+    );
   }
 
   #[test]

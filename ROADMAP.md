@@ -250,11 +250,16 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### L0 reduction
 
-- [ ] Detect oversized new tool output.
-- [ ] Archive full output.
-- [ ] Replace with bounded model-visible representation.
-- [ ] Preserve recovery reference.
-- [ ] Log reduction event.
+> Evidenced by the oversized-tool-output path: `pi-rs-runtime` reads the journal back and
+> asserts that a reduced result carries a `context_reduced` event whose recovery
+> reference resolves to a blob holding the full, redacted output. A reduction that
+> cannot be stored still logs the event, with no reference, rather than logging nothing.
+
+- [x] Detect oversized new tool output.
+- [x] Archive full output.
+- [x] Replace with bounded model-visible representation.
+- [x] Preserve recovery reference.
+- [x] Log reduction event.
 
 ### L1 ordinary compaction
 
@@ -324,12 +329,18 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Capability gate
 
-- [ ] Compare primary and backup capabilities.
-- [ ] Detect missing image support.
-- [ ] Detect missing tool support.
-- [ ] Detect smaller context window.
-- [ ] Rebudget/compact before takeover when possible.
-- [ ] Refuse impossible failover explicitly.
+> The gate compares declared capability snapshots, so it decides before any adapter is
+> built. `FailoverPolicy::decide` is covered by `crates/pi-rs-runtime/src/failover.rs`
+> tests for each gap kind, and the two decisions that reach a user — refusal by name,
+> and a narrowed takeover that names the window it lost — are covered end to end in
+> `tests/failover_cli.rs`.
+
+- [x] Compare primary and backup capabilities.
+- [x] Detect missing image support.
+- [x] Detect missing tool support.
+- [x] Detect smaller context window.
+- [x] Rebudget/compact before takeover when possible.
+- [x] Refuse impossible failover explicitly.
 
 ### Side-effect continuity
 
@@ -347,12 +358,13 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 ### Stage gate
 
 > The checked lines below are evidenced by `tests/failover_cli.rs`, which drives the
-> real CLI against loopback HTTP endpoints: a 503 twice, then a backup. The capability
-> gate and the smaller-backup path stay open because no test yet compares two models
-> with different capabilities.
+> real CLI against loopback HTTP endpoints: a 503 twice, then a backup whose endpoint
+> declares different capabilities from the primary's. A text-only backup is refused by
+> name and never contacted; a smaller-window backup takes over and the transcript names
+> the window it lost.
 
 - [x] Simulated provider failure can continue on backup without replaying committed side effects.
-- [ ] Smaller backup context is handled through compaction or explicit refusal.
+- [x] Smaller backup context is handled through compaction or explicit refusal.
 - [x] Failover provenance is visible in trace and UI.
 - [x] Backup initialization does not slow normal startup.
 
