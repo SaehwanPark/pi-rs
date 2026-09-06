@@ -13,7 +13,7 @@ use std::{
   path::{Path, PathBuf},
 };
 
-use pi_rs_compat::skill::{self, Discovery, SkillSource, SkillWarning, Trust};
+use pi_rs_compat::skill::{self, Discovery, SkillWarning, Source, Trust};
 
 fn home() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -55,7 +55,7 @@ fn a_folded_description_becomes_the_one_line_the_model_sees() {
     "Extracts text and tables from PDF files. Fills forms, and merges documents."
   );
   assert_eq!(skill.license.as_deref(), Some("Apache-2.0"));
-  assert_eq!(skill.source, SkillSource::Global);
+  assert_eq!(skill.source, Source::Global);
   assert!(skill.path.ends_with(".agents/skills/pdf-tools/SKILL.md"));
 }
 

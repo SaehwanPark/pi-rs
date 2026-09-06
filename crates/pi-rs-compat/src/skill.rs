@@ -49,7 +49,10 @@ use std::{
   path::{Path, PathBuf},
 };
 
-use crate::frontmatter::{self, Extract};
+use crate::{
+  frontmatter::{self, Extract},
+  scan::{Discovery, Source, Trust, is_dir, is_file, project_dirs},
+};
 
 /// Longest `name` the Agent Skills standard allows.
 pub const MAX_NAME_CHARS: usize = 64;
@@ -57,35 +60,6 @@ pub const MAX_NAME_CHARS: usize = 64;
 pub const MAX_DESCRIPTION_CHARS: usize = 1024;
 /// How deep a skill location is walked before the scan gives up and says so.
 pub const MAX_DEPTH: usize = 8;
-
-/// Whether the project's own files may be read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Trust {
-  /// The operator has accepted this project.
-  Trusted,
-  /// Nobody has. Project locations are skipped entirely.
-  Untrusted,
-}
-
-/// Which kind of location a skill came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SkillSource {
-  /// Under `$HOME`: the user's own configuration, not something a repository supplied.
-  Global,
-  /// Under the working directory or an ancestor of it, including an inner repository
-  /// inside a larger one.
-  Project,
-}
-
-impl SkillSource {
-  /// Stable machine label.
-  pub fn as_str(self) -> &'static str {
-    match self {
-      Self::Global => "global",
-      Self::Project => "project",
-    }
-  }
-}
 
 /// A skill that was loaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +69,7 @@ pub struct Skill {
   /// The file it was read from: `SKILL.md`, or a `.md` file in a location that accepts
   /// them. Relative references inside the skill resolve against its parent directory.
   pub path: PathBuf,
-  pub source: SkillSource,
+  pub source: Source,
   pub license: Option<String>,
   pub compatibility: Option<String>,
   /// `allowed-tools`, split on spaces. Pi calls this experimental; nothing here acts
@@ -155,96 +129,28 @@ impl Scan {
   }
 }
 
-/// Where to look, and under what assumptions.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Discovery {
-  /// `$HOME` if known. Without it, only project locations are read.
-  pub home: Option<PathBuf>,
-  /// The working directory the project is anchored at.
-  pub cwd: PathBuf,
-  pub trust: Trust,
-}
-
-impl Discovery {
-  /// Global locations plus the project at `cwd`, untrusted.
-  pub fn new(cwd: impl Into<PathBuf>) -> Self {
-    Self {
-      home: home_dir(),
-      cwd: cwd.into(),
-      trust: Trust::Untrusted,
-    }
-  }
-
-  /// Read the project's own locations too.
-  pub fn trusted(mut self) -> Self {
-    self.trust = Trust::Trusted;
-    self
-  }
-}
-
-/// `$HOME`, falling back to the Windows spelling.
-pub fn home_dir() -> Option<PathBuf> {
-  ["HOME", "USERPROFILE"]
-    .iter()
-    .find_map(std::env::var_os)
-    .map(PathBuf::from)
-    .filter(|home| home.is_absolute())
-}
-
 /// Scan the documented locations.
 pub fn discover(discovery: &Discovery) -> Scan {
   let mut scanner = Scanner::default();
   if let Some(home) = &discovery.home {
     scanner.location(
       &home.join(".pi/agent/skills"),
-      SkillSource::Global,
+      Source::Global,
       Family::DotPi,
     );
-    scanner.location(
-      &home.join(".agents/skills"),
-      SkillSource::Global,
-      Family::Agents,
-    );
+    scanner.location(&home.join(".agents/skills"), Source::Global, Family::Agents);
   }
   if discovery.trust == Trust::Trusted {
     for project in project_dirs(&discovery.cwd) {
-      scanner.location(
-        &project.join(".pi/skills"),
-        SkillSource::Project,
-        Family::DotPi,
-      );
+      scanner.location(&project.join(".pi/skills"), Source::Project, Family::DotPi);
       scanner.location(
         &project.join(".agents/skills"),
-        SkillSource::Project,
+        Source::Project,
         Family::Agents,
       );
     }
   }
   scanner.finish()
-}
-
-/// The project roots whose skill locations are read: `cwd` upward through the git root,
-/// or to the filesystem root when there is no repository.
-fn project_dirs(cwd: &Path) -> Vec<PathBuf> {
-  let ceiling = git_root(cwd);
-  let mut dirs = Vec::new();
-  let mut current = Some(cwd.to_path_buf());
-  while let Some(dir) = current {
-    let at_ceiling = ceiling.as_deref() == Some(dir.as_path());
-    current = dir.parent().map(Path::to_path_buf);
-    dirs.push(dir);
-    if at_ceiling {
-      break;
-    }
-  }
-  dirs
-}
-
-fn git_root(cwd: &Path) -> Option<PathBuf> {
-  cwd
-    .ancestors()
-    .find(|dir| dir.join(".git").exists())
-    .map(Path::to_path_buf)
 }
 
 /// How a file is treated inside one location family.
@@ -275,13 +181,13 @@ struct Scanner {
 }
 
 impl Scanner {
-  fn location(&mut self, root: &Path, source: SkillSource, family: Family) {
+  fn location(&mut self, root: &Path, source: Source, family: Family) {
     if root.is_dir() {
       self.walk(root, true, 0, source, family);
     }
   }
 
-  fn walk(&mut self, dir: &Path, at_root: bool, depth: usize, source: SkillSource, family: Family) {
+  fn walk(&mut self, dir: &Path, at_root: bool, depth: usize, source: Source, family: Family) {
     if depth > MAX_DEPTH {
       self.warnings.push(SkillWarning::TooDeep {
         path: dir.to_path_buf(),
@@ -332,7 +238,7 @@ impl Scanner {
     }
   }
 
-  fn collect(&mut self, path: &Path, source: SkillSource) {
+  fn collect(&mut self, path: &Path, source: Source) {
     let text = match fs::read_to_string(path) {
       Ok(text) => text,
       Err(error) => {
@@ -445,14 +351,6 @@ impl Scanner {
   }
 }
 
-fn is_dir(kind: &Option<fs::Metadata>) -> bool {
-  kind.as_ref().is_some_and(fs::Metadata::is_dir)
-}
-
-fn is_file(kind: &Option<fs::Metadata>) -> bool {
-  kind.as_ref().is_some_and(fs::Metadata::is_file)
-}
-
 fn nonempty(value: Option<&str>) -> Option<String> {
   value
     .map(str::trim)
@@ -518,7 +416,7 @@ mod tests {
     );
     let scan = discover(&fixture.discovery());
     let skill = scan.named("pdf-tools").expect("skill loaded");
-    assert_eq!(skill.source, SkillSource::Global);
+    assert_eq!(skill.source, Source::Global);
     assert!(skill.path.ends_with(".agents/skills/pdf-tools/SKILL.md"));
     assert!(scan.warnings.is_empty(), "{:?}", scan.warnings);
   }
@@ -606,7 +504,7 @@ mod tests {
     let discovery = fixture.discovery().trusted();
     let trusted = discover(&discovery);
     let skill = trusted.named("repo-helper").expect("trusted project skill");
-    assert_eq!(skill.source, SkillSource::Project);
+    assert_eq!(skill.source, Source::Project);
   }
 
   #[test]

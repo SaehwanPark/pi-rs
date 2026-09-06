@@ -17,4 +17,5 @@
 //! capability unless something in the runtime deliberately adopts it.
 
 pub mod frontmatter;
+pub mod scan;
 pub mod skill;
