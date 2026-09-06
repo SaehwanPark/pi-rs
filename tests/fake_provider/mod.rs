@@ -101,12 +101,17 @@ impl FakeServer {
         }
         match listener.accept() {
           Ok((mut socket, _)) => {
-            // BSD and macOS hand the accepted socket the listener's `O_NONBLOCK`; Linux
-            // does not. A non-blocking socket ignores `SO_RCVTIMEO`, so on macOS a short
-            // read under load answers `WouldBlock`, and this fixture read that as the end
-            // of the request: it lost bytes, and then lost a scripted answer with them.
-            // Make the accepted socket blocking, so the read timeout means the same thing
-            // on both platforms.
+            // BSD and macOS hand the accepted socket the listener's non-blocking mode;
+            // Linux explicitly does not, which is why `accept4` grew `SOCK_NONBLOCK`.
+            // See `accept(2)`: OpenBSD "creates a new socket with the same non-blocking
+            // I/O mode as s", while "on Linux, the new socket returned by accept() does
+            // not inherit file status flags such as O_NONBLOCK and O_ASYNC".
+            //
+            // A non-blocking socket ignores `SO_RCVTIMEO`, so on macOS a short read under
+            // load answers `WouldBlock`, and this fixture read that as the end of the
+            // request: it lost bytes, and then lost a scripted answer with them. Make the
+            // accepted socket blocking, so the read timeout means the same thing on both
+            // platforms.
             let _ = socket.set_nonblocking(false);
             let _ = socket.set_read_timeout(Some(READ_TIMEOUT));
             match drain_request(&mut socket) {
