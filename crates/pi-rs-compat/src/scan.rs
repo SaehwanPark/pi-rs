@@ -19,7 +19,10 @@ pub enum Trust {
 }
 
 /// Which kind of location a file came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Ordinal in display order: the user's own configuration first, then the project's.
+/// Skills list in that order, and prompt templates sort by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Source {
   /// Under `$HOME`: the user's own configuration, not something a repository supplied.
   Global,
