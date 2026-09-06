@@ -1,7 +1,41 @@
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+  ffi::{OsStr, OsString},
+  path::PathBuf,
+};
+
+use pi_rs_tui::{ColorChoice, DiagnosticFilter};
 
 pub const TOP_HELP: &str = "Usage: pi-rs run --config <file> --cwd <workspace> --prompt <text>\n";
-pub const RUN_HELP: &str = "Usage: pi-rs run --config <file> --cwd <workspace> --prompt <text>\n\nRuns one durable coding-agent turn.\n";
+pub const RUN_HELP: &str = concat!(
+  "Usage: pi-rs run --config <file> --cwd <workspace> --prompt <text> [surface flags]\n",
+  "\n",
+  "Runs one durable coding-agent turn. The answer is written to stdout exactly as\n",
+  "the model produced it; everything else is written to stderr. Surface flags\n",
+  "control only that second stream and never change what is recorded. Value flags\n",
+  "accept both `--flag value` and `--flag=value`.\n",
+  "\n",
+  "Required:\n",
+  "  --config <file>          Provider configuration\n",
+  "  --cwd <workspace>        Workspace root\n",
+  "  --prompt <text>          One-shot prompt\n",
+  "\n",
+  "Surface:\n",
+  "  --color <auto|always|never>\n",
+  "                           Colour the transcript (default: auto, which means\n",
+  "                           colour only when stderr is a terminal and NO_COLOR is\n",
+  "                           unset)\n",
+  "  --no-color               Same as --color never\n",
+  "  --width <columns>        Transcript column budget; 0 never wraps (default:\n",
+  "                           probe stderr, no wrapping when stderr is piped)\n",
+  "  --no-reasoning           Do not print reasoning\n",
+  "  --verbose                Print routine transcript chrome too (default: only\n",
+  "                           warnings, errors, and state changes)\n",
+  "  --quiet                  Print only warnings, errors, and tool trouble: a\n",
+  "                           successful tool call is routine, a failed, refused, or\n",
+  "                           unrecorded one is not\n",
+  "  --silent                 Print no transcript at all (the answer on stdout is\n",
+  "                           still written, and the session is still recorded)\n",
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -14,6 +48,35 @@ pub struct RunArgs {
   pub config: PathBuf,
   pub cwd: PathBuf,
   pub prompt: String,
+  pub surface: SurfaceArgs,
+}
+
+/// How much transcript to print, and in what form.
+///
+/// Everything here is presentation. None of it changes what the runtime does or
+/// what the session records, which is the point: a quiet transcript and a verbose
+/// one must describe the same turn, byte for byte, in the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SurfaceArgs {
+  pub color: ColorChoice,
+  /// `Some(n)` overrides the terminal probe (`Some(0)` means never wrap); `None`
+  /// probes stderr.
+  pub width: Option<usize>,
+  pub reasoning: bool,
+  pub diagnostics: DiagnosticFilter,
+}
+
+impl Default for SurfaceArgs {
+  fn default() -> Self {
+    Self {
+      color: ColorChoice::Auto,
+      width: None,
+      reasoning: true,
+      // Calm by default: a turn that narrates every request reads like a log
+      // tail, and the rare event nobody can see is the one that matters.
+      diagnostics: DiagnosticFilter::State,
+    }
+  }
 }
 
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
@@ -39,28 +102,75 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
   let mut config: Option<PathBuf> = None;
   let mut cwd: Option<PathBuf> = None;
   let mut prompt: Option<String> = None;
+  // Held as options so two flags that decide the same thing can be reported as a
+  // conflict instead of silently resolved by whichever came last.
+  let mut color: Option<ColorChoice> = None;
+  let mut diagnostics: Option<DiagnosticFilter> = None;
+  let mut width: Option<usize> = None;
+  let mut reasoning = true;
+  // `--color=always` is the shape a shell user reaches for first. Expand that form into
+  // the two-token form the rest of this parser understands, and only for flags this
+  // command actually takes: a prompt or path containing '=' must survive untouched.
+  let expanded: Vec<OsString> = remaining
+    .iter()
+    .flat_map(|arg| match inline_value(arg) {
+      Some((flag, value)) => vec![OsString::from(flag), value.to_os_string()],
+      None => vec![arg.clone()],
+    })
+    .collect();
+  let remaining: &[OsString] = &expanded;
   let mut index = 0;
   while index < remaining.len() {
     let flag = remaining[index]
       .to_str()
       .ok_or_else(|| format!("run argument name is not valid UTF-8\n{RUN_HELP}"))?;
     index += 1;
-    let value = remaining
-      .get(index)
-      .ok_or_else(|| format!("{flag} requires a value\n{RUN_HELP}"))?
-      .clone();
     match flag {
-      "--config" => set_once(&mut config, PathBuf::from(value), flag)?,
-      "--cwd" => set_once(&mut cwd, PathBuf::from(value), flag)?,
-      "--prompt" => {
-        let value = value
-          .into_string()
-          .map_err(|_| "--prompt must be valid UTF-8".to_string())?;
-        set_once(&mut prompt, value, flag)?;
+      "--config" | "--cwd" | "--prompt" | "--color" | "--width" => {
+        let value = remaining
+          .get(index)
+          .ok_or_else(|| format!("{flag} requires a value\n{RUN_HELP}"))?
+          .clone();
+        index += 1;
+        match flag {
+          "--config" => set_once(&mut config, PathBuf::from(value), flag)?,
+          "--cwd" => set_once(&mut cwd, PathBuf::from(value), flag)?,
+          "--prompt" => {
+            let value = value
+              .into_string()
+              .map_err(|_| "--prompt must be valid UTF-8".to_string())?;
+            set_once(&mut prompt, value, flag)?;
+          }
+          "--color" => {
+            let value = value
+              .into_string()
+              .map_err(|_| "--color must be valid UTF-8".to_string())?;
+            let choice = ColorChoice::parse(&value)
+              .ok_or_else(|| format!("--color must be auto, always, or never\n{RUN_HELP}"))?;
+            set_choice(&mut color, choice, flag)?;
+          }
+          "--width" => {
+            let value = value
+              .into_string()
+              .map_err(|_| "--width must be valid UTF-8".to_string())?;
+            let columns = value
+              .trim()
+              .parse::<usize>()
+              .map_err(|_| format!("--width must be a column count\n{RUN_HELP}"))?;
+            set_once(&mut width, columns, flag)?;
+          }
+          _ => unreachable!("matched above"),
+        }
       }
+      "--no-color" => set_choice(&mut color, ColorChoice::Never, flag)?,
+      "--no-reasoning" => reasoning = false,
+      "--verbose" => set_choice(&mut diagnostics, DiagnosticFilter::All, flag)?,
+      // `--quiet` and `--silent` both decide the transcript level, so they conflict
+      // with each other rather than cancelling out.
+      "--quiet" => set_choice(&mut diagnostics, DiagnosticFilter::WarnAndError, flag)?,
+      "--silent" => set_choice(&mut diagnostics, DiagnosticFilter::None, flag)?,
       _ => return Err(format!("unknown run argument '{flag}'\n{RUN_HELP}")),
     }
-    index += 1;
   }
 
   let config = config.ok_or_else(|| format!("--config is required\n{RUN_HELP}"))?;
@@ -73,13 +183,54 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     config,
     cwd,
     prompt,
+    surface: SurfaceArgs {
+      // The CLI default is the calm one, which is not the renderer's own default:
+      // the renderer's job is to be able to render everything, the command's job is
+      // to decide what deserves the screen.
+      color: color.unwrap_or_else(|| SurfaceArgs::default().color),
+      width,
+      reasoning,
+      diagnostics: diagnostics.unwrap_or_else(|| SurfaceArgs::default().diagnostics),
+    },
   }))
+}
+
+/// Split `--flag=value` when `flag` is a value-taking flag of `pi-rs run`.
+fn inline_value(arg: &std::ffi::OsStr) -> Option<(&str, &std::ffi::OsStr)> {
+  let (flag, value) = arg.to_str()?.split_once('=')?;
+  matches!(
+    flag,
+    "--config" | "--cwd" | "--prompt" | "--color" | "--width"
+  )
+  .then_some((flag, OsStr::new(value)))
 }
 
 fn set_once<T>(slot: &mut Option<T>, value: T, flag: &str) -> Result<(), String> {
   if slot.replace(value).is_some() {
     return Err(format!("{flag} may be supplied only once\n{RUN_HELP}"));
   }
+  Ok(())
+}
+
+/// Set one decision that several different flags can write.
+///
+/// The distinction from `set_once` is the error message: `--quiet --silent` is not
+/// the same flag twice, it is two incompatible statements of intent, and guessing
+/// which one the user meant is not the parser's call.
+fn set_choice<T: std::fmt::Debug + PartialEq>(
+  slot: &mut Option<T>,
+  value: T,
+  flag: &str,
+) -> Result<(), String> {
+  if let Some(previous) = slot {
+    if *previous != value {
+      return Err(format!(
+        "{flag} conflicts with an earlier flag ({previous:?})\n{RUN_HELP}"
+      ));
+    }
+    return Ok(());
+  }
+  *slot = Some(value);
   Ok(())
 }
 
@@ -91,9 +242,30 @@ mod tests {
     values.iter().map(OsString::from).collect()
   }
 
+  fn run(values: &[&str]) -> SurfaceArgs {
+    let mut args = vec!["run", "--config", "c", "--cwd", "w", "--prompt", "p"];
+    args.extend_from_slice(values);
+    match parse(strings(&args)).unwrap() {
+      Command::Run(args) => args.surface,
+      _ => panic!("expected run"),
+    }
+  }
+
   #[test]
   fn bare_invocation_is_prompt_help() {
-    assert_eq!(parse(Vec::new()).unwrap(), Command::Help(TOP_HELP));
+    assert_eq!(parse(vec![]).unwrap(), Command::Help(TOP_HELP));
+  }
+
+  #[test]
+  fn help_flags_return_help() {
+    assert_eq!(
+      parse(strings(&["--help"])).unwrap(),
+      Command::Help(TOP_HELP)
+    );
+    assert_eq!(
+      parse(strings(&["run", "--help"])).unwrap(),
+      Command::Help(RUN_HELP)
+    );
   }
 
   #[test]
@@ -102,29 +274,146 @@ mod tests {
       parse(strings(&["run", "--help"])).unwrap(),
       Command::Help(RUN_HELP)
     );
+    assert_eq!(
+      parse(strings(&["run", "--help", "--config"])).unwrap(),
+      Command::Help(RUN_HELP)
+    );
   }
 
   #[test]
-  fn run_requires_each_named_argument() {
-    let error = parse(strings(&["run", "--config", "config.json"])).unwrap_err();
-    assert!(error.contains("--cwd is required"), "{error}");
-  }
-
-  #[test]
-  fn run_preserves_prompt_as_one_argument() {
-    let parsed = parse(strings(&[
+  fn prompt_is_preserved_as_one_argument() {
+    let args = match parse(strings(&[
       "run",
       "--config",
-      "config.json",
+      "c",
       "--cwd",
-      "/repo",
+      "w",
       "--prompt",
-      "write the file",
+      "  two words  ",
     ]))
-    .unwrap();
-    let Command::Run(run) = parsed else {
-      panic!("expected run");
+    .unwrap()
+    {
+      Command::Run(args) => args,
+      _ => panic!("expected run"),
     };
-    assert_eq!(run.prompt, "write the file");
+    assert_eq!(args.prompt, "  two words  ");
+  }
+
+  #[test]
+  fn value_flags_accept_the_inline_form() {
+    // `--color=always` is what a shell user reaches for first; refusing it would be a
+    // needless syntax lesson.
+    assert_eq!(run(&["--color=never"]).color, ColorChoice::Never);
+    assert_eq!(run(&["--width=40"]).width, Some(40));
+    assert_eq!(run(&["--color=always"]).color, ColorChoice::Always);
+  }
+
+  #[test]
+  fn only_known_flags_split_on_equals() {
+    // A prompt or path that happens to contain '=' is data, not a flag boundary.
+    let parsed = parse(strings(&["run", "--config=c=x", "--cwd=w", "--prompt=a=b"])).unwrap();
+    match parsed {
+      Command::Run(args) => {
+        assert_eq!(args.prompt, "a=b");
+        assert_eq!(args.config, PathBuf::from("c=x"));
+      }
+      _ => panic!("expected run"),
+    }
+    // An unknown flag keeps its whole name in the error, inline form or not.
+    let error = parse(strings(&["run", "--bogus=1"])).unwrap_err();
+    assert!(error.contains("--bogus"), "{error}");
+  }
+
+  #[test]
+  fn unknown_commands_and_flags_are_errors() {
+    assert!(parse(strings(&["fly"])).is_err());
+    assert!(
+      parse(strings(&[
+        "run", "--config", "c", "--cwd", "w", "--prompt", "p", "--bogus"
+      ]))
+      .is_err()
+    );
+  }
+
+  #[test]
+  fn required_arguments_are_still_required() {
+    assert!(parse(strings(&["run", "--prompt", "p"])).is_err());
+    assert!(matches!(
+      parse(strings(&["run", "--config", "c", "--cwd", "w"])),
+      Err(message) if message.contains("--prompt is required")
+    ));
+  }
+
+  #[test]
+  fn surface_flags_default_to_a_calm_monochrome_probe() {
+    let surface = run(&[]);
+    assert_eq!(surface.color, ColorChoice::Auto);
+    assert_eq!(surface.width, None);
+    assert!(surface.reasoning);
+    assert_eq!(surface.diagnostics, DiagnosticFilter::State);
+  }
+
+  #[test]
+  fn colour_width_and_reasoning_flags_are_honoured() {
+    assert_eq!(run(&["--color", "never"]).color, ColorChoice::Never);
+    assert_eq!(run(&["--no-color"]).color, ColorChoice::Never);
+    assert_eq!(run(&["--width", "0"]).width, Some(0));
+    assert_eq!(run(&["--width", "42"]).width, Some(42));
+    assert!(!run(&["--no-reasoning"]).reasoning);
+  }
+
+  #[test]
+  fn transcript_level_flags_are_distinct_levels() {
+    assert_eq!(run(&["--verbose"]).diagnostics, DiagnosticFilter::All);
+    assert_eq!(
+      run(&["--quiet"]).diagnostics,
+      DiagnosticFilter::WarnAndError
+    );
+    assert_eq!(run(&["--silent"]).diagnostics, DiagnosticFilter::None);
+  }
+
+  #[test]
+  fn colour_flags_agreeing_twice_is_not_a_conflict() {
+    assert_eq!(
+      run(&["--color", "never", "--no-color"]).color,
+      ColorChoice::Never
+    );
+  }
+
+  #[test]
+  fn contradictory_surface_flags_are_rejected_not_silently_ordered() {
+    assert!(run_err(&["--color", "always", "--no-color"]).contains("conflicts"));
+    assert!(run_err(&["--quiet", "--silent"]).contains("conflicts"));
+    assert!(run_err(&["--silent", "--verbose"]).contains("conflicts"));
+  }
+
+  #[test]
+  fn malformed_surface_values_are_errors() {
+    assert!(run_err(&["--color", "neon"]).contains("--color must be"));
+    assert!(run_err(&["--width", "wide"]).contains("--width must be"));
+    let error = match parse(strings(&[
+      "run", "--config", "c", "--cwd", "w", "--prompt", "p", "--width",
+    ])) {
+      Err(message) => message,
+      Ok(_) => panic!("--width with no value must fail"),
+    };
+    assert!(error.contains("requires a value"), "{error}");
+  }
+
+  #[test]
+  fn value_flags_do_not_swallow_a_later_boolean_flag() {
+    // `--width --no-reasoning` is a missing column count, not a boolean in the
+    // wrong slot: silently consuming `--no-reasoning` would print a turn the user
+    // asked to be quiet about.
+    assert!(run_err(&["--width", "--no-reasoning"]).contains("--width must be"));
+  }
+
+  fn run_err(values: &[&str]) -> String {
+    let mut args = vec!["run", "--config", "c", "--cwd", "w", "--prompt", "p"];
+    args.extend_from_slice(values);
+    match parse(strings(&args)) {
+      Err(message) => message,
+      Ok(_) => panic!("expected an error"),
+    }
   }
 }

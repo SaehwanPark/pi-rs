@@ -1,16 +1,19 @@
 use std::{
   fs,
-  io::{self, Write},
+  io::{self, Stderr, Stdout, Write},
 };
 
 use pi_rs_core::{
-  AgentEvent, AttributedMessage, CancelToken, EventEnvelope, ModelProvider, ReasoningProvenance,
+  AttributedMessage, CancelToken, EventEnvelope, ModelProvider, ModelRef, ReasoningProvenance,
   RuntimeConfig, SessionEndReason, SessionHeader, SessionId, SinkError, TraceId, now_millis,
 };
 use pi_rs_provider::{OpenAiCompat, ProviderConfig};
 use pi_rs_runtime::{StoreTrace, Trace, TurnError, TurnLoop, TurnProgress};
 use pi_rs_store::{Store, WritePolicy};
 use pi_rs_tools::{Executed, ToolRegistry, Workspace};
+use pi_rs_tui::{Palette, Surface, TranscriptOptions, is_streamed, render_event, term};
+
+use crate::cli::SurfaceArgs;
 
 use crate::cli::RunArgs;
 
@@ -89,8 +92,13 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
     })
     .map_err(|error| format!("cannot start durable session: {error}"))?;
 
-  let mut trace = ReportingTrace::new(StoreTrace::new(session));
-  let mut progress = CliProgress;
+  let options = surface_options(&args.surface);
+  let mut trace = ReportingTrace::new(StoreTrace::new(session), options);
+  let mut progress = CliProgress::new(&tools, options);
+  // A transcript write failure must not decide whether the session closes: the
+  // durable record is the product, so the failure is carried out and reported after
+  // the session has ended.
+  let transcript_error: Option<io::Error>;
   let result = {
     let mut runtime = TurnLoop::new(
       &provider,
@@ -103,7 +111,12 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
     .with_working_dir(canonical_cwd)
     .with_thinking(config.thinking);
     match runtime.run_turn(&args.prompt, &CancelToken::new(), &mut progress) {
-      Ok(_) => runtime.end_session(SessionEndReason::UserExit),
+      Ok(_) => {
+        // Flush before the summary line: the surface may hold an unterminated
+        // reasoning line, and the durable `SessionEnded` event renders underneath it.
+        transcript_error = progress.finish().err();
+        runtime.end_session(SessionEndReason::UserExit)
+      }
       Err(error) => {
         if error.session_recoverable() {
           runtime
@@ -116,7 +129,32 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
       }
     }
   };
-  result.map_err(|error| turn_error(&error))
+  result.map_err(|error| turn_error(&error))?;
+  match transcript_error {
+    Some(error) => Err(format!("cannot write transcript: {error}")),
+    None => Ok(()),
+  }
+}
+
+/// Resolve the surface from arguments and the environment.
+///
+/// Colour and width answer two different questions, so a run with `2> log` gets a
+/// wide, colourless transcript and (if stdout is a terminal) a coloured answer. An
+/// explicit `--width` is respected even on a pipe, which is how a user narrows a
+/// log deliberately rather than by accident.
+fn surface_options(args: &SurfaceArgs) -> TranscriptOptions {
+  let stderr = term::Stream::Stderr;
+  TranscriptOptions {
+    palette: if args.color.resolve(stderr.is_terminal()) {
+      Palette::colored()
+    } else {
+      Palette::monochrome()
+    },
+    width: args.width.unwrap_or_else(|| stderr.width().unwrap_or(0)),
+    show_reasoning: args.reasoning,
+    diagnostics: args.diagnostics,
+    ..TranscriptOptions::default()
+  }
 }
 
 fn turn_error(error: &TurnError) -> String {
@@ -127,61 +165,138 @@ fn turn_error(error: &TurnError) -> String {
   }
 }
 
-struct CliProgress;
+/// The live surface for one turn.
+///
+/// The surface, not a writer, owns streaming because it holds the one fact that
+/// cannot be recovered from a delta alone: whether a reasoning block is still open.
+/// A caller that re-derived it per callback would label every chunk as a new
+/// thought, which is exactly the collapse the provenance type exists to prevent.
+///
+/// The tool registry is consulted for declared risk rather than guessed from the
+/// tool name: `[needs check]` is a claim that the user may have work to do, and it
+/// has to come from the tool's own metadata.
+struct CliProgress<'a> {
+  surface: Surface<Stdout, Stderr>,
+  tools: &'a ToolRegistry,
+  io_error: Option<io::Error>,
+}
 
-impl TurnProgress for CliProgress {
+impl<'a> CliProgress<'a> {
+  fn new(tools: &'a ToolRegistry, options: TranscriptOptions) -> Self {
+    Self {
+      surface: Surface::new(io::stdout(), io::stderr(), options),
+      tools,
+      io_error: None,
+    }
+  }
+
+  /// Close any open block and flush both streams.
+  fn finish(&mut self) -> io::Result<()> {
+    self.surface.finish()?;
+    match self.io_error.take() {
+      Some(error) => Err(error),
+      None => Ok(()),
+    }
+  }
+
+  fn mutating(&mut self, name: &str) -> bool {
+    self
+      .tools
+      .metadata_for(name)
+      .is_some_and(|metadata| !metadata.read_only)
+  }
+}
+
+impl TurnProgress for CliProgress<'_> {
+  fn on_user_message(&mut self, text: &str) {
+    save(&mut self.io_error, self.surface.user_message(text));
+  }
+
+  fn on_request_started(&mut self, model: &ModelRef) {
+    save(&mut self.io_error, self.surface.request_started(model));
+  }
+
   fn on_reasoning(&mut self, text: &str, provenance: ReasoningProvenance) {
-    let _ = writeln!(io::stderr(), "[{}] {text}", provenance.label());
+    save(&mut self.io_error, self.surface.reasoning(text, provenance));
   }
 
   fn on_text_delta(&mut self, text: &str) {
-    let mut stdout = io::stdout().lock();
-    let _ = stdout.write_all(text.as_bytes());
-    let _ = stdout.flush();
+    save(&mut self.io_error, self.surface.text_delta(text));
   }
 
   fn on_tool_requested(&mut self, call: &pi_rs_core::ToolCallBlock) {
-    let _ = writeln!(
-      io::stderr(),
-      "[tool requested] {} {}",
-      call.name,
-      call.arguments
+    let mutating = self.mutating(&call.name);
+    save(
+      &mut self.io_error,
+      self
+        .surface
+        .tool_requested(&call.name, &call.arguments, !mutating),
     );
   }
 
   fn on_tool_progress(&mut self, call: &pi_rs_core::ToolCallBlock, text: &str) {
-    let _ = writeln!(io::stderr(), "[tool output] {} {text}", call.name);
+    save(
+      &mut self.io_error,
+      self.surface.tool_progress(&call.name, text),
+    );
   }
 
   fn on_tool_finished(&mut self, call: &pi_rs_core::ToolCallBlock, executed: &Executed) {
-    let _ = writeln!(
-      io::stderr(),
-      "[tool finished] {} {:?}",
-      call.name,
-      executed.state
+    let mutating = self.mutating(&call.name);
+    save(
+      &mut self.io_error,
+      self.surface.tool_finished(
+        &call.name,
+        executed.state,
+        mutating,
+        executed.refusal.as_deref(),
+      ),
     );
   }
 }
 
+/// Keep the first write failure instead of dropping every one of them.
+///
+/// Swallowing each error makes a closed pipe indistinguishable from an uneventful
+/// turn; the first failure is what explains the missing output.
+fn save(slot: &mut Option<io::Error>, result: io::Result<()>) {
+  if let Err(error) = result
+    && slot.is_none()
+  {
+    *slot = Some(error);
+  }
+}
+
+/// The durable sink, plus transcript rendering of the events a live turn does not
+/// stream.
+///
+/// Two writers share stderr here: this one, for durable events, and the surface, for
+/// streamed content. They are partitioned rather than synchronised — [`is_streamed`]
+/// says which events the surface already printed — so no event is printed twice. A
+/// diagnostic can still land between two reasoning deltas; since every line the
+/// surface writes is newline-terminated, the worst case is adjacency, not a torn
+/// line.
 struct ReportingTrace {
   inner: StoreTrace,
+  options: TranscriptOptions,
 }
 
 impl ReportingTrace {
-  fn new(inner: StoreTrace) -> Self {
-    Self { inner }
+  fn new(inner: StoreTrace, options: TranscriptOptions) -> Self {
+    Self { inner, options }
   }
 }
 
 impl Trace for ReportingTrace {
   fn emit(&mut self, envelope: &mut EventEnvelope) -> Result<(), SinkError> {
-    if let AgentEvent::Diagnostic(diagnostic) = &envelope.event {
-      let _ = writeln!(
-        io::stderr(),
-        "[diagnostic {:?}] {}",
-        diagnostic.level,
-        diagnostic.message
-      );
+    if self.options.diagnostics.shows(&envelope.event) && !is_streamed(&envelope.event) {
+      let palette = self.options.palette;
+      for line in render_event(&envelope.event, &self.options) {
+        // A transcript that cannot be written must not fail the turn: the durable
+        // record is the product, and losing a line is not reason enough to lose a
+        // turn.
+        let _ = writeln!(io::stderr(), "{}", line.render(palette));
+      }
     }
     self.inner.emit(envelope)
   }
