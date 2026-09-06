@@ -168,11 +168,17 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [x] Render provider summaries distinctly.
 - [ ] Add declared-rationale representation.
 - [ ] Add reconstructed-rationale representation.
-- [ ] Prevent provenance loss during serialization.
+- [x] Prevent provenance loss during serialization.
 
 > `Declared` and `Reconstructed` already have distinct roles and labels in the
 > rendering layer, and a folded reasoning run never merges across a provenance
-> boundary. These two stay open until a runtime path actually produces them.
+> boundary. These two stay open until a runtime path actually produces them: a
+> representation with no producer is a guess about a format nobody has read yet.
+>
+> Serialization is pinned instead of trusted. `tests/provenance_roundtrip.rs` walks all
+> four claims through provider event, `trace.jsonl`, the session log, and the renderer,
+> and asserts that a trace line which lost its claim is refused as malformed rather than
+> read back as `Native`.
 
 ### Inspection
 
@@ -186,11 +192,19 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 > Model attribution is now per event: the envelope names the model in charge when the
 > event was written, and a transition event keeps the epoch it *describes* separate from
 > the epoch that recorded it. `tests/failover_cli.rs` reads the journal back and checks
-> both. The reasoning-provenance lines below stay open until serialization is covered.
+> both. Provenance serialization is now pinned rather than assumed; the payload line
+> below waits for the trace-bounding work to land.
 
 - [x] A completed session can answer which model produced each major event.
-- [ ] Native reasoning remains distinguishable from all inferred/summarized forms.
+- [x] Native reasoning remains distinguishable from all inferred/summarized forms.
 - [ ] Large payloads do not require full inline duplication in trace JSONL.
+
+> The reasoning line is satisfied at the level the claim exists: the type has no
+> default, the writer states the claim on every line, a claimless line is refused instead
+> of being read as native, and each claim has its own label and style role. No provider
+> produces a non-native claim yet, so what is proven is that such a claim cannot be
+> flattened on the way to disk or on the way to the screen — not that one has been
+> observed end to end.
 
 ---
 
