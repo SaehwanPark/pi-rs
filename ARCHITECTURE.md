@@ -249,6 +249,16 @@ Rules:
 - `Declared` is intentionally requested explanation.
 - `Reconstructed` is post-hoc inference.
 
+Where the claim comes from:
+
+- Provenance is decided by what the endpoint *declares* it exposes, never by which
+  response field the text arrived in. The same `reasoning_content` field carries the
+  model's own thinking on one server and a provider-authored summary on another, and
+  a claim of `Native` for the latter reports hidden chain of thought as recovered.
+- An endpoint that declares nothing leaves the field name as the only evidence, and
+  that evidence is admitted only for the fields known to carry native thinking.
+- The claim travels unchanged: provider event, journal record, rendered line.
+
 Never serialize or render these as equivalent.
 
 ## 9. Tool runtime

@@ -100,7 +100,7 @@ impl OpenAiCompat {
     sink: &mut dyn ProviderEventSink,
     cancel: &CancelToken,
   ) -> Result<CompletionUsage, ModelFailure> {
-    let mut decoder = Decoder::default();
+    let mut decoder = Decoder::new(self.config.capabilities.exposed_reasoning);
     // Which kind of end we actually observe decides whether this turn may be
     // reported as complete.
     let mut end = StreamEnd::DoneSentinel;
@@ -166,7 +166,7 @@ impl OpenAiCompat {
       .map_err(|error| decode::stream_failure(&error, false).with_model(self.model_ref()))?;
     let value = decode_chunk(std::str::from_utf8(&body).unwrap_or(""))
       .map_err(|failure| failure.with_model(self.model_ref()))?;
-    let mut decoder = Decoder::default();
+    let mut decoder = Decoder::new(self.config.capabilities.exposed_reasoning);
     decoder
       .chunk(&value, sink)
       .map_err(|failure| annotated(&failure, false).with_model(self.model_ref()))?;
@@ -278,7 +278,7 @@ impl ModelProvider for OpenAiCompat {
 
 #[cfg(test)]
 mod tests {
-  use pi_rs_core::{Collector, ModelRef, ProviderEvent};
+  use pi_rs_core::{Collector, ModelRef, ProviderEvent, ReasoningExposure};
 
   use super::*;
 
@@ -403,7 +403,7 @@ mod tests {
       "usage": {"prompt_tokens": 3, "completion_tokens": 2},
     });
     let mut collector = Collector::default();
-    let mut decoder = Decoder::default();
+    let mut decoder = Decoder::new(ReasoningExposure::Native);
     decoder.chunk(&body, &mut collector).unwrap();
     let usage = decoder
       .finish(StreamEnd::CompleteBody, &mut collector)

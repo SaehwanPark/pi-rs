@@ -93,6 +93,13 @@ Early targets should include:
 - one remote/cloud-compatible provider path;
 - pluggable custom providers.
 
+An endpoint declares its capabilities in the config, including how much reasoning it
+exposes: `none`, `native`, `provider_summary`, or `declared`. That declaration is what
+decides the provenance label attached to thinking text, because the response field
+alone cannot say whether the model's own reasoning arrived or a provider-written
+summary of reasoning that stays hidden. Reasoning from an endpoint declaring
+`provider_summary` is labelled `[provider summary]`, never `[reasoning]`.
+
 ### Event trace and provenance
 
 Important runtime activity should become typed events:

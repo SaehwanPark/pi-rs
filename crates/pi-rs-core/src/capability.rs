@@ -93,9 +93,13 @@ pub enum ReasoningExposure {
 impl ReasoningExposure {
   /// Provenance implied by this exposure when text actually arrives.
   ///
-  /// Returns `None` for [`ReasoningExposure::None`] so that a model which is
-  /// not expected to expose reasoning cannot accidentally produce `Native`
-  /// reasoning by default.
+  /// Returns `None` for [`ReasoningExposure::None`] so that the *absence* of a
+  /// declaration is never read as a claim: silence about reasoning output is not
+  /// evidence that thinking text is native, and it is not evidence that it is a
+  /// summary either. What a caller does with text that arrived anyway is its own
+  /// decision, and it has to say why. `pi-rs-provider` falls back to `Native` for
+  /// the response fields known to carry native thinking, which is the evidence the
+  /// field name actually supports.
   pub fn implied_provenance(self) -> Option<crate::provenance::ReasoningProvenance> {
     use crate::provenance::ReasoningProvenance as P;
     match self {

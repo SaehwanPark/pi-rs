@@ -44,6 +44,24 @@ fn tool_response(id: &str, name: &str, arguments: &str, reasoning: Option<&str>)
 }
 
 fn write_config(root: &Path, base_url: &str, auto_approve_mutating: bool) -> PathBuf {
+  write_config_exposing(
+    root,
+    base_url,
+    auto_approve_mutating,
+    ReasoningExposure::Native,
+  )
+}
+
+/// The same config, declaring something else about reasoning output.
+///
+/// The declaration is what decides the provenance claim attached to thinking text,
+/// so a test about provenance has to say what its endpoint claims to expose.
+fn write_config_exposing(
+  root: &Path,
+  base_url: &str,
+  auto_approve_mutating: bool,
+  exposed_reasoning: ReasoningExposure,
+) -> PathBuf {
   let state = root.join("state");
   let mut config = RuntimeConfig::new(ModelRef::new("fake", "agent"), state.to_string_lossy());
   config.endpoints.push(ModelEndpoint {
@@ -56,7 +74,7 @@ fn write_config(root: &Path, base_url: &str, auto_approve_mutating: bool) -> Pat
       text: true,
       images: false,
       tools: true,
-      exposed_reasoning: ReasoningExposure::Native,
+      exposed_reasoning,
       context_window: 32_768,
       max_output_tokens: Some(1_024),
     },
@@ -479,11 +497,16 @@ struct Scenario {
 }
 
 fn scenario(responses: Vec<String>) -> Scenario {
+  scenario_exposing(responses, ReasoningExposure::Native)
+}
+
+/// A scenario whose endpoint declares a different reasoning exposure.
+fn scenario_exposing(responses: Vec<String>, exposed_reasoning: ReasoningExposure) -> Scenario {
   let temp = TempDir::new().unwrap();
   let workspace = temp.path().join("workspace");
   fs::create_dir(&workspace).unwrap();
   let server = FakeServer::answer(responses);
-  let config = write_config(temp.path(), &server.base_url(), true);
+  let config = write_config_exposing(temp.path(), &server.base_url(), true, exposed_reasoning);
   let state = temp.path().join("state");
   Scenario {
     workspace,
@@ -533,6 +556,46 @@ fn no_reasoning_flag_hides_reasoning_without_hiding_the_answer() {
   assert!(stderr.contains("[tool] write"), "{stderr}");
   assert!(stderr.contains("[tool ok] write"), "{stderr}");
   assert!(String::from_utf8_lossy(&output.stdout).starts_with("answer answer"));
+}
+
+/// The provenance claim is a claim about where the text came from, and only the
+/// endpoint's own declaration says. A hosted endpoint exposes a *summary* of
+/// reasoning it keeps hidden, sends it in the same `reasoning_content` field a local
+/// server uses for the model's actual thinking, and must not be rendered as if
+/// hidden thought had been recovered.
+#[test]
+fn a_summary_only_endpoint_is_labelled_as_a_summary() {
+  let scene = scenario_exposing(
+    reasoning_and_long_answer(),
+    ReasoningExposure::ProviderSummary,
+  );
+  let output = run_surface(&scene.config, &scene.workspace, "go", &[]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(output.status.success(), "{stderr}");
+  assert!(
+    stderr.contains("[provider summary] choose a file"),
+    "{stderr}"
+  );
+  assert!(
+    !stderr.contains("[reasoning] "),
+    "a summary must not be shown as native thinking: {stderr}"
+  );
+  // The durable record carries the same claim, not the field it was decoded from.
+  let provenance: Vec<&str> = trace_events(&scene.state)
+    .iter()
+    .filter_map(|event| match event {
+      AgentEvent::ReasoningDelta(delta) => Some(delta.provenance.as_str()),
+      _ => None,
+    })
+    .collect();
+  assert!(
+    !provenance.is_empty(),
+    "the reasoning must still be recorded"
+  );
+  assert!(
+    provenance.iter().all(|p| *p == "provider_summary"),
+    "{provenance:?}"
+  );
 }
 
 #[test]
