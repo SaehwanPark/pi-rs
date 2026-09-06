@@ -1,11 +1,16 @@
+//! One-shot agent runs through the real binary: what a turn prints, what it writes, and
+//! what it refuses to do.
+//!
+//! The fake provider is shared with `tests/failover_cli.rs` and lives in
+//! `tests/fake_provider`, where the reason it is deterministic is written down.
+
+mod fake_provider;
+
 use std::{
   fs,
-  io::{Read, Write},
-  net::{SocketAddr, TcpListener, TcpStream},
+  net::TcpListener,
   path::{Path, PathBuf},
   process::{Command, Output},
-  thread,
-  time::{Duration, Instant},
 };
 
 use pi_rs_core::{
@@ -14,104 +19,10 @@ use pi_rs_core::{
 use pi_rs_store::{StateLayout, Store, TraceJournal, WritePolicy};
 use tempfile::TempDir;
 
-struct FakeServer {
-  addr: SocketAddr,
-  handle: thread::JoinHandle<Vec<String>>,
-}
+use fake_provider::{FakeServer, sse, status_response, text_response};
 
-impl FakeServer {
-  fn answer(responses: Vec<String>) -> Self {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider");
-    let addr = listener.local_addr().expect("fake provider address");
-    listener.set_nonblocking(true).unwrap();
-    let handle = thread::spawn(move || {
-      responses
-        .into_iter()
-        .map(|response| {
-          let deadline = Instant::now() + Duration::from_secs(5);
-          let mut socket = loop {
-            match listener.accept() {
-              Ok((socket, _)) => break socket,
-              Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                assert!(
-                  Instant::now() < deadline,
-                  "timed out waiting for provider request"
-                );
-                thread::sleep(Duration::from_millis(5));
-              }
-              Err(error) => panic!("accept provider request: {error}"),
-            }
-          };
-          let request = drain_request(&mut socket);
-          socket
-            .write_all(response.as_bytes())
-            .expect("write response");
-          socket.flush().expect("flush response");
-          request
-        })
-        .collect()
-    });
-    Self { addr, handle }
-  }
-
-  fn base_url(&self) -> String {
-    format!("http://{}/v1", self.addr)
-  }
-
-  fn requests(self) -> Vec<String> {
-    self.handle.join().expect("fake provider thread")
-  }
-}
-
-fn drain_request(socket: &mut TcpStream) -> String {
-  let mut bytes = Vec::new();
-  let mut buffer = [0u8; 1024];
-  let mut expected = None;
-  loop {
-    let read = socket.read(&mut buffer).unwrap_or(0);
-    if read == 0 {
-      break;
-    }
-    bytes.extend_from_slice(&buffer[..read]);
-    if expected.is_none()
-      && let Some(end) = find(&bytes, b"\r\n\r\n")
-    {
-      let body_start = end + 4;
-      let headers = String::from_utf8_lossy(&bytes[..body_start]).to_ascii_lowercase();
-      let content_length = headers
-        .split("\r\n")
-        .find_map(|line| line.strip_prefix("content-length:"))
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-      expected = Some(body_start + content_length);
-    }
-    if expected.is_some_and(|length| bytes.len() >= length) {
-      break;
-    }
-  }
-  String::from_utf8_lossy(&bytes).into_owned()
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-  haystack
-    .windows(needle.len())
-    .position(|part| part == needle)
-}
-
-fn sse(events: &[serde_json::Value]) -> String {
-  let mut body = String::new();
-  for event in events {
-    body.push_str("data: ");
-    body.push_str(&event.to_string());
-    body.push_str("\n\n");
-  }
-  body.push_str("data: [DONE]\n\n");
-  format!(
-    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
-    body.len()
-  )
-}
-
+/// A response that asks for a tool, optionally after some reasoning, then ends the
+/// stream. The adapter joins the fragments into one call when the stream ends.
 fn tool_response(id: &str, name: &str, arguments: &str, reasoning: Option<&str>) -> String {
   let mut events = Vec::new();
   if let Some(reasoning) = reasoning {
@@ -130,23 +41,6 @@ fn tool_response(id: &str, name: &str, arguments: &str, reasoning: Option<&str>)
     "choices": [{"delta": {}, "finish_reason": "tool_calls"}]
   }));
   sse(&events)
-}
-
-fn text_response(text: &str) -> String {
-  sse(&[
-    serde_json::json!({"choices": [{"delta": {"content": text}}]}),
-    serde_json::json!({
-      "choices": [{"delta": {}, "finish_reason": "stop"}],
-      "usage": {"prompt_tokens": 20, "completion_tokens": 3}
-    }),
-  ])
-}
-
-fn status_response(code: u16, reason: &str, body: &str) -> String {
-  format!(
-    "HTTP/1.1 {code} {reason}\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
-    body.len()
-  )
 }
 
 fn write_config(root: &Path, base_url: &str, auto_approve_mutating: bool) -> PathBuf {
@@ -406,7 +300,11 @@ fn one_shot_read_cannot_escape_the_workspace_or_leak_secret_bytes() {
     String::from_utf8_lossy(&output.stderr)
   );
   assert_eq!(requests.len(), 3);
-  assert!(requests.iter().all(|request| !request.contains(secret)));
+  assert!(
+    requests
+      .iter()
+      .all(|request| !request.body.contains(secret))
+  );
 
   let layout = StateLayout::new(temp.path().join("state"));
   let session_id = layout.list_session_ids().unwrap().pop().unwrap();
