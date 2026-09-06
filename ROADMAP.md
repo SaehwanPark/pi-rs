@@ -198,12 +198,30 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Skills and prompts
 
-- [ ] Implement Pi-style skill discovery.
+- [x] Implement Pi-style skill discovery.
 - [ ] Implement `SKILL.md` loading.
 - [ ] Implement prompt-template discovery.
 - [ ] Add package-local skill support.
-- [ ] Add project-local skill support.
+- [x] Add project-local skill support.
 - [ ] Add compatibility fixtures.
+
+Skill discovery (`pi-rs-compat::skill`, surfaced by `pi-rs skills`) reads the two file
+families Pi documents — per-user and per-project — including the rule that a root `*.md`
+counts as a skill in `.pi/` locations and is ignored in the shared `.agents/` ones, the
+ancestor walk that stops at the git root, and the frontmatter subset (`name`,
+`description`, `license`, `compatibility`, `allowed-tools`, `disable-model-invocation`)
+with quoted scalars and `|`/`>` block scalars. Project locations are gated on trust, and
+frontmatter declares the trust question as an input rather than answering it.
+
+Open in this area, in order:
+
+- [ ] Load `SKILL.md` bodies and honour `disable-model-invocation` when activating.
+- [ ] Present loaded skills to the model as a skill-control prompt listing/template.
+- [ ] Add the remaining Pi skill sources: package `skills/`, `package.json` entries, the
+      `skills` array in settings, and `--skill` paths.
+- [ ] Decide trust somewhere other than the file reader, then pass its answer in.
+- [ ] Add the compatibility fixture suite (`tests/compat/` holds skill fixtures today;
+      prompts, packages, sessions, and extensions do not exist yet).
 
 ### Packages
 

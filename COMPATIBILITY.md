@@ -66,6 +66,22 @@ Requirements:
 
 Skills should not require the Node compatibility host unless they explicitly depend on executable TypeScript/JavaScript behavior.
 
+### 5.1 Implemented
+
+`pi-rs skills [--project]` scans, in order: `$HOME/.pi/agent/skills`,
+`$HOME/.agents/skills`, then `<ancestor>/.pi/skills` and `<ancestor>/.agents/skills` from
+the working directory up to the git root. Within a location, a directory containing
+`SKILL.md` is a skill; a root `*.md` file is a skill in the `.pi` family and is ignored
+in the shared `.agents` family, where only files inside a grouping directory count. The
+frontmatter subset read is `name` (required), `description` (required — a skill that
+cannot say what it does is never offered), `license`, `compatibility`, `allowed-tools`,
+`disable-model-invocation`, including quoted scalars and `|`/`>` block scalars. Project
+locations are read only with `--project`; walks are depth-bounded and do not follow
+symlinks.
+
+Not yet: package-local skills, the `skills` array in settings, `--skill` paths,
+skill-body activation, and the model-facing prompt listing.
+
 ## 6. Prompt templates
 
 Prompt templates should preserve:
