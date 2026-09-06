@@ -62,16 +62,14 @@ fn resolve_session(store: &Store, wanted: Option<&str>) -> Result<SessionId, Str
     .list_session_ids()
     .map_err(|error| format!("cannot list sessions: {error}"))?;
   let Some(wanted) = wanted else {
-    return ids
+    // Session ids are time-ordered, so the largest is the newest; the reader should
+    // know which session they are being shown before the first line of it.
+    let latest = ids
       .first()
       .cloned()
-      .ok_or_else(|| format!("no sessions recorded under {}", store.root().display()))
-      .map(|latest| {
-        // Session ids are time-ordered, so the largest is the newest; the reader
-        // should know which session they are looking at before the first line.
-        eprintln!("trace: newest session {}", latest.as_str());
-        latest
-      });
+      .ok_or_else(|| format!("no sessions recorded under {}", store.root().display()))?;
+    eprintln!("trace: newest session {}", latest.as_str());
+    return Ok(latest);
   };
   let matches: Vec<&SessionId> = ids
     .iter()

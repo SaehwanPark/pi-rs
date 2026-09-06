@@ -373,14 +373,13 @@ fn tools_selects_tool_activity_and_nothing_else() {
   let kinds: Vec<String> = text
     .lines()
     .map(|line| {
-      let label = line
+      line
         .strip_prefix(' ')
         .unwrap_or(line)
         .split(' ')
         .next()
         .unwrap_or("")
-        .to_string();
-      label
+        .to_string()
     })
     .filter(|label| label.starts_with('['))
     .collect();
