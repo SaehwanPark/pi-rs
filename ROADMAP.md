@@ -69,10 +69,15 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [x] Implement streamed assistant rendering for the one-shot command.
 - [ ] Implement cancel/interrupt.
 - [ ] Implement compact status line.
-- [ ] Implement syntax-aware command parsing.
+- [x] Render the streamed transcript through a semantic layer (`pi-rs-tui`: roles,
+      provenance-labelled reasoning, spelled-out tool state, calm-by-default diagnostics)
+      and wire it into `pi-rs run` behind `--color/--no-color`, `--width`, `--no-reasoning`,
+      `--verbose`, `--quiet`, `--silent`.
+- [ ] Implement syntax-aware command parsing (parser exists in `pi-rs-tui::command`,
+      quote-aware and tested, but no interactive editor consumes it yet).
 - [ ] Implement syntax highlighting for operation vs arguments.
-- [ ] Implement path-aware rendering.
-- [ ] Ensure narrow-terminal fallback.
+- [x] Implement path-aware rendering (`pi-rs-tui::command` path shapes, `Role::Path`).
+- [x] Ensure narrow-terminal fallback (`MIN_COLUMN` drops decoration, keeps word alignment).
 - [ ] Measure keystroke/render latency.
 
 ### Providers

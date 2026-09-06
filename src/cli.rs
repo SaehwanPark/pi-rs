@@ -1,4 +1,7 @@
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+  ffi::{OsStr, OsString},
+  path::PathBuf,
+};
 
 use pi_rs_tui::{ColorChoice, DiagnosticFilter};
 
@@ -8,7 +11,8 @@ pub const RUN_HELP: &str = concat!(
   "\n",
   "Runs one durable coding-agent turn. The answer is written to stdout exactly as\n",
   "the model produced it; everything else is written to stderr. Surface flags\n",
-  "control only that second stream and never change what is recorded.\n",
+  "control only that second stream and never change what is recorded. Value flags\n",
+  "accept both `--flag value` and `--flag=value`.\n",
   "\n",
   "Required:\n",
   "  --config <file>          Provider configuration\n",
@@ -26,8 +30,11 @@ pub const RUN_HELP: &str = concat!(
   "  --no-reasoning           Do not print reasoning\n",
   "  --verbose                Print routine transcript chrome too (default: only\n",
   "                           warnings, errors, and state changes)\n",
-  "  --quiet                  Print only warnings, errors, and the session summary\n",
-  "  --silent                 Print no transcript at all\n",
+  "  --quiet                  Print only warnings, errors, and tool trouble: a\n",
+  "                           successful tool call is routine, a failed, refused, or\n",
+  "                           unrecorded one is not\n",
+  "  --silent                 Print no transcript at all (the answer on stdout is\n",
+  "                           still written, and the session is still recorded)\n",
 );
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +108,17 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
   let mut diagnostics: Option<DiagnosticFilter> = None;
   let mut width: Option<usize> = None;
   let mut reasoning = true;
+  // `--color=always` is the shape a shell user reaches for first. Expand that form into
+  // the two-token form the rest of this parser understands, and only for flags this
+  // command actually takes: a prompt or path containing '=' must survive untouched.
+  let expanded: Vec<OsString> = remaining
+    .iter()
+    .flat_map(|arg| match inline_value(arg) {
+      Some((flag, value)) => vec![OsString::from(flag), value.to_os_string()],
+      None => vec![arg.clone()],
+    })
+    .collect();
+  let remaining: &[OsString] = &expanded;
   let mut index = 0;
   while index < remaining.len() {
     let flag = remaining[index]
@@ -175,6 +193,16 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
       diagnostics: diagnostics.unwrap_or_else(|| SurfaceArgs::default().diagnostics),
     },
   }))
+}
+
+/// Split `--flag=value` when `flag` is a value-taking flag of `pi-rs run`.
+fn inline_value(arg: &std::ffi::OsStr) -> Option<(&str, &std::ffi::OsStr)> {
+  let (flag, value) = arg.to_str()?.split_once('=')?;
+  matches!(
+    flag,
+    "--config" | "--cwd" | "--prompt" | "--color" | "--width"
+  )
+  .then_some((flag, OsStr::new(value)))
 }
 
 fn set_once<T>(slot: &mut Option<T>, value: T, flag: &str) -> Result<(), String> {
@@ -269,6 +297,31 @@ mod tests {
       _ => panic!("expected run"),
     };
     assert_eq!(args.prompt, "  two words  ");
+  }
+
+  #[test]
+  fn value_flags_accept_the_inline_form() {
+    // `--color=always` is what a shell user reaches for first; refusing it would be a
+    // needless syntax lesson.
+    assert_eq!(run(&["--color=never"]).color, ColorChoice::Never);
+    assert_eq!(run(&["--width=40"]).width, Some(40));
+    assert_eq!(run(&["--color=always"]).color, ColorChoice::Always);
+  }
+
+  #[test]
+  fn only_known_flags_split_on_equals() {
+    // A prompt or path that happens to contain '=' is data, not a flag boundary.
+    let parsed = parse(strings(&["run", "--config=c=x", "--cwd=w", "--prompt=a=b"])).unwrap();
+    match parsed {
+      Command::Run(args) => {
+        assert_eq!(args.prompt, "a=b");
+        assert_eq!(args.config, PathBuf::from("c=x"));
+      }
+      _ => panic!("expected run"),
+    }
+    // An unknown flag keeps its whole name in the error, inline form or not.
+    let error = parse(strings(&["run", "--bogus=1"])).unwrap_err();
+    assert!(error.contains("--bogus"), "{error}");
   }
 
   #[test]

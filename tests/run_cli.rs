@@ -545,3 +545,263 @@ fn help_argument_errors_and_bare_invocation_exit_without_configuration() {
   assert_eq!(invalid.status.code(), Some(2));
   assert!(String::from_utf8_lossy(&invalid.stderr).contains("--config is required"));
 }
+
+// --- surface flags -------------------------------------------------------------
+
+/// Run with extra surface flags, under a pinned environment.
+///
+/// The surface resolves colour and width from the environment, so a test that inherited
+/// the developer's `NO_COLOR` or `TERM` would render differently in CI than at a desk.
+fn run_surface(config: &Path, cwd: &Path, prompt: &str, extra: &[&str]) -> Output {
+  Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+    .args(["run", "--config"])
+    .arg(config)
+    .arg("--cwd")
+    .arg(cwd)
+    .args(["--prompt", prompt])
+    .args(extra)
+    .env_remove("NO_COLOR")
+    .env_remove("TERM")
+    .env_remove("CLICOLOR")
+    .env_remove("CLICOLOR_FORCE")
+    .output()
+    .expect("run pi-rs")
+}
+
+/// One offline turn with its own workspace, state root, config and fake provider.
+///
+/// A run consumes its provider's responses and writes its own session, so two runs that
+/// are meant to be compared need two scenarios.
+struct Scenario {
+  workspace: PathBuf,
+  state: PathBuf,
+  config: PathBuf,
+  server: FakeServer,
+  _temp: TempDir,
+}
+
+fn scenario(responses: Vec<String>) -> Scenario {
+  let temp = TempDir::new().unwrap();
+  let workspace = temp.path().join("workspace");
+  fs::create_dir(&workspace).unwrap();
+  let server = FakeServer::answer(responses);
+  let config = write_config(temp.path(), &server.base_url(), true);
+  let state = temp.path().join("state");
+  Scenario {
+    workspace,
+    state,
+    config,
+    server,
+    _temp: temp,
+  }
+}
+
+/// A turn that reasons, calls one mutating tool, then answers in a single long line.
+fn reasoning_and_long_answer() -> Vec<String> {
+  vec![
+    tool_response(
+      "call_write",
+      "write",
+      r#"{"path":"model.txt","contents":"from tool\n"}"#,
+      Some("choose a file"),
+    ),
+    text_response(&"answer ".repeat(40)),
+  ]
+}
+
+fn trace_events(state: &Path) -> Vec<AgentEvent> {
+  let layout = StateLayout::new(state);
+  let session_id = layout
+    .list_session_ids()
+    .unwrap()
+    .pop()
+    .expect("session id");
+  TraceJournal::read(&layout.trace_path(&session_id))
+    .unwrap()
+    .items
+    .into_iter()
+    .map(|entry| entry.envelope.event)
+    .collect()
+}
+
+#[test]
+fn no_reasoning_flag_hides_reasoning_without_hiding_the_answer() {
+  let scene = scenario(reasoning_and_long_answer());
+  let output = run_surface(&scene.config, &scene.workspace, "go", &["--no-reasoning"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(output.status.success(), "{stderr}");
+  assert!(!stderr.contains("[reasoning"), "{stderr}");
+  // Hiding reasoning is not hiding the work: the rest of the transcript is intact.
+  assert!(stderr.contains("[tool] write"), "{stderr}");
+  assert!(stderr.contains("[tool ok] write"), "{stderr}");
+  assert!(String::from_utf8_lossy(&output.stdout).starts_with("answer answer"));
+}
+
+#[test]
+fn silent_suppresses_the_surface_but_not_the_record() {
+  let scene = scenario(reasoning_and_long_answer());
+  let output = run_surface(&scene.config, &scene.workspace, "go", &["--silent"]);
+  assert!(output.status.success(), "{:?}", output.stderr);
+  assert!(
+    output.stderr.is_empty(),
+    "{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  // Suppressing the display must not suppress the answer...
+  assert!(String::from_utf8_lossy(&output.stdout).starts_with("answer answer"));
+  // ...nor the durable trace, which is the product.
+  let events = trace_events(&scene.state);
+  assert!(
+    events
+      .iter()
+      .any(|event| matches!(event, AgentEvent::ReasoningDelta(_))),
+    "reasoning must still be recorded: {events:?}"
+  );
+  assert!(
+    events
+      .iter()
+      .any(|event| matches!(event, AgentEvent::ToolRequested(_))),
+    "tool calls must still be recorded: {events:?}"
+  );
+}
+
+#[test]
+fn quiet_keeps_trouble_and_drops_routine_work() {
+  let scene = scenario(reasoning_and_long_answer());
+  let output = run_surface(&scene.config, &scene.workspace, "go", &["--quiet"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(output.status.success(), "{stderr}");
+  // Routine work is not news in a log someone scans for trouble.
+  assert!(!stderr.contains("[tool ok]"), "{stderr}");
+  assert!(!stderr.contains("[tool] write"), "{stderr}");
+  assert!(!stderr.contains("[reasoning"), "{stderr}");
+  assert!(!stderr.contains("> go"), "{stderr}");
+  // The answer is not transcript, so quiet never touches it.
+  assert!(String::from_utf8_lossy(&output.stdout).starts_with("answer answer"));
+}
+
+#[test]
+fn quiet_still_reports_a_refused_mutating_tool() {
+  // A policy refusal is news precisely in the log that asked for only news: the model
+  // tried to change something and did not.
+  let temp = TempDir::new().unwrap();
+  let workspace = temp.path().join("workspace");
+  fs::create_dir(&workspace).unwrap();
+  let server = FakeServer::answer(vec![
+    tool_response(
+      "call_denied",
+      "write",
+      r#"{"path":"denied.txt","contents":"must not exist"}"#,
+      None,
+    ),
+    text_response("denied as expected"),
+  ]);
+  // Mutating tools are not auto-approved, so the write is refused by policy.
+  let config = write_config(temp.path(), &server.base_url(), false);
+
+  let output = run_surface(&config, &workspace, "try to write", &["--quiet"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(output.status.success(), "{stderr}");
+  assert!(stderr.contains("[tool failed] write"), "{stderr}");
+  assert!(stderr.contains("approval is required"), "{stderr}");
+  assert!(!workspace.join("denied.txt").exists());
+}
+
+#[test]
+fn verbose_prints_each_request_once_not_twice() {
+  let scene = scenario(vec![
+    tool_response(
+      "call_write",
+      "write",
+      r#"{"path":"a.txt","contents":"x"}"#,
+      None,
+    ),
+    tool_response("call_read", "read", r#"{"path":"a.txt"}"#, None),
+    text_response("done"),
+  ]);
+  let output = run_surface(&scene.config, &scene.workspace, "go", &["--verbose"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(output.status.success(), "{stderr}");
+  let requests = scene.server.requests();
+  assert_eq!(requests.len(), 3);
+  // The live surface and the durable trace partition events. If that partition were
+  // wrong, the same request line would print twice per request.
+  assert_eq!(
+    stderr.matches("[request] fake/agent").count(),
+    3,
+    "one line per request, no double printing: {stderr}"
+  );
+}
+
+#[test]
+fn width_wraps_stderr_but_never_the_answer() {
+  let scene = scenario(reasoning_and_long_answer());
+  let output = run_surface(&scene.config, &scene.workspace, "go", &["--width=40"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(output.status.success(), "{stderr}");
+  for line in stderr.lines() {
+    assert!(line.chars().count() <= 40, "wider than requested: {line}");
+  }
+  // The answer is data for a pipe, not a paragraph for a terminal: it is never wrapped.
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(stdout.lines().count(), 1, "{stdout}");
+  assert!(stdout.starts_with(&"answer ".repeat(40)));
+}
+
+#[test]
+fn colour_is_a_projection_and_never_touches_the_answer() {
+  // Piped output is monochrome by default: nobody wants escape codes in a log file.
+  let scene = scenario(reasoning_and_long_answer());
+  let plain = run_surface(&scene.config, &scene.workspace, "go", &[]);
+  assert!(
+    plain.status.success(),
+    "{}",
+    String::from_utf8_lossy(&plain.stderr)
+  );
+  assert!(
+    !plain.stdout.contains(&0x1b),
+    "{}",
+    String::from_utf8_lossy(&plain.stdout)
+  );
+  assert!(
+    !plain.stderr.contains(&0x1b),
+    "{}",
+    String::from_utf8_lossy(&plain.stderr)
+  );
+
+  // An explicit request wins over the environment, including NO_COLOR.
+  let scene = scenario(reasoning_and_long_answer());
+  let coloured = Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+    .args(["run", "--config"])
+    .arg(&scene.config)
+    .arg("--cwd")
+    .arg(&scene.workspace)
+    .args(["--prompt", "go"])
+    .args(["--color=always"])
+    .env("NO_COLOR", "1")
+    .output()
+    .expect("run pi-rs");
+  let coloured_stderr = String::from_utf8_lossy(&coloured.stderr);
+  assert!(coloured.stderr.contains(&0x1b), "{coloured_stderr}");
+  // Even forced, colour stays on the diagnostic stream; the answer stays byte-faithful.
+  assert!(
+    !coloured.stdout.contains(&0x1b),
+    "{}",
+    String::from_utf8_lossy(&coloured.stdout)
+  );
+}
+
+#[test]
+fn the_answer_does_not_change_with_what_the_surface_shows() {
+  let loud = scenario(reasoning_and_long_answer());
+  let quiet = scenario(reasoning_and_long_answer());
+  let loud = run_surface(&loud.config, &loud.workspace, "go", &["--verbose"]);
+  let quiet = run_surface(&quiet.config, &quiet.workspace, "go", &["--silent"]);
+  assert!(
+    loud.status.success(),
+    "{}",
+    String::from_utf8_lossy(&loud.stderr)
+  );
+  assert_eq!(loud.stdout, quiet.stdout);
+  assert!(!loud.stdout.is_empty());
+}
