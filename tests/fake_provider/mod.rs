@@ -51,7 +51,7 @@ use std::{
     atomic::{AtomicBool, Ordering},
   },
   thread,
-  time::Duration,
+  time::{Duration, Instant},
 };
 
 /// How long a request may take to finish arriving before the fake answers what it has.
@@ -101,6 +101,13 @@ impl FakeServer {
         }
         match listener.accept() {
           Ok((mut socket, _)) => {
+            // BSD and macOS hand the accepted socket the listener's `O_NONBLOCK`; Linux
+            // does not. A non-blocking socket ignores `SO_RCVTIMEO`, so on macOS a short
+            // read under load answers `WouldBlock`, and this fixture read that as the end
+            // of the request: it lost bytes, and then lost a scripted answer with them.
+            // Make the accepted socket blocking, so the read timeout means the same thing
+            // on both platforms.
+            let _ = socket.set_nonblocking(false);
             let _ = socket.set_read_timeout(Some(READ_TIMEOUT));
             match drain_request(&mut socket) {
               Drain::Complete(request) => {
@@ -219,8 +226,27 @@ fn drain_request(socket: &mut TcpStream) -> Drain {
   let mut bytes = Vec::new();
   let mut buffer = [0u8; 4096];
   let mut expected = None;
+  let deadline = Instant::now() + READ_TIMEOUT;
   loop {
-    let read = socket.read(&mut buffer).unwrap_or(0);
+    let read = match socket.read(&mut buffer) {
+      Ok(read) => read,
+      // `WouldBlock` is not the end of a request, and an interrupted read is not
+      // either. Only EOF or a real error ends the read early, and a socket that somehow
+      // stayed non-blocking is still bounded by the deadline below.
+      Err(error)
+        if matches!(
+          error.kind(),
+          std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+        ) =>
+      {
+        if Instant::now() >= deadline {
+          break;
+        }
+        thread::sleep(POLL);
+        continue;
+      }
+      Err(_) => break,
+    };
     if read == 0 || bytes.len() >= MAX_REQUEST_BYTES {
       break;
     }

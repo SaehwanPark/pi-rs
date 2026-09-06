@@ -9,6 +9,8 @@ mod fake_provider;
 use std::{
   io::{Read, Write},
   net::{Shutdown, TcpStream},
+  thread,
+  time::Duration,
 };
 
 use fake_provider::FakeServer;
@@ -96,4 +98,44 @@ fn an_abandoned_connection_does_not_cost_a_scripted_answer() {
   assert!(second.contains("second"), "the script shifted: {second}");
   let observed = server.requests();
   assert_eq!(observed.len(), 2, "only complete requests are requests");
+}
+
+/// A request that arrives in pieces is still one request. BSD and macOS hand the accepted
+/// socket the listener's non-blocking flag, where a short read answers `WouldBlock`;
+/// reading that as the end of the request is how a scripted answer once went missing on
+/// macOS under load, while Linux — which does not inherit the flag — stayed green.
+#[test]
+fn a_request_that_arrives_in_pieces_is_answered_once() {
+  let server = FakeServer::answer(vec![
+    "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok".into(),
+  ]);
+  let authority = server.addr_authority();
+  let mut socket = TcpStream::connect(&authority).expect("connect the fake provider");
+
+  let body = "{\"seg\":1}";
+  let request = format!(
+    "POST /v1/chat/completions HTTP/1.1\r\nhost: {authority}\r\ncontent-length: {}\r\n\r\n{body}",
+    body.len()
+  );
+  let (head, tail) = request.split_at(24);
+  socket
+    .write_all(head.as_bytes())
+    .expect("write the first piece");
+  socket.flush().expect("flush the first piece");
+  thread::sleep(Duration::from_millis(120));
+  socket
+    .write_all(tail.as_bytes())
+    .expect("write the second piece");
+  socket.flush().expect("flush the second piece");
+
+  let mut raw = Vec::new();
+  let _ = socket.read_to_end(&mut raw);
+  let answer = String::from_utf8_lossy(&raw).into_owned();
+  assert!(
+    answer.contains("200 OK"),
+    "a segmented request should be answered, not dropped: {answer}"
+  );
+  let observed = server.requests();
+  assert_eq!(observed.len(), 1);
+  assert_eq!(observed[0].body, body, "the body must be reassembled");
 }
