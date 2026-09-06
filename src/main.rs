@@ -1,4 +1,5 @@
 mod cli;
+mod import_pi;
 mod run;
 mod trace;
 
@@ -15,6 +16,7 @@ fn main() {
     cli::Command::Help(help) => print!("{help}"),
     cli::Command::Run(args) => report(run::execute(args)),
     cli::Command::Trace(args) => report(trace::execute(args)),
+    cli::Command::Import(args) => report(import_pi::execute(args)),
   }
 }
 
