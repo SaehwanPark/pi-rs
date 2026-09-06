@@ -230,6 +230,7 @@ mod tests {
       redactions: 0,
       raw_payload: false,
       raw_ref: None,
+      externalized: Vec::new(),
     }
   }
 

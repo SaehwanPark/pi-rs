@@ -131,6 +131,32 @@ impl std::fmt::Display for ExternalContextSource {
   }
 }
 
+/// One event field whose bytes were stored out of the line.
+///
+/// A line that carries a whole tool output makes every reader of the journal pay
+/// for it: `grep`, a tail, a resume that only needs the tail. The bytes are not
+/// gone; they are stored once, content-addressed, and the field in the line keeps
+/// a bounded preview that says how much it left out and where the rest is. This
+/// record is the machine-readable form of the same claim, so a caller does not
+/// have to parse prose out of a preview to learn the sizes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalizedField {
+  /// Path of the field within the line, `/`-separated, for example `output` or
+  /// `arguments/contents`. The event is flattened into the line, so a
+  /// single-segment path names an event field; the envelope's own fields (`v`,
+  /// `meta`, `type`, `redactions`, `raw_payload`, `raw_ref`, `externalized`) are
+  /// never spilled, so the two cannot be confused.
+  pub field: String,
+  /// Durable blob reference in the form `blobs/<shard>/<hash>`, i.e. the same
+  /// form a retention pass extracts liveness from. Written in full, not
+  /// abbreviated, so following the pointer needs no config.
+  pub reference: String,
+  /// Bytes of the redacted value stored in the blob.
+  pub bytes: u64,
+  /// Bytes left in the line, including the marker.
+  pub inline: u64,
+}
+
 /// One trace journal line.
 ///
 /// The envelope is flattened so that a trace line stays readable and greppable
@@ -153,6 +179,14 @@ pub struct TraceEntry {
   /// reducing the event never destroys the pointer back to the bytes.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub raw_ref: Option<String>,
+  /// Fields spilled to blob storage so that this line stayed within the inline
+  /// budget. Empty, and omitted, for the ordinary case.
+  ///
+  /// This is a separate field rather than a reuse of [`Self::raw_ref`]: a raw
+  /// provider payload and a reduced normalized event are different claims about
+  /// where the bytes came from, and one line can legitimately carry both.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub externalized: Vec<ExternalizedField>,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -184,6 +218,7 @@ mod tests {
       redactions: 0,
       raw_payload: false,
       raw_ref: None,
+      externalized: Vec::new(),
     }
   }
 

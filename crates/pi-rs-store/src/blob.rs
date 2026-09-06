@@ -93,6 +93,36 @@ impl BlobStore {
   }
 
   /// Read a payload, failing rather than returning empty when it is absent.
+  /// Read the bytes a durable reference points at.
+  ///
+  /// A reference is what a bounded line records, and it arrives here as text from
+  /// a file, so it is validated rather than trusted: it must be exactly the
+  /// `blobs/<shard>/<hash>` shape the layout produces, with the shard equal to the
+  /// hash's own prefix. Anything else is refused instead of joined, because a
+  /// pointer read from a journal must not become a path outside this store.
+  pub fn get_relative(&self, reference: &str) -> Result<Vec<u8>, StoreError> {
+    let invalid = || StoreError::Invalid(format!("not a blob reference: {reference}"));
+    let rest = reference.strip_prefix("blobs/").ok_or_else(invalid)?;
+    let (shard, hash) = rest.split_once('/').ok_or_else(invalid)?;
+    if hash.contains('/') || reference.contains("..") {
+      return Err(invalid());
+    }
+    if hash.len() != 64
+      || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+      || shard.len() != 2
+      || !hash.starts_with(shard)
+    {
+      return Err(invalid());
+    }
+    match fs::read(self.base.join(shard).join(hash)) {
+      Ok(bytes) => Ok(bytes),
+      Err(error) if StoreError::is_missing(&error) => {
+        Err(StoreError::Missing(reference.to_string()))
+      }
+      Err(error) => Err(StoreError::Io(error)),
+    }
+  }
+
   pub fn get(&self, blob: &BlobRef) -> Result<Vec<u8>, StoreError> {
     let path = self.path_for(blob);
     match fs::read(&path) {
@@ -203,7 +233,7 @@ fn collect_files(dir: &Path) -> Result<Vec<PathBuf>, StoreError> {
 mod tests {
   use pi_rs_core::event::{AgentEvent, Diagnostic, DiagnosticLevel, EventEnvelope, EventMeta};
   use pi_rs_core::ids::{SessionId, TraceId};
-  use pi_rs_core::trace::TraceEntry;
+  use pi_rs_core::trace::{ExternalizedField, TraceEntry};
 
   use crate::tmp::TempDir;
 
@@ -314,6 +344,7 @@ mod tests {
       redactions: 0,
       raw_payload: false,
       raw_ref: Some(kept.relative_path()),
+      externalized: Vec::new(),
     };
     let line = serde_json::to_string(&entry).unwrap();
     let referenced: std::collections::BTreeSet<String> = collect_strings(&line)
@@ -329,6 +360,94 @@ mod tests {
     assert!(store.exists(&kept));
     assert!(!store.exists(&dropped));
     assert_eq!(store.bytes().unwrap(), 4);
+  }
+
+  #[test]
+  fn a_recorded_reference_can_be_followed_without_a_blob_object() {
+    let tmp = TempDir::new("blob-relative-read");
+    let store = store(&tmp);
+    let blob = store.put(b"bounded payload", None).unwrap();
+    assert_eq!(
+      store.get_relative(&blob.relative_path()).unwrap(),
+      b"bounded payload"
+    );
+  }
+
+  #[test]
+  fn a_reference_that_is_not_the_layout_shape_is_refused() {
+    let tmp = TempDir::new("blob-relative-escape");
+    let store = store(&tmp);
+    for forged in [
+      "../../secrets",
+      "blobs/..%2f/secrets",
+      "blobs/../abcd",
+      "blobs/zz/deadbeef",
+      "blobs/0e/not-a-hash",
+      "blobs/0e",
+      "sessions/0e/abcd",
+      "blobs/0e/000000000000000000000000000000000000000000000000000000000000000z",
+    ] {
+      assert!(
+        matches!(store.get_relative(forged), Err(StoreError::Invalid(_))),
+        "{forged} must not be joined onto the store root"
+      );
+    }
+    // A well-formed reference to bytes that are not stored is a miss, not a panic.
+    let absent = BlobRef::for_bytes(b"never stored", None);
+    assert!(matches!(
+      store.get_relative(&absent.relative_path()),
+      Err(StoreError::Missing(_))
+    ));
+  }
+
+  /// A spilled field leaves two traces of its reference, and liveness scanning
+  /// reads both: the structured record, whose value is exactly
+  /// `blobs/<shard>/<hash>`, and the preview marker naming the same path inside
+  /// prose. A collector that understood only the first would still keep the blob;
+  /// one that understood neither would delete bytes a line is still pointing at.
+  #[test]
+  fn a_reference_written_by_payload_bounding_is_visible_to_liveness_scanning() {
+    let tmp = TempDir::new("blob-bounded-ref");
+    let store = store(&tmp);
+    let spilled = store.put(b"bounded payload", None).unwrap();
+    let entry = TraceEntry {
+      envelope: EventEnvelope::new(
+        EventMeta::new(SessionId::new(), TraceId::new()),
+        AgentEvent::Diagnostic(Diagnostic {
+          level: DiagnosticLevel::Info,
+          message: format!(
+            "head of a long payload\u{2026} [stored 40960 bytes in {}, 256 bytes shown]",
+            spilled.relative_path()
+          ),
+        }),
+      ),
+      redactions: 0,
+      raw_payload: false,
+      raw_ref: None,
+      externalized: vec![ExternalizedField {
+        field: "output".into(),
+        reference: spilled.relative_path(),
+        bytes: 40960,
+        inline: 320,
+      }],
+    };
+    let line = serde_json::to_string(&entry).unwrap();
+    let referenced: std::collections::BTreeSet<String> = collect_strings(&line)
+      .into_iter()
+      .filter(|text| text.starts_with("blobs/"))
+      .collect();
+    assert!(
+      referenced.contains(&spilled.relative_path()),
+      "the structured record is a whole string, so it is collected: {referenced:?}"
+    );
+    let bytes = b"nobody points here";
+    let unreferenced = store.put(bytes, None).unwrap();
+    assert_eq!(
+      store.prune_unreferenced(&referenced).unwrap(),
+      bytes.len() as u64
+    );
+    assert!(store.exists(&spilled), "a referenced payload survives");
+    assert!(!store.exists(&unreferenced));
   }
 
   /// Collect quoted strings from a JSON line, for reference-liveness tests.
