@@ -7,7 +7,7 @@ use pi_rs_core::{
   AttributedMessage, CancelToken, EventEnvelope, ModelProvider, ModelRef, ReasoningProvenance,
   RuntimeConfig, SessionEndReason, SessionHeader, SessionId, SinkError, TraceId, now_millis,
 };
-use pi_rs_provider::{OpenAiCompat, ProviderConfig};
+use pi_rs_provider::{Deferred, OpenAiCompat, ProviderConfig};
 use pi_rs_runtime::{StoreTrace, Trace, TurnError, TurnLoop, TurnProgress};
 use pi_rs_store::{Store, WritePolicy};
 use pi_rs_tools::{Executed, ToolRegistry, Workspace};
@@ -34,6 +34,10 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
     .map_err(|error| format!("invalid primary endpoint: {error}"))?;
   let provider = OpenAiCompat::new(provider_config)
     .map_err(|error| format!("invalid primary endpoint: {error}"))?;
+  // A configured backup is attached as a handle only. Building its adapter here
+  // would install a TLS agent and read a credential variable for a model that the
+  // overwhelming majority of sessions never need.
+  let backup = backup_provider(&config)?;
 
   let workspace = Workspace::new(&args.cwd)
     .map_err(|error| format!("invalid workspace '{}': {error}", args.cwd.display()))?
@@ -110,6 +114,11 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
     )
     .with_working_dir(canonical_cwd)
     .with_thinking(config.thinking);
+    if let Some(backup) = &backup {
+      // Failover is off until a backup exists. Attaching one is the whole
+      // configuration surface: the policy comes from the primary's own capabilities.
+      runtime = runtime.with_backup(backup);
+    }
     match runtime.run_turn(&args.prompt, &CancelToken::new(), &mut progress) {
       Ok(_) => {
         // Flush before the summary line: the surface may hold an unterminated
@@ -142,6 +151,36 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
 /// wide, colourless transcript and (if stdout is a terminal) a coloured answer. An
 /// explicit `--width` is respected even on a pipe, which is how a user narrows a
 /// log deliberately rather than by accident.
+/// The configured backup as a provider that does not exist yet.
+///
+/// The adapter is built the first time the runtime actually addresses a request to
+/// it, which is also when its credential is resolved from the environment. What the
+/// failover gate needs beforehand — the model reference and the capability
+/// declaration — is read from config, so a backup that is never needed costs
+/// nothing at startup and never touches a credential it does not use.
+fn backup_provider(config: &RuntimeConfig) -> Result<Option<Deferred>, String> {
+  let Some(model) = config.backup.clone() else {
+    return Ok(None);
+  };
+  // `RuntimeConfig::validate` already requires every usable model to have an
+  // endpoint once endpoints are declared at all; the case left over is a hand-run
+  // primary with no endpoint table, which cannot address a backup either.
+  let endpoint = config
+    .endpoint_for(&model)
+    .ok_or_else(|| format!("invalid config: backup model {model} has no endpoint entry"))?;
+  let declared = endpoint.capabilities.clone();
+  let endpoint = endpoint.clone();
+  Ok(
+    Deferred::new(model, declared, move || {
+      let config = ProviderConfig::from_endpoint(&endpoint).map_err(|error| error.to_string())?;
+      OpenAiCompat::new(config)
+        .map(|provider| Box::new(provider) as Box<dyn ModelProvider>)
+        .map_err(|error| error.to_string())
+    })
+    .into(),
+  )
+}
+
 fn surface_options(args: &SurfaceArgs) -> TranscriptOptions {
   let stderr = term::Stream::Stderr;
   TranscriptOptions {

@@ -183,7 +183,12 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Stage gate
 
-- [ ] A completed session can answer which model produced each major event.
+> Model attribution is now per event: the envelope names the model in charge when the
+> event was written, and a transition event keeps the epoch it *describes* separate from
+> the epoch that recorded it. `tests/failover_cli.rs` reads the journal back and checks
+> both. The reasoning-provenance lines below stay open until serialization is covered.
+
+- [x] A completed session can answer which model produced each major event.
 - [ ] Native reasoning remains distinguishable from all inferred/summarized forms.
 - [ ] Large payloads do not require full inline duplication in trace JSONL.
 
@@ -297,7 +302,7 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [ ] Implement retryable transport failures.
 - [ ] Implement timeout classification.
 - [ ] Implement rate-limit classification.
-- [ ] Implement provider-unavailable classification.
+- [x] Implement provider-unavailable classification.
 - [ ] Implement authentication classification.
 - [ ] Implement protocol-failure classification.
 - [ ] Implement context-overflow classification.
@@ -305,17 +310,17 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Retry
 
-- [ ] Add bounded retry policy.
+- [x] Add bounded retry policy.
 - [ ] Add backoff.
-- [ ] Emit retry events.
+- [x] Emit retry events.
 - [ ] Support cancellation during retry.
 
 ### Backup model
 
-- [ ] Add primary/backup configuration.
-- [ ] Validate backup config without eagerly initializing it.
+- [x] Add primary/backup configuration.
+- [x] Validate backup config without eagerly initializing it.
 - [ ] Add manual `/failover`.
-- [ ] Add model epoch transition.
+- [x] Add model epoch transition.
 
 ### Capability gate
 
@@ -328,7 +333,7 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Side-effect continuity
 
-- [ ] Preserve committed tool results across failover.
+- [x] Preserve committed tool results across failover.
 - [ ] Detect `Unknown` tool completion.
 - [ ] Prevent blind replay of mutating operations.
 - [ ] Add reconciliation path for uncertain state.
@@ -337,14 +342,19 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 - [ ] Keep backup active after failover.
 - [ ] Add explicit switch-back command.
-- [ ] Avoid automatic ping-pong.
+- [x] Avoid automatic ping-pong.
 
 ### Stage gate
 
-- [ ] Simulated provider failure can continue on backup without replaying committed side effects.
+> The checked lines below are evidenced by `tests/failover_cli.rs`, which drives the
+> real CLI against loopback HTTP endpoints: a 503 twice, then a backup. The capability
+> gate and the smaller-backup path stay open because no test yet compares two models
+> with different capabilities.
+
+- [x] Simulated provider failure can continue on backup without replaying committed side effects.
 - [ ] Smaller backup context is handled through compaction or explicit refusal.
-- [ ] Failover provenance is visible in trace and UI.
-- [ ] Backup initialization does not slow normal startup.
+- [x] Failover provenance is visible in trace and UI.
+- [x] Backup initialization does not slow normal startup.
 
 ---
 

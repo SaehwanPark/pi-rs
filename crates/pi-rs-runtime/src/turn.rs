@@ -311,8 +311,33 @@ impl<'a> TurnLoop<'a> {
   }
 
   /// Override the failover policy, keeping the attached backup.
-  pub fn with_failover(mut self, policy: FailoverPolicy) -> Self {
+  ///
+  /// The backup is attached separately because the caller owns the provider while
+  /// the policy is what the operator tuned. A policy that names no backup keeps the
+  /// attached one: dropping it here would leave a loop holding a provider it is no
+  /// longer allowed to use, which reads as "failover configured, failover never
+  /// happens". Detaching is explicit rather than a side effect of ordering, see
+  /// [`Self::without_backup`].
+  pub fn with_failover(mut self, mut policy: FailoverPolicy) -> Self {
+    if policy.backup.is_none() {
+      policy.backup.clone_from(&self.failover.backup);
+      policy
+        .backup_capabilities
+        .clone_from(&self.failover.backup_capabilities);
+    }
     self.failover = policy;
+    self
+  }
+
+  /// Detach the backup: no failure may switch models.
+  ///
+  /// Both halves have to be cleared together. A held provider with no policy entry
+  /// is inert, and a policy entry with no provider is a promise the loop cannot
+  /// keep.
+  pub fn without_backup(mut self) -> Self {
+    self.backup = None;
+    self.failover.backup = None;
+    self.failover.backup_capabilities = None;
     self
   }
 
@@ -808,6 +833,19 @@ impl<'a> TurnLoop<'a> {
             Some(turn_id.clone()),
             DiagnosticLevel::Error,
             format!("failover to {to} refused: it is not the attached backup"),
+          )?;
+          return Ok(Action::Stop);
+        }
+        if self.active_model() == to {
+          // The policy is still pointing at the model already answering, which
+          // happens once the backup itself fails. Another epoch for the same model
+          // is ping-pong wearing a takeover label: it burns the request budget,
+          // records transitions that changed nothing, and hides that the only
+          // remaining option was to stop.
+          self.diagnostic(
+            Some(turn_id.clone()),
+            DiagnosticLevel::Error,
+            format!("failover to {to} refused: it is the active model"),
           )?;
           return Ok(Action::Stop);
         }
@@ -1439,6 +1477,24 @@ mod tests {
         .iter()
         .find(|(_, k, _)| k == kind)
         .map(|(_, _, payload)| payload.clone())
+    }
+
+    /// Every diagnostic message, in order.
+    fn diagnostics(&self) -> Vec<String> {
+      self
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, kind, _)| kind == "diagnostic")
+        .map(|(_, _, payload)| {
+          payload
+            .get("message")
+            .and_then(|message| message.as_str())
+            .unwrap_or_default()
+            .to_string()
+        })
+        .collect()
     }
 
     fn count(&self, kind: &str) -> usize {
@@ -2438,6 +2494,118 @@ mod tests {
       kinds.iter().filter(|k| *k == "model_epoch_started").count(),
       2
     );
+  }
+
+  #[test]
+  fn a_policy_override_keeps_the_attached_backup() {
+    // The builders are separate because the caller owns the provider and the
+    // operator tunes the policy. An override that quietly dropped the backup would
+    // leave a configured, attached, and permanently unused backup.
+    let primary = Scripted::new("primary", vec![text("primary answer")])
+      .always_fails(ModelFailureKind::ProviderUnavailable);
+    let backup = Scripted::new("backup", vec![text("from backup")]);
+    let tools = registry_with(Vec::new());
+    let mut trace = Recorder::default();
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      primary.capabilities().context_window,
+    );
+    let report = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_backup(&backup)
+    .with_failover(FailoverPolicy::default().with_max_attempts(3))
+    .run_turn("hi", &CancelToken::new(), &mut SilentProgress)
+    .expect("the backup answers");
+
+    assert_eq!(report.text, "from backup");
+    assert_eq!(report.epoch, 1);
+    // The override took effect: three attempts against the primary before yielding.
+    assert_eq!(primary.levels().len(), 3);
+  }
+
+  #[test]
+  fn a_detached_backup_is_never_asked() {
+    let primary = Scripted::new("primary", Vec::new()).always_fails(ModelFailureKind::Transport);
+    let backup = Scripted::new("backup", vec![text("unused")]);
+    let tools = registry_with(Vec::new());
+    let mut trace = Recorder::default();
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      primary.capabilities().context_window,
+    );
+    let error = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_backup(&backup)
+    .without_backup()
+    .run_turn("hi", &CancelToken::new(), &mut SilentProgress)
+    .expect_err("a down primary with no backup is fatal");
+
+    assert!(matches!(error, TurnError::Unavailable(_)), "{error:?}");
+    assert_eq!(backup.levels().len(), 0, "detached means never asked");
+    assert_eq!(trace.count("model_failover"), 0);
+  }
+
+  #[test]
+  fn a_backup_that_fails_does_not_take_over_from_itself() {
+    // Both models are down. The policy still names the backup, so without a guard
+    // the loop would open a second epoch for the model already serving, retry it,
+    // and keep converting one failure into several recorded transitions.
+    let primary =
+      Scripted::new("primary", Vec::new()).always_fails(ModelFailureKind::ProviderUnavailable);
+    let backup =
+      Scripted::new("backup", Vec::new()).always_fails(ModelFailureKind::ProviderUnavailable);
+    let tools = registry_with(Vec::new());
+    let mut trace = Recorder::default();
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      primary.capabilities().context_window,
+    );
+    let error = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_backup(&backup)
+    .run_turn("hi", &CancelToken::new(), &mut SilentProgress)
+    .expect_err("nothing can serve this turn");
+
+    assert!(matches!(error, TurnError::Unavailable(_)), "{error:?}");
+    assert_eq!(
+      trace.count("model_failover"),
+      1,
+      "one real takeover, no self-handover"
+    );
+    assert_eq!(
+      trace.count("model_epoch_started"),
+      2,
+      "the epoch list records what actually changed: {kinds:?}",
+      kinds = trace.kinds()
+    );
+    assert!(
+      trace
+        .diagnostics()
+        .iter()
+        .any(|message| message.contains("refused: it is the active model")),
+      "the refusal must be stated, not only implied: {:?}",
+      trace.diagnostics()
+    );
+    // Two attempts each, then stop: the guard also ends the request-budget bleed.
+    assert_eq!(primary.levels().len() + backup.levels().len(), 4);
   }
 
   #[test]

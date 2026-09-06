@@ -123,6 +123,8 @@ Users may configure one optional backup model.
 
 The runtime retries eligible transient failures first, then fails over only when the active model cannot reliably continue.
 
+A configured backup adapter is built the first time a request actually needs it. Configuring a backup that is never used costs nothing, and a backup that cannot be built fails at the moment it is needed, naming itself.
+
 ### MCP
 
 `pi-rs` should:

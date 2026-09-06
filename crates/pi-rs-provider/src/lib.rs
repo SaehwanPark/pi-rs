@@ -21,12 +21,14 @@
 
 pub mod config;
 pub mod decode;
+pub mod deferred;
 pub mod mapping;
 pub mod openai;
 pub mod sse;
 
 pub use config::{BuildError, DEFAULT_BASE_URL, MaxTokensField, ProviderConfig, ThinkingInput};
 pub use decode::Decoder;
+pub use deferred::Deferred;
 pub use mapping::{request_body, serves};
 pub use openai::OpenAiCompat;
 pub use sse::{DONE, MAX_EVENT_BYTES, SseEvent, SseStream};
