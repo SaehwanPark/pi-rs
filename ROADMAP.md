@@ -164,18 +164,22 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Provenance
 
-- [ ] Render native reasoning distinctly.
-- [ ] Render provider summaries distinctly.
+- [x] Render native reasoning distinctly.
+- [x] Render provider summaries distinctly.
 - [ ] Add declared-rationale representation.
 - [ ] Add reconstructed-rationale representation.
 - [ ] Prevent provenance loss during serialization.
 
+> `Declared` and `Reconstructed` already have distinct roles and labels in the
+> rendering layer, and a folded reasoning run never merges across a provenance
+> boundary. These two stay open until a runtime path actually produces them.
+
 ### Inspection
 
-- [ ] Implement `/trace`.
-- [ ] Implement trace filtering by tools.
-- [ ] Implement trace filtering by reasoning.
-- [ ] Implement model-epoch inspection.
+- [x] Implement `pi-rs trace`.
+- [x] Implement trace filtering by tools.
+- [x] Implement trace filtering by reasoning.
+- [x] Implement model-epoch inspection.
 
 ### Stage gate
 

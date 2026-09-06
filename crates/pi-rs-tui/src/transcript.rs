@@ -636,7 +636,7 @@ fn display_argument(value: &str) -> String {
 ///
 /// Only control characters are touched: escaping backslashes or quotes too would
 /// rewrite paths so that a transcript no longer shows the path that was used.
-fn escape_control(value: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn escape_control(value: &str) -> std::borrow::Cow<'_, str> {
   use std::borrow::Cow;
   if !value.chars().any(|c| c.is_ascii_control()) {
     return Cow::Borrowed(value);
@@ -689,7 +689,10 @@ fn reduction_reason(reason: &pi_rs_core::ReductionReason) -> String {
   }
 }
 
-fn wrap_lines(mut lines: Vec<RenderLine>, options: &TranscriptOptions) -> Vec<RenderLine> {
+pub(crate) fn wrap_lines(
+  mut lines: Vec<RenderLine>,
+  options: &TranscriptOptions,
+) -> Vec<RenderLine> {
   if options.width == 0 {
     return lines;
   }

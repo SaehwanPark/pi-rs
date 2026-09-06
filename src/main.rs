@@ -1,5 +1,6 @@
 mod cli;
 mod run;
+mod trace;
 
 fn main() {
   let command = match cli::parse(std::env::args_os().skip(1)) {
@@ -12,11 +13,15 @@ fn main() {
 
   match command {
     cli::Command::Help(help) => print!("{help}"),
-    cli::Command::Run(args) => {
-      if let Err(error) = run::execute(args) {
-        eprintln!("error: {error}");
-        std::process::exit(1);
-      }
-    }
+    cli::Command::Run(args) => report(run::execute(args)),
+    cli::Command::Trace(args) => report(trace::execute(args)),
+  }
+}
+
+/// A command failure is one line on stderr and a non-zero exit.
+fn report(result: Result<(), String>) {
+  if let Err(error) = result {
+    eprintln!("error: {error}");
+    std::process::exit(1);
   }
 }

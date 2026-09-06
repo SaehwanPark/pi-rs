@@ -3,7 +3,7 @@ use std::{
   path::PathBuf,
 };
 
-use pi_rs_tui::{ColorChoice, DiagnosticFilter};
+use pi_rs_tui::{ColorChoice, DiagnosticFilter, TraceSelection};
 
 pub const TOP_HELP: &str = "Usage: pi-rs run --config <file> --cwd <workspace> --prompt <text>\n";
 pub const RUN_HELP: &str = concat!(
@@ -35,12 +35,45 @@ pub const RUN_HELP: &str = concat!(
   "                           unrecorded one is not\n",
   "  --silent                 Print no transcript at all (the answer on stdout is\n",
   "                           still written, and the session is still recorded)\n",
+  // The two commands read the same flag differently on purpose: for `run` the
+  // transcript is commentary on an answer, for `trace` it is the answer.
+  "\n",
+  "See also: pi-rs trace, which reads a session's transcript back out of the store.",
+);
+
+pub const TRACE_HELP: &str = concat!(
+  "Usage: pi-rs trace [session-id] [options]\n",
+  "\n",
+  "Reads a session's canonical trace back out of the store and renders it as a\n",
+  "transcript. With no session id, reads the most recent session. Unlike `run`, this\n",
+  "output is the answer, so it goes to stdout and includes the routine by default.\n",
+  "Streamed fragments are folded: one answer line, one reasoning block per provenance.\n",
+  "\n",
+  "Selection:\n",
+  "  [session-id]             Session id or prefix. Newest session when omitted.\n",
+  "  --session <id>           Same as the positional form.\n",
+  "  --tools                  Tool activity only.\n",
+  "  --reasoning              Reasoning only.\n",
+  "  --epoch <n>              Only events attributed to model epoch n.\n",
+  "  --sequence               Prefix each entry with its sequence number.\n",
+  "\n",
+  "Surface:\n",
+  "  --config <file>          Configuration whose store.root holds the traces.\n",
+  "  --color <auto|always|never>\n",
+  "                           Colour the transcript (default: auto).\n",
+  "  --no-color               Same as --color never.\n",
+  "  --width <columns>        Column budget; 0 never wraps (default: probe stdout).\n",
+  "  --no-reasoning           Omit reasoning text, show each block's extent.\n",
+  "  --quiet                  Only warnings, errors, and tool trouble.\n",
+  "  --silent                 No transcript (the footer still reports what was read).\n",
+  "  --help                   Show this help.\n",
 );
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
   Help(&'static str),
   Run(RunArgs),
+  Trace(TraceArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +112,34 @@ impl Default for SurfaceArgs {
   }
 }
 
+/// Which events of a session to read back, and how.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceArgs {
+  pub config: PathBuf,
+  /// Session id or prefix. Absent means the most recent session in the store.
+  pub session: Option<String>,
+  pub selection: TraceSelection,
+  pub sequence: bool,
+  pub surface: SurfaceArgs,
+}
+
+impl Default for TraceArgs {
+  fn default() -> Self {
+    Self {
+      config: PathBuf::new(),
+      session: None,
+      selection: TraceSelection::default(),
+      sequence: false,
+      // For `trace` the transcript is the answer, so the routine is included by
+      // default; `--quiet` is how the reader asks for only the trouble.
+      surface: SurfaceArgs {
+        diagnostics: DiagnosticFilter::All,
+        ..SurfaceArgs::default()
+      },
+    }
+  }
+}
+
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
   let mut args = args.into_iter();
   let Some(command) = args.next() else {
@@ -87,14 +148,23 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
   if command == "--help" || command == "-h" {
     return Ok(Command::Help(TOP_HELP));
   }
-  if command != "run" {
-    return Err(format!(
-      "unknown command '{}'\n{TOP_HELP}",
-      command.to_string_lossy()
-    ));
-  }
-
   let remaining: Vec<OsString> = args.collect();
+  if command == "run" {
+    return parse_run(&remaining);
+  }
+  if command == "trace" {
+    return parse_trace(&remaining);
+  }
+  // A bare argument is not a command. Guessing which command the user meant is worse
+  // than naming the two that exist.
+  Err(format!(
+    "unknown command '{}'\n{TOP_HELP}",
+    command.to_string_lossy()
+  ))
+}
+
+/// `pi-rs run`: the answer goes to stdout, the transcript goes to stderr.
+fn parse_run(remaining: &[OsString]) -> Result<Command, String> {
   if remaining.iter().any(|arg| arg == "--help" || arg == "-h") {
     return Ok(Command::Help(RUN_HELP));
   }
@@ -111,14 +181,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
   // `--color=always` is the shape a shell user reaches for first. Expand that form into
   // the two-token form the rest of this parser understands, and only for flags this
   // command actually takes: a prompt or path containing '=' must survive untouched.
-  let expanded: Vec<OsString> = remaining
-    .iter()
-    .flat_map(|arg| match inline_value(arg) {
-      Some((flag, value)) => vec![OsString::from(flag), value.to_os_string()],
-      None => vec![arg.clone()],
-    })
-    .collect();
-  let remaining: &[OsString] = &expanded;
+  let remaining: &[OsString] = &expand_inline(remaining);
   let mut index = 0;
   while index < remaining.len() {
     let flag = remaining[index]
@@ -195,12 +258,136 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
   }))
 }
 
+/// `pi-rs trace`: read a session's transcript back out of the store.
+fn parse_trace(remaining: &[OsString]) -> Result<Command, String> {
+  if remaining.iter().any(|arg| arg == "--help" || arg == "-h") {
+    return Ok(Command::Help(TRACE_HELP));
+  }
+  let mut config: Option<PathBuf> = None;
+  let mut session: Option<String> = None;
+  let mut positional: Option<String> = None;
+  let mut tools = false;
+  let mut reasoning_only = false;
+  let mut epoch: Option<u32> = None;
+  let mut sequence = false;
+  let mut color: Option<ColorChoice> = None;
+  let mut diagnostics: Option<DiagnosticFilter> = None;
+  let mut width: Option<usize> = None;
+  let mut reasoning = true;
+  let remaining: &[OsString] = &expand_inline(remaining);
+  let mut index = 0;
+  while index < remaining.len() {
+    let flag = remaining[index]
+      .to_str()
+      .ok_or_else(|| format!("trace argument name is not valid UTF-8\n{TRACE_HELP}"))?;
+    index += 1;
+    match flag {
+      "--config" | "--color" | "--width" | "--session" | "--epoch" => {
+        let value = remaining
+          .get(index)
+          .ok_or_else(|| format!("{flag} requires a value\n{TRACE_HELP}"))?
+          .clone();
+        index += 1;
+        let value = value
+          .into_string()
+          .map_err(|_| format!("{flag} must be valid UTF-8\n{TRACE_HELP}"))?;
+        match flag {
+          "--config" => set_once(&mut config, PathBuf::from(value), flag)?,
+          "--session" => set_once(&mut session, value, flag)?,
+          "--epoch" => {
+            let number = value
+              .trim()
+              .parse::<u32>()
+              .map_err(|_| format!("--epoch must be a model epoch number\n{TRACE_HELP}"))?;
+            set_once(&mut epoch, number, flag)?;
+          }
+          "--color" => {
+            let choice = ColorChoice::parse(&value)
+              .ok_or_else(|| format!("--color must be auto, always, or never\n{TRACE_HELP}"))?;
+            set_choice(&mut color, choice, flag)?;
+          }
+          _ => {
+            let columns = value
+              .trim()
+              .parse::<usize>()
+              .map_err(|_| format!("--width must be a column count\n{TRACE_HELP}"))?;
+            set_once(&mut width, columns, flag)?;
+          }
+        }
+      }
+      "--no-color" => set_choice(&mut color, ColorChoice::Never, flag)?,
+      "--no-reasoning" => reasoning = false,
+      "--verbose" => set_choice(&mut diagnostics, DiagnosticFilter::All, flag)?,
+      "--quiet" => set_choice(&mut diagnostics, DiagnosticFilter::WarnAndError, flag)?,
+      "--silent" => set_choice(&mut diagnostics, DiagnosticFilter::None, flag)?,
+      // Two category flags are two statements about what the reader wants to see, and
+      // they point at different events. Union would be a guess.
+      "--tools" => {
+        if reasoning_only {
+          return Err(format!(
+            "--tools and --reasoning select different categories\\n{TRACE_HELP}"
+          ));
+        }
+        tools = true;
+      }
+      "--reasoning" => {
+        if tools {
+          return Err(format!(
+            "--tools and --reasoning select different categories\\n{TRACE_HELP}"
+          ));
+        }
+        reasoning_only = true;
+      }
+      "--sequence" => sequence = true,
+      // A bare argument is the session id, because `pi-rs trace 0194...` is how this
+      // command actually gets used. A second one is a mistake, not a second session.
+      other if !other.starts_with('-') => {
+        if positional.is_some() || session.is_some() {
+          return Err(format!("expected at most one session id\n{TRACE_HELP}"));
+        }
+        positional = Some(other.to_string());
+      }
+      other => return Err(format!("unknown trace argument '{other}'\n{TRACE_HELP}")),
+    }
+  }
+  let config = config.ok_or_else(|| format!("--config is required\n{TRACE_HELP}"))?;
+  let session = session.or(positional);
+  let default = TraceArgs::default();
+  Ok(Command::Trace(TraceArgs {
+    config,
+    session,
+    selection: TraceSelection {
+      tools,
+      reasoning: reasoning_only,
+      epoch,
+    },
+    sequence,
+    surface: SurfaceArgs {
+      color: color.unwrap_or(default.surface.color),
+      width,
+      reasoning,
+      diagnostics: diagnostics.unwrap_or(default.surface.diagnostics),
+    },
+  }))
+}
+
+/// Expand `--flag=value` into the two-token form the parsers understand.
+fn expand_inline(remaining: &[OsString]) -> Vec<OsString> {
+  remaining
+    .iter()
+    .flat_map(|arg| match inline_value(arg) {
+      Some((flag, value)) => vec![OsString::from(flag), value.to_os_string()],
+      None => vec![arg.clone()],
+    })
+    .collect()
+}
+
 /// Split `--flag=value` when `flag` is a value-taking flag of `pi-rs run`.
 fn inline_value(arg: &std::ffi::OsStr) -> Option<(&str, &std::ffi::OsStr)> {
   let (flag, value) = arg.to_str()?.split_once('=')?;
   matches!(
     flag,
-    "--config" | "--cwd" | "--prompt" | "--color" | "--width"
+    "--config" | "--cwd" | "--prompt" | "--color" | "--width" | "--session" | "--epoch"
   )
   .then_some((flag, OsStr::new(value)))
 }
