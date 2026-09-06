@@ -39,10 +39,15 @@ mod error;
 mod journal;
 mod jsonl;
 mod layout;
+
 mod retention;
 mod session_log;
 mod store;
 pub mod tmp;
+
+/// Reading a Pi session file. Exported as a module: the importer is a surface, not a detail
+/// of the store's own formats.
+pub mod pi_import;
 
 pub use blob::BlobStore;
 pub use error::StoreError;
