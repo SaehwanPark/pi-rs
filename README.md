@@ -145,6 +145,11 @@ pipe gets names and nothing else. Project locations are read only with `--projec
 skill is instructions for the model, and a checkout should not be able to supply them
 unasked.
 
+`pi-rs prompts [--project]` does the same for Pi's prompt templates, and
+`pi-rs prompt [--project] <name> [arguments…]` expands one — `$1`, `$@`, `${1:-default}`,
+`${@:N:L}` — and prints only the prompt, so a template written for Pi is usable here before
+any session knows how to invoke one.
+
 Priority targets:
 
 1. skills;

@@ -13,7 +13,10 @@ use std::{
   path::{Path, PathBuf},
 };
 
-use pi_rs_compat::skill::{self, Discovery, SkillWarning, Source, Trust};
+use pi_rs_compat::{
+  scan::{Discovery, Source, Trust},
+  skill::{self, SkillWarning},
+};
 
 fn home() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR"))

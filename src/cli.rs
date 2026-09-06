@@ -12,6 +12,8 @@ pub const TOP_HELP: &str = concat!(
   "  run      Run one durable coding-agent turn\n",
   "  trace    Read a session's transcript back out of the store\n",
   "  skills   List the skills that would be offered to a model\n",
+  "  prompts  List the prompt templates a session would offer\n",
+  "  prompt   Expand one prompt template and print the prompt it becomes\n",
   "\n",
   "Run `pi-rs <command> --help` for that command's flags.\n",
 );
@@ -95,12 +97,70 @@ pub const SKILLS_HELP: &str = concat!(
   "  --help                   Show this help.\n",
 );
 
+pub const PROMPTS_HELP: &str = concat!(
+  "Usage: pi-rs prompts [--project]\n",
+  "\n",
+  "Lists the prompt templates a session would offer, one per pair of lines: source\n",
+  "and name -- with the declared argument hint when there is one -- then the\n",
+  "description. A description that came from the template's first line rather than\n",
+  "its frontmatter says so. The listing goes to stdout; every file that was skipped,\n",
+  "and why, goes to stderr.\n",
+  "\n",
+  "Reads $HOME/.pi/agent/prompts/*.md and --project's <ancestor>/.pi/prompts/*.md up\n",
+  "to the git root, non-recursively, because that is where Pi looks. A template is\n",
+  "text the model will be sent, so project locations are read only when told they\n",
+  "may be:\n",
+  "\n",
+  "  --project                Read the project's own prompt locations\n",
+  "  --help                   Show this help.\n",
+  "\n",
+  "See also: pi-rs prompt <name>, which expands one of these templates.",
+);
+
+pub const PROMPT_HELP: &str = concat!(
+  "Usage: pi-rs prompt [--project] <name> [arguments...]\n",
+  "\n",
+  "Expands one template the way Pi would and writes the prompt to stdout, raw, as\n",
+  "the only thing on it. Nothing is sent to a model: this is the expansion, not the\n",
+  "run. Options come before the name; everything after the name is an argument to\n",
+  "the template, even if it starts with `--`.\n",
+  "\n",
+  "  $1, $2, ...              positional arguments\n",
+  "  $@, $ARGUMENTS           all arguments joined\n",
+  "  ${1:-default}            the argument, or the default when it is empty\n",
+  "  ${@:-default}            all arguments, or the default when there are none\n",
+  "  ${@:N} and ${@:N:L}      a slice of the argument list, 1-indexed\n",
+  "\n",
+  "  --project                Read the project's own prompt locations\n",
+  "  --help                   Show this help.\n",
+);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
   Help(&'static str),
   Run(RunArgs),
   Trace(TraceArgs),
   Skills(SkillsArgs),
+  Prompts(PromptsArgs),
+  Prompt(PromptArgs),
+}
+
+/// `pi-rs prompts`: the templates a session would offer.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PromptsArgs {
+  /// Whether the project's own locations may be read, for the same reason as skills:
+  /// a template is text that ends up in front of the model.
+  pub project: bool,
+}
+
+/// `pi-rs prompt <name> [args...]`: expand one template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptArgs {
+  pub name: String,
+  /// Passed to the template verbatim. This is why options are parsed before the name:
+  /// a template's own arguments must not be mistaken for this command's flags.
+  pub arguments: Vec<String>,
+  pub project: bool,
 }
 
 /// `pi-rs skills`: what a model would be offered, and what was declined.
@@ -194,6 +254,12 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
   if command == "skills" {
     return parse_skills(&remaining);
   }
+  if command == "prompts" {
+    return parse_prompts(&remaining);
+  }
+  if command == "prompt" {
+    return parse_prompt(&remaining);
+  }
   // A bare argument is not a command. Guessing which command the user meant is worse
   // than naming the ones that exist.
   Err(format!(
@@ -218,6 +284,65 @@ fn parse_skills(remaining: &[OsString]) -> Result<Command, String> {
     };
   }
   Ok(Command::Skills(SkillsArgs { project }))
+}
+
+/// `pi-rs prompts`: list the templates.
+fn parse_prompts(remaining: &[OsString]) -> Result<Command, String> {
+  let mut project = false;
+  for arg in remaining {
+    let flag = arg
+      .to_str()
+      .ok_or_else(|| format!("prompts argument is not valid UTF-8\n{PROMPTS_HELP}"))?;
+    match flag {
+      "--project" => project = true,
+      "--help" | "-h" => return Ok(Command::Help(PROMPTS_HELP)),
+      other => {
+        return Err(format!(
+          "unknown prompts argument '{other}'\n{PROMPTS_HELP}"
+        ));
+      }
+    };
+  }
+  Ok(Command::Prompts(PromptsArgs { project }))
+}
+
+/// `pi-rs prompt <name> [args...]`: expand one template. Flags stop at the name, so
+/// `pi-rs prompt review --strict` hands `--strict` to the template.
+fn parse_prompt(remaining: &[OsString]) -> Result<Command, String> {
+  let mut project = false;
+  let mut name: Option<String> = None;
+  let mut arguments: Vec<String> = Vec::new();
+  for arg in remaining {
+    let text = arg
+      .to_str()
+      .ok_or_else(|| format!("prompt argument is not valid UTF-8\n{PROMPT_HELP}"))?;
+    if name.is_none() {
+      match text {
+        "--project" => {
+          project = true;
+          continue;
+        }
+        "--help" | "-h" => return Ok(Command::Help(PROMPT_HELP)),
+        // An option after the name is template text, so an option before it has to be
+        // this command's. Anything else that starts with a dash is a mistake, and saying
+        // so beats expanding a template the user did not mean.
+        other if other.starts_with('-') && other.len() > 1 => {
+          return Err(format!("unknown prompt argument '{other}'\n{PROMPT_HELP}"));
+        }
+        _ => {}
+      }
+    }
+    match name {
+      None => name = Some(text.to_string()),
+      Some(_) => arguments.push(text.to_string()),
+    }
+  }
+  let name = name.ok_or_else(|| format!("'prompt' needs a template name\n{PROMPT_HELP}"))?;
+  Ok(Command::Prompt(PromptArgs {
+    name,
+    arguments,
+    project,
+  }))
 }
 
 /// `pi-rs run`: the answer goes to stdout, the transcript goes to stderr.
@@ -690,5 +815,88 @@ mod tests {
       error.contains("--project"),
       "the error should say what exists: {error}"
     );
+  }
+
+  #[test]
+  fn prompts_reads_the_trust_flag_and_nothing_else() {
+    assert_eq!(
+      parse(strings(&["prompts"])).unwrap(),
+      Command::Prompts(PromptsArgs { project: false })
+    );
+    assert_eq!(
+      parse(strings(&["prompts", "--project"])).unwrap(),
+      Command::Prompts(PromptsArgs { project: true })
+    );
+    assert!(
+      matches!(
+        parse(strings(&["prompts", "--help"])),
+        Ok(Command::Help(PROMPTS_HELP))
+      ),
+      "the template grammar belongs in the expansion's help"
+    );
+  }
+
+  #[test]
+  fn a_prompt_invocation_splits_options_from_the_text_meant_for_the_template() {
+    assert_eq!(
+      parse(strings(&["prompt", "review"])).unwrap(),
+      Command::Prompt(PromptArgs {
+        name: "review".to_string(),
+        arguments: vec![],
+        project: false,
+      })
+    );
+    // Options stop at the name: after it, everything is template text, including a
+    // leading dash. `/review --strict` in Pi passes `--strict` along, and a user typing
+    // it here must get the same expansion.
+    assert_eq!(
+      parse(strings(&[
+        "prompt",
+        "--project",
+        "lint",
+        "--strict",
+        "src/"
+      ]))
+      .unwrap(),
+      Command::Prompt(PromptArgs {
+        name: "lint".to_string(),
+        arguments: vec!["--strict".to_string(), "src/".to_string()],
+        project: true,
+      })
+    );
+  }
+
+  #[test]
+  fn a_prompt_flag_typed_where_the_name_belongs_is_still_an_error() {
+    // `pi-rs prompt --strict review` cannot mean "pass --strict to review": there is no
+    // name yet, so it is a flag this command does not have, and guessing would expand a
+    // template the user did not ask for.
+    let error = match parse(strings(&["prompt", "--strict", "review"])) {
+      Err(message) => message,
+      Ok(command) => panic!("expected an error, got {command:?}"),
+    };
+    assert!(
+      error.contains("unknown prompt argument '--strict'"),
+      "{error}"
+    );
+    let error = match parse(strings(&["prompt"])) {
+      Err(message) => message,
+      Ok(command) => panic!("expected an error, got {command:?}"),
+    };
+    assert!(
+      error.contains("needs a template name") && error.contains("--project"),
+      "the error should say what is missing and what exists: {error}"
+    );
+  }
+
+  #[test]
+  fn the_new_commands_are_listed_where_commands_are_listed() {
+    // A command that is not in the top-level help is a command nobody finds.
+    for command in ["prompts", "prompt"] {
+      assert!(
+        TOP_HELP.contains(&format!("  {command} ")),
+        "TOP_HELP should list `{command}`: {TOP_HELP}"
+      );
+    }
   }
 }

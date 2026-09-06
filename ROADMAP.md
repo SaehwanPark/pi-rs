@@ -200,7 +200,7 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 - [x] Implement Pi-style skill discovery.
 - [ ] Implement `SKILL.md` loading.
-- [ ] Implement prompt-template discovery.
+- [x] Implement prompt-template discovery.
 - [ ] Add package-local skill support.
 - [x] Add project-local skill support.
 - [ ] Add compatibility fixtures.
@@ -213,15 +213,28 @@ ancestor walk that stops at the git root, and the frontmatter subset (`name`,
 with quoted scalars and `|`/`>` block scalars. Project locations are gated on trust, and
 frontmatter declares the trust question as an input rather than answering it.
 
+Prompt-template discovery (`pi-rs-compat::prompt`, surfaced by `pi-rs prompts`) reads
+Pi's two template locations non-recursively, takes the command name from the filename, and
+falls back to the body's first line for a missing `description` while recording that the
+description was not authored. `pi-rs prompt <name> [args…]` applies Pi's substitution
+grammar (`pi-rs-compat::substitute`) and prints the prompt alone, which is what makes a
+template reusable before any session knows how to invoke one.
+
 Open in this area, in order:
 
 - [ ] Load `SKILL.md` bodies and honour `disable-model-invocation` when activating.
 - [ ] Present loaded skills to the model as a skill-control prompt listing/template.
 - [ ] Add the remaining Pi skill sources: package `skills/`, `package.json` entries, the
       `skills` array in settings, and `--skill` paths.
+- [ ] Invoke a prompt template from inside a session (`/name`), and wire `pi-rs run` to
+      accept one; `pi-rs prompt` expands a template today, nothing sends it.
+- [ ] Split one typed string into template arguments the way Pi's editor does, quotes
+      included.
+- [ ] Add the remaining Pi prompt sources: package `prompts/`, `pi.prompts` entries, the
+      `prompts` array in settings, `--prompt-template`, and `--no-prompt-templates`.
 - [ ] Decide trust somewhere other than the file reader, then pass its answer in.
-- [ ] Add the compatibility fixture suite (`tests/compat/` holds skill fixtures today;
-      prompts, packages, sessions, and extensions do not exist yet).
+- [ ] Add the compatibility fixture suite (`tests/compat/` holds skill and prompt fixtures
+      today; packages, sessions, and extensions do not exist yet).
 
 ### Packages
 

@@ -1,0 +1,1 @@
+A note that sits in a prompts directory and is not a command.
