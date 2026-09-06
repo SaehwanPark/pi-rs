@@ -5,6 +5,7 @@ members = [
   "crates/pi-rs-store",
   "crates/pi-rs-provider",
   "crates/pi-rs-tools",
+  "crates/pi-rs-compat",
   "crates/pi-rs-runtime",
   "crates/pi-rs-tui",
 ]
@@ -22,6 +23,7 @@ pi-rs-core = { path = "crates/pi-rs-core" }
 pi-rs-store = { path = "crates/pi-rs-store" }
 pi-rs-provider = { path = "crates/pi-rs-provider" }
 pi-rs-tools = { path = "crates/pi-rs-tools" }
+pi-rs-compat = { path = "crates/pi-rs-compat" }
 pi-rs-runtime = { path = "crates/pi-rs-runtime" }
 pi-rs-tui = { path = "crates/pi-rs-tui" }
 
@@ -47,6 +49,7 @@ pi-rs-core.workspace = true
 pi-rs-store.workspace = true
 pi-rs-provider.workspace = true
 pi-rs-tools.workspace = true
+pi-rs-compat.workspace = true
 pi-rs-runtime.workspace = true
 pi-rs-tui.workspace = true
 serde_json.workspace = true

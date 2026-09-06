@@ -1,0 +1,11 @@
+[package]
+name = "pi-rs-compat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pi-compatible reading of skills, prompts, packages, and session files."
+
+[dependencies]
+
+[dev-dependencies]
+tempfile = { workspace = true }

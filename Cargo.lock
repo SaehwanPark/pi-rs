@@ -487,6 +487,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 name = "pi-rs"
 version = "0.1.0"
 dependencies = [
+ "pi-rs-compat",
  "pi-rs-core",
  "pi-rs-provider",
  "pi-rs-runtime",
@@ -494,6 +495,13 @@ dependencies = [
  "pi-rs-tools",
  "pi-rs-tui",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "pi-rs-compat"
+version = "0.1.0"
+dependencies = [
  "tempfile",
 ]
 
