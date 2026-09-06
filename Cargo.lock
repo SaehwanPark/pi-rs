@@ -553,8 +553,8 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "pi-rs-core",
- "pi-rs-runtime",
  "ratatui",
+ "serde_json",
 ]
 
 [[package]]

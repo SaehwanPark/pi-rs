@@ -214,14 +214,22 @@ fn one_turn_streams_and_persists_tools_messages_and_trace() {
     "{}",
     String::from_utf8_lossy(&output.stderr)
   );
-  assert_eq!(String::from_utf8_lossy(&output.stdout), "completed");
+  // The assistant answer is byte-faithful on stdout, and the surface terminates the
+  // prose block so a piped answer ends with a newline instead of a shell's `%`.
+  assert_eq!(String::from_utf8_lossy(&output.stdout), "completed\n");
   let stderr = String::from_utf8_lossy(&output.stderr);
+  // Reasoning is labelled with its provenance, never styled as prose.
   assert!(stderr.contains("[reasoning] choose a file"), "{stderr}");
-  assert!(stderr.contains("[tool requested] write"), "{stderr}");
-  assert!(
-    stderr.contains("[tool finished] exec Succeeded"),
-    "{stderr}"
-  );
+  // The request line names the operation, the argument, and the declared risk.
+  assert!(stderr.contains("[tool] write"), "{stderr}");
+  assert!(stderr.contains("path=model.txt"), "{stderr}");
+  assert!(stderr.contains("mutating"), "{stderr}");
+  // Completion is spelled out, not a debug-formatted enum variant.
+  assert!(stderr.contains("[tool ok] exec · succeeded"), "{stderr}");
+  assert!(!stderr.contains("Succeeded"), "{stderr}");
+  // Routine chrome is calm by default: one line per model request is noise.
+  assert!(!stderr.contains("[request]"), "{stderr}");
+  assert!(stderr.contains("[session end]"), "{stderr}");
   assert_eq!(requests.len(), 3);
   assert_eq!(
     fs::read_to_string(workspace.join("model.txt")).unwrap(),
