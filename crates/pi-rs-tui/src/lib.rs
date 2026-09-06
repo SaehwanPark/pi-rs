@@ -42,6 +42,7 @@ pub mod line;
 pub mod live;
 pub mod style;
 pub mod term;
+pub mod trace;
 pub mod transcript;
 pub mod width;
 
@@ -50,6 +51,7 @@ pub use line::{NarrowDecoration, RenderLine, Segment};
 pub use live::{Surface, is_streamed, routine_stream};
 pub use style::{Color, Palette, Role, Style};
 pub use term::{ColorChoice, Stream};
+pub use trace::{RenderedEntry, TraceSelection, render_trace};
 pub use transcript::{
   DiagnosticFilter, TranscriptOptions, completion_label, reasoning_label, reasoning_role,
   render_event, tool_request_line,
