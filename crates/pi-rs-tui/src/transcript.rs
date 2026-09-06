@@ -288,11 +288,8 @@ pub fn render_event(event: &AgentEvent, options: &TranscriptOptions) -> Vec<Rend
       vec![line]
     }
     E::ModelRetry(e) => {
-      let mut line = label("rare");
-      line.push(
-        &format!("retry {} of {}", e.attempt, e.max_attempts),
-        Role::Rare,
-      );
+      let mut line = label("retry");
+      line.push(&format!("{} of {}", e.attempt, e.max_attempts), Role::Rare);
       line.push(SEPARATOR, Role::Muted);
       line.push(e.kind.as_str(), Role::Warning);
       if let Some(after) = e.retry_after_ms {
@@ -308,8 +305,8 @@ pub fn render_event(event: &AgentEvent, options: &TranscriptOptions) -> Vec<Rend
       vec![line]
     }
     E::ModelFailover(e) => {
-      let mut line = label("rare");
-      line.push(&format!("failover {} → {}", e.from, e.to), Role::Rare);
+      let mut line = label("failover");
+      line.push(&format!("{} → {}", e.from, e.to), Role::Rare);
       line.push(SEPARATOR, Role::Muted);
       line.push(e.kind.as_str(), Role::Warning);
       if !e.gaps.is_empty() {
@@ -924,10 +921,28 @@ mod tests {
       lines[0]
         .segments
         .iter()
-        .any(|s| s.role == Role::Rare && s.text.contains("failover")),
+        .any(|s| s.role == Role::Rare && s.text.contains("backup/small")),
       "{:?}",
       lines[0].segments
     );
+    // The label names what happened; rarity is the role's job. A `[rare]` prefix
+    // would describe the rendering policy instead of the event.
+    assert!(
+      plain(&lines).starts_with("[failover] "),
+      "{}",
+      plain(&lines)
+    );
+
+    let retry = AgentEvent::ModelRetry(pi_rs_core::ModelRetry {
+      attempt: 2,
+      max_attempts: 3,
+      kind: ModelFailureKind::RateLimited,
+      retry_after_ms: Some(250),
+      will_failover: true,
+    });
+    let retry_line = plain(&render_event(&retry, &options()));
+    assert!(retry_line.starts_with("[retry] "), "{retry_line}");
+    assert!(retry_line.contains("2 of 3"), "{retry_line}");
 
     let routine = AgentEvent::ModelRequestStarted(pi_rs_core::ModelRequestStarted {
       epoch: 0,
