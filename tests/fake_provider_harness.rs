@@ -8,7 +8,7 @@ mod fake_provider;
 
 use std::{
   io::{Read, Write},
-  net::TcpStream,
+  net::{Shutdown, TcpStream},
 };
 
 use fake_provider::FakeServer;
@@ -59,4 +59,41 @@ fn a_script_that_does_not_match_the_requests_fails_loudly() {
   }
   let observed = server.requests();
   assert_eq!(observed.len(), 1);
+}
+
+/// A connection the client abandons is not a request, and must not be answered from the
+/// script. It used to be, which is how one transport error on macOS cost the run its
+/// scripted reasoning answer while still printing an answer — and the assertion about
+/// provenance failed two turns later, somewhere that looked nothing like the cause.
+#[test]
+fn an_abandoned_connection_does_not_cost_a_scripted_answer() {
+  let server = FakeServer::answer(vec![
+    "HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nfirst".into(),
+    "HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\nsecond".into(),
+  ]);
+  let authority = server.addr_authority();
+
+  // A connection that says nothing: a probe, or a client that failed before writing.
+  let probe = TcpStream::connect(&authority).expect("connect to abandon");
+  drop(probe);
+
+  // A connection that starts a request and breaks off before the body arrives.
+  let mut half = TcpStream::connect(&authority).expect("connect a half request");
+  half
+    .write_all(b"POST /v1/chat/completions HTTP/1.1\r\ncontent-length: 4096\r\n\r\n{\"partial\":")
+    .expect("write a half request");
+  half.shutdown(Shutdown::Write).expect("hang up");
+  drop(half);
+
+  // The requests the run really makes are answered from the start of the script, in
+  // order, and only those two are recorded.
+  let first = post(&authority, "{}");
+  let second = post(&authority, "{}");
+  assert!(
+    first.contains("first"),
+    "the first answer was spent elsewhere: {first}"
+  );
+  assert!(second.contains("second"), "the script shifted: {second}");
+  let observed = server.requests();
+  assert_eq!(observed.len(), 2, "only complete requests are requests");
 }

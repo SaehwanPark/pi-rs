@@ -18,7 +18,7 @@
 //! The rules here are the opposite, and each one exists so that a failure names itself:
 //!
 //! * The listener lives until the `FakeServer` is dropped, so every request the runtime
-//!   makes is recorded. Once the script is exhausted the server keeps answering with a
+//!   actually makes is recorded. Once the script is exhausted the server keeps answering with a
 //!   distinguishable `503`, which the provider classifies like any other unavailable
 //!   response. An unexpected extra attempt therefore shows up in [`FakeServer::requests`]
 //!   instead of being swallowed by a closed port.
@@ -28,6 +28,14 @@
 //! * Reads carry a timeout and a byte bound, so a half-open connection can neither wedge
 //!   the accept loop nor grow it without limit, and [`FakeServer::requests`] always
 //!   returns.
+//! * Only a *complete* request consumes a scripted answer. The listener accepts before it
+//!   knows what will arrive, and a connection that breaks off — a client that failed to
+//!   connect cleanly, a probe, a transport error mid-write — used to be answered from the
+//!   script anyway. That is how one `os error 22` on macOS cost the run its scripted
+//!   reasoning answer, still printed an answer, and failed an unrelated assertion about
+//!   provenance two turns later. An abandoned connection is dropped instead; one that
+//!   sent bytes is named on stderr, because "the client broke mid-request" is worth
+//!   knowing when the trace is about to show a retry.
 
 // Each end-to-end binary uses part of this module: `failover_cli` never builds a tool
 // call with a reasoning delta, `run_cli` never asks for a backup. Neither binary is
@@ -94,18 +102,31 @@ impl FakeServer {
         match listener.accept() {
           Ok((mut socket, _)) => {
             let _ = socket.set_read_timeout(Some(READ_TIMEOUT));
-            let request = drain_request(&mut socket);
-            // Past the script the answer is still a defined one, and it is still
-            // classified as the provider being unavailable, so the runtime's recovery
-            // path is unchanged by the fixture having run out of material.
-            let answer = script
-              .next()
-              .unwrap_or_else(|| exhausted_response(&request.line));
-            // The runtime may already have hung up. That is not a failure of the fake:
-            // the request is recorded either way, and `requests` reports the script.
-            let _ = socket.write_all(answer.as_bytes());
-            let _ = socket.shutdown(Shutdown::Write);
-            observed.push(request);
+            match drain_request(&mut socket) {
+              Drain::Complete(request) => {
+                // Past the script the answer is still a defined one, and it is still
+                // classified as the provider being unavailable, so the runtime's recovery
+                // path is unchanged by the fixture having run out of material.
+                let answer = script
+                  .next()
+                  .unwrap_or_else(|| exhausted_response(&request.line));
+                // The runtime may already have hung up. That is not a failure of the
+                // fake: the request is recorded either way, and `requests` reports the
+                // script.
+                let _ = socket.write_all(answer.as_bytes());
+                let _ = socket.shutdown(Shutdown::Write);
+                observed.push(request);
+              }
+              // A connection that never completed a request is not a request, and giving
+              // it a scripted answer is how one transport hiccup silently shifted the
+              // whole script. A connection that sent *something* is worth a line: it
+              // means the client broke mid-request, and the run's retry is about to look
+              // mysterious in the trace without it.
+              Drain::Partial(line) => {
+                eprintln!("[fake-provider] dropped an incomplete request: {line}");
+              }
+              Drain::Silent => {}
+            }
           }
           Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(POLL),
           Err(error) => panic!("accept provider request: {error}"),
@@ -182,7 +203,19 @@ fn exhausted_response(request_line: &str) -> String {
 
 /// Read one HTTP request, stopping at the declared body length, at end of stream, or at
 /// the bound. The request line and body are separated because assertions want the body.
-fn drain_request(socket: &mut TcpStream) -> Observed {
+/// What arrived on one accepted connection.
+enum Drain {
+  /// A request line, headers, and the body those headers promised.
+  Complete(Observed),
+  /// Bytes arrived, but not a whole request: the client broke off, or the read bound
+  /// expired. Carries the request line so the note is not anonymous.
+  Partial(String),
+  /// The connection was accepted and said nothing at all: a port probe, or a client that
+  /// gave up before writing. Not worth a line of its own.
+  Silent,
+}
+
+fn drain_request(socket: &mut TcpStream) -> Drain {
   let mut bytes = Vec::new();
   let mut buffer = [0u8; 4096];
   let mut expected = None;
@@ -209,12 +242,24 @@ fn drain_request(socket: &mut TcpStream) -> Observed {
     }
   }
   let text = String::from_utf8_lossy(&bytes).into_owned();
-  let line = text.lines().next().unwrap_or("POST (unread)").to_string();
-  let body = match text.rfind("\r\n\r\n") {
-    Some(end) => text[end + 4..].to_string(),
-    None => String::new(),
+  let first_line = || {
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+      format!("{} bytes, no request line", bytes.len())
+    } else {
+      line.to_string()
+    }
   };
-  Observed { line, body }
+  match expected {
+    Some(length) if bytes.len() >= length => {
+      let body = text[text.rfind("\r\n\r\n").unwrap() + 4..].to_string();
+      let line = text.lines().next().unwrap_or("POST (unread)").to_string();
+      Drain::Complete(Observed { line, body })
+    }
+    // Headers without the body they promised, or no headers at all: either way the
+    // client did not finish, so there is no request to answer.
+    _ => Drain::Partial(first_line()),
+  }
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
