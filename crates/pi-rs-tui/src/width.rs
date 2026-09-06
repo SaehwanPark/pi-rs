@@ -346,9 +346,7 @@ mod tests {
   fn hard_wrap_does_not_leave_dangling_spaces() {
     let lines = wrap("one two three", 1);
     assert!(
-      lines
-        .iter()
-        .all(|l| l.is_empty() || !l.ends_with(' ')),
+      lines.iter().all(|l| l.is_empty() || !l.ends_with(' ')),
       "{lines:?}"
     );
     assert_eq!(wrap("a b c", 1), vec!["a", "b", "c"]);

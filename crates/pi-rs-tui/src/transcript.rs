@@ -83,11 +83,14 @@ pub enum DiagnosticFilter {
   All,
   /// Routine chrome is withheld: a running turn should surface warnings, errors, and
   /// state changes, not a narration of every request, model selection, and policy
-  /// snapshot. This is what an interactive run prints.
+  /// snapshot. This is what `pi-rs run` prints by default.
   State,
-  /// Diagnostics at warn or error, and nothing else.
+  /// Only bad news: warnings, errors, and tool calls that failed, were refused, or never
+  /// recorded a completion. A successful tool call is routine work and has no place in a
+  /// log someone is scanning for trouble.
   WarnAndError,
-  /// Nothing.
+  /// No transcript at all. Never applies to assistant prose, which is the answer rather
+  /// than a narration of the turn, and never applies to what the session records.
   None,
 }
 

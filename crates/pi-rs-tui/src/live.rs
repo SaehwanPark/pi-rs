@@ -25,7 +25,8 @@ use crate::{
   line::{NarrowDecoration, RenderLine},
   style::{Palette, Role},
   transcript::{
-    TranscriptOptions, completion_label, reasoning_label, render_event, tool_request_line,
+    DiagnosticFilter, TranscriptOptions, completion_label, reasoning_label, render_event,
+    tool_request_line,
   },
   width::{MIN_COLUMN, display_width},
 };
@@ -92,6 +93,18 @@ impl<O: Write, E: Write> Surface<O, E> {
       AgentEvent::ReasoningDelta(delta) => self.reasoning(&delta.text, delta.provenance),
       _ => {
         self.close_block()?;
+        // A streamed-lifecycle event belongs to this surface and is judged by the rule
+        // the streaming methods apply; everything else is judged by whether it is news.
+        // Without this split the generic entry point would ignore verbosity entirely
+        // while the named methods honoured it.
+        let allowed = if is_streamed(event) {
+          self.shows_news(routine_stream(event))
+        } else {
+          self.options.diagnostics.shows(event)
+        };
+        if !allowed {
+          return Ok(());
+        }
         self.lines(render_event(event, &self.options))
       }
     }
@@ -100,15 +113,15 @@ impl<O: Write, E: Write> Surface<O, E> {
   /// The user's own text.
   pub fn user_message(&mut self, text: &str) -> io::Result<()> {
     self.close_block()?;
+    if !self.shows_news(true) {
+      return Ok(());
+    }
     let mut line = RenderLine::new();
     line.push("> ", Role::Prompt);
     line.push(text, Role::UserText);
     self.lines(wrap(vec![line], &self.options))
   }
 
-  /// A model request is in flight. Kept quiet on purpose: this fires on every
-  /// round, and a surface that announces routine work trains the reader to ignore
-  /// the events that are not routine.
   /// One line per model request.
   ///
   /// Gated on the verbosity level rather than printed unconditionally: three requests
@@ -143,6 +156,11 @@ impl<O: Write, E: Write> Surface<O, E> {
   /// Reasoning-like text, streamed, always provenance-labelled.
   pub fn reasoning(&mut self, text: &str, provenance: ReasoningProvenance) -> io::Result<()> {
     if !self.options.show_reasoning || text.is_empty() {
+      return Ok(());
+    }
+    if !self.shows_news(true) {
+      // Suppressed before it is buffered: a surface that accumulates text it will never
+      // write trades memory for nothing.
       return Ok(());
     }
     // A provenance change is a new block: one block may not mix "the model said"
@@ -188,6 +206,9 @@ impl<O: Write, E: Write> Surface<O, E> {
     read_only: bool,
   ) -> io::Result<()> {
     self.close_block()?;
+    if !self.shows_news(true) {
+      return Ok(());
+    }
     self.lines(wrap(
       vec![tool_request_line(name, arguments, read_only)],
       &self.options,
@@ -198,6 +219,9 @@ impl<O: Write, E: Write> Surface<O, E> {
   /// so it is rendered, truncated to the column budget when asked to collapse.
   pub fn tool_progress(&mut self, name: &str, text: &str) -> io::Result<()> {
     self.close_block()?;
+    if !self.shows_news(true) {
+      return Ok(());
+    }
     let mut line = RenderLine::new();
     line.push("[output] ", Role::Muted);
     line.push(name, Role::Operation);
@@ -225,7 +249,22 @@ impl<O: Write, E: Write> Surface<O, E> {
     refusal: Option<&str>,
   ) -> io::Result<()> {
     self.close_block()?;
-    let mut line = crate::transcript::label(completion_label(state, mutating));
+    // A success is routine, and a quiet transcript is exactly the log that does not want
+    // it. A failure, an unrecorded completion, or a policy refusal is news even there.
+    let routine = state == ToolExecutionState::Succeeded && refusal.is_none();
+    if !self.shows_news(routine) {
+      return Ok(());
+    }
+    // A refusal that arrived with a succeeded state must not be labelled `[tool ok]`:
+    // the runtime recorded that the tool ran as asked, while the policy layer said the
+    // request itself was not allowed. Both are true, and the line has to stay readable
+    // as bad news either way.
+    let refused = refusal.is_some() && state == ToolExecutionState::Succeeded;
+    let mut line = crate::transcript::label(if refused {
+      "tool refused"
+    } else {
+      completion_label(state, mutating)
+    });
     line.push(name, Role::Operation);
     line.push(SEPARATOR, Role::Muted);
     let role = match state {
@@ -238,7 +277,7 @@ impl<O: Write, E: Write> Surface<O, E> {
       // The label already said `unknown`, or said `needs check` when state may have
       // changed; repeating the state word would bury the warning that follows.
       line.push("completion not recorded", Role::StateUnknown);
-    } else {
+    } else if !refused {
       line.push(state.as_str(), role);
     }
     if let Some(reason) = refusal {
@@ -246,6 +285,21 @@ impl<O: Write, E: Write> Surface<O, E> {
       line.push(reason, Role::Warning);
     }
     self.lines(wrap(vec![line], &self.options))
+  }
+
+  /// Whether a transcript line is displayed at the current level.
+  ///
+  /// One axis decides both the live surface and the recorded transcript: how much of a
+  /// turn counts as news. Assistant prose is not on that axis — it is the answer, it is
+  /// written to stdout, and no display setting suppresses it.
+  fn shows_news(&self, routine: bool) -> bool {
+    if !routine {
+      return !matches!(self.options.diagnostics, DiagnosticFilter::None);
+    }
+    matches!(
+      self.options.diagnostics,
+      DiagnosticFilter::All | DiagnosticFilter::State
+    )
   }
 
   /// End the current block and flush both writers. Idempotent.
@@ -416,14 +470,6 @@ fn wrap(lines: Vec<RenderLine>, options: &TranscriptOptions) -> Vec<RenderLine> 
     .collect()
 }
 
-/// Take one emittable line out of a streamed buffer.
-///
-/// A line is complete when it hits a newline. Without one, the buffer is
-/// still emit-able once it reaches the column budget: a live block must not
-/// hold text hostage waiting for a word boundary that may never arrive. The
-/// trailing partial word stays buffered when it *could* still fit on the next
-/// line, which keeps ordinary prose word-aligned; a word longer than the line
-/// is hard-split rather than buffered forever.
 /// Whether the live surface is what shows this event's content.
 ///
 /// A caller that streams deltas *and* replays durable events needs one place to say
@@ -446,6 +492,28 @@ pub fn is_streamed(event: &AgentEvent) -> bool {
   )
 }
 
+/// Whether a streamed-lifecycle event reports routine work rather than news.
+///
+/// Only the completion state decides this: a request and a success are routine, a
+/// failure or an unrecorded completion is not. It is the live mirror of
+/// [`DiagnosticFilter::shows`], which makes the same judgement for recorded events.
+pub fn routine_stream(event: &AgentEvent) -> bool {
+  use AgentEvent as E;
+  match event {
+    E::ToolFailed(_) | E::ToolUnknown(_) => false,
+    E::ToolCompleted(done) => done.state == ToolExecutionState::Succeeded,
+    _ => true,
+  }
+}
+
+/// Take one emittable line out of a streamed buffer.
+///
+/// A line is complete when it hits a newline. Without one, the buffer is
+/// still emit-able once it reaches the column budget: a live block must not
+/// hold text hostage waiting for a word boundary that may never arrive. The
+/// trailing partial word stays buffered when it *could* still fit on the next
+/// line, which keeps ordinary prose word-aligned; a word longer than the line
+/// is hard-split rather than buffered forever.
 fn take_complete(pending: &mut String, width: usize) -> Option<String> {
   if let Some(index) = pending.find('\n') {
     let line = pending[..index].trim_end_matches('\r').to_string();
@@ -793,5 +861,104 @@ mod tests {
     surface.request_started(&model).unwrap();
     let (_, err) = take(surface);
     assert_eq!(err, "[request] local/qwen\n");
+  }
+  fn level(diagnostics: DiagnosticFilter) -> TranscriptOptions {
+    TranscriptOptions {
+      diagnostics,
+      ..TranscriptOptions::default()
+    }
+  }
+
+  #[test]
+  fn quiet_prints_trouble_and_silences_routine_work() {
+    let mut surface = surface(level(DiagnosticFilter::WarnAndError));
+    surface.user_message("go").unwrap();
+    surface
+      .reasoning("thinking", ReasoningProvenance::Native)
+      .unwrap();
+    surface.text_delta("answer\n").unwrap();
+    surface
+      .tool_requested("write", &serde_json::json!({ "path": "a.txt" }), false)
+      .unwrap();
+    surface
+      .tool_finished("write", ToolExecutionState::Succeeded, true, None)
+      .unwrap();
+    let (out, err) = take(surface);
+    // The answer is not transcript: no display level suppresses it.
+    assert_eq!(out, "answer\n");
+    assert_eq!(err, "", "routine work is not news: {err}");
+  }
+
+  #[test]
+  fn quiet_still_reports_failure_and_refusal() {
+    let mut surface = surface(level(DiagnosticFilter::WarnAndError));
+    surface
+      .tool_finished("write", ToolExecutionState::Failed, true, None)
+      .unwrap();
+    surface
+      .tool_finished("exec", ToolExecutionState::Unknown, true, None)
+      .unwrap();
+    let (_, err) = take(surface);
+    assert!(err.contains("[tool failed] write"), "{err}");
+    assert!(err.contains("[needs check] exec"), "{err}");
+  }
+
+  #[test]
+  fn silent_prints_no_transcript_and_still_the_answer() {
+    let mut surface = surface(level(DiagnosticFilter::None));
+    surface.user_message("go").unwrap();
+    surface
+      .reasoning("thinking", ReasoningProvenance::Native)
+      .unwrap();
+    surface.text_delta("answer\n").unwrap();
+    surface
+      .tool_requested("write", &serde_json::json!({ "path": "a.txt" }), false)
+      .unwrap();
+    surface
+      .tool_finished("write", ToolExecutionState::Failed, true, None)
+      .unwrap();
+    let (out, err) = take(surface);
+    assert_eq!(err, "");
+    assert_eq!(out, "answer\n");
+  }
+
+  #[test]
+  fn the_generic_event_path_honours_the_level_too() {
+    // `event` is what a replaying caller uses. If it ignored the level, one entry point
+    // would be calm and the other chatty for the same options.
+    let mut surface = surface(level(DiagnosticFilter::WarnAndError));
+    surface
+      .event(&AgentEvent::SessionEnded(SessionEnded {
+        reason: SessionEndReason::UserExit,
+      }))
+      .unwrap();
+    surface
+      .event(&AgentEvent::ToolUnknown(ToolUnknown {
+        call_id: pi_rs_core::ToolCallId::new(),
+        name: "exec".into(),
+        why: "process exited without a recorded status".into(),
+        mutating: true,
+      }))
+      .unwrap();
+    let (_, err) = take(surface);
+    assert!(!err.contains("[session end]"), "{err}");
+    assert!(err.contains("[needs check] exec"), "{err}");
+  }
+
+  #[test]
+  fn a_refusal_never_borrows_the_ok_label() {
+    let mut surface = surface(TranscriptOptions::default());
+    surface
+      .tool_finished(
+        "write",
+        ToolExecutionState::Succeeded,
+        true,
+        Some("approval required"),
+      )
+      .unwrap();
+    let (_, err) = take(surface);
+    assert!(err.contains("[tool refused] write"), "{err}");
+    assert!(!err.contains("succeeded"), "{err}");
+    assert!(err.contains("approval required"), "{err}");
   }
 }

@@ -12,12 +12,12 @@
 //!   wrong for CJK, emoji, and combining marks.
 //! * [`style`] — semantic [`Role`]s and a palette that resolves them. Renderers
 //!   name meanings, never colours.
-//! * [`line`] — [`RenderLine`], a sequence of role-tagged segments. Plain text is
+//! * [`mod@line`] — [`RenderLine`], a sequence of role-tagged segments. Plain text is
 //!   the primary representation; ANSI is a projection of it.
 //! * [`transcript`] — [`render_event`], the deterministic event-to-lines mapping
 //!   shared by the live transcript, `pi-rs trace`, and any later export.
 //!
-//! Plus [`live`] for streaming, [`command`] for input classification, [`format`] for
+//! Plus [`live`] for streaming, [`command`] for input classification, [`mod@format`] for
 //! the repeated scalar renderings, and [`term`] for the two environment probes a
 //! surface needs before it can decide what to emit.
 //!
@@ -47,7 +47,7 @@ pub mod width;
 
 pub use command::{Input, Span};
 pub use line::{RenderLine, Segment};
-pub use live::{Surface, is_streamed};
+pub use live::{Surface, is_streamed, routine_stream};
 pub use style::{Color, Palette, Role, Style};
 pub use term::{ColorChoice, Stream};
 pub use transcript::{
