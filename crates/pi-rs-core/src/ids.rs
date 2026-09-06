@@ -164,36 +164,63 @@ mod tests {
 
     let second = uuidv7();
     assert_ne!(first, second);
+    let first_ms = time_prefix(&first);
+    let second_ms = time_prefix(&second);
+    let now = now_millis();
     // The prefix must decode to real wall-clock time, not merely sort by it.
-    let encoded = u64::from_str_radix(
-      &first
+    for encoded in [first_ms, second_ms] {
+      assert!(
+        now.saturating_sub(encoded) < 5_000 && encoded.saturating_sub(now) < 5_000,
+        "prefix {encoded} should be the current millisecond {now}"
+      );
+    }
+    // What is guaranteed is that the 48-bit millisecond prefix does not go
+    // backwards, and that inside one millisecond the random suffix decides the
+    // tie. Event ordering therefore uses EventSeq, and this ordering is only a
+    // convenience for "newest first" listings. Asserting that two mints *landed*
+    // in the same millisecond claimed neither: a scheduler that spent a
+    // millisecond between the calls made the prefixes differ, and the test failed
+    // for being slow.
+    assert!(
+      first_ms <= second_ms,
+      "identifiers minted in order have a non-decreasing prefix: {first} {second}"
+    );
+    if first_ms == second_ms {
+      assert_eq!(
+        &first[..14],
+        &second[..14],
+        "one millisecond shares a prefix"
+      );
+    } else {
+      assert_ne!(
+        &first[..14],
+        &second[..14],
+        "a later millisecond carries a later prefix"
+      );
+    }
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let later = uuidv7();
+    assert!(
+      time_prefix(&later) > second_ms,
+      "the sleep advanced the millisecond prefix: {second} {later}"
+    );
+    assert!(
+      first < later,
+      "later identifiers sort later: {first} {later}"
+    );
+  }
+
+  /// The 48-bit millisecond prefix of a UUIDv7 string, as RFC 9562 lays it out.
+  fn time_prefix(id: &str) -> u64 {
+    u64::from_str_radix(
+      &id
         .chars()
         .filter(|c| *c != '-')
         .take(12)
         .collect::<String>(),
       16,
     )
-    .unwrap();
-    let now = now_millis();
-    assert!(
-      now.saturating_sub(encoded) < 5_000 && encoded.saturating_sub(now) < 5_000,
-      "prefix {encoded} should be the current millisecond {now}"
-    );
-    // Ordering is guaranteed at the resolution of the 48-bit time prefix, not
-    // between two identifiers minted inside one millisecond; the random suffix
-    // decides that tie. Event ordering therefore uses EventSeq, and this
-    // ordering is only a convenience for "newest first" listings.
-    assert_eq!(
-      &first[..14],
-      &second[..14],
-      "same millisecond shares a prefix"
-    );
-    std::thread::sleep(std::time::Duration::from_millis(2));
-    let later = uuidv7();
-    assert!(
-      first < later,
-      "later identifiers sort later: {first} {later}"
-    );
+    .expect("the first twelve hex digits are the timestamp")
   }
 
   #[test]
