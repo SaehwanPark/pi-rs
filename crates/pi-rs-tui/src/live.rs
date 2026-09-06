@@ -97,12 +97,7 @@ impl<O: Write, E: Write> Surface<O, E> {
         // the streaming methods apply; everything else is judged by whether it is news.
         // Without this split the generic entry point would ignore verbosity entirely
         // while the named methods honoured it.
-        let allowed = if is_streamed(event) {
-          self.shows_news(routine_stream(event))
-        } else {
-          self.options.diagnostics.shows(event)
-        };
-        if !allowed {
+        if !self.options.diagnostics.prints(event) {
           return Ok(());
         }
         self.lines(render_event(event, &self.options))

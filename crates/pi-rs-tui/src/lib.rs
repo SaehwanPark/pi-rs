@@ -46,7 +46,7 @@ pub mod transcript;
 pub mod width;
 
 pub use command::{Input, Span};
-pub use line::{RenderLine, Segment};
+pub use line::{NarrowDecoration, RenderLine, Segment};
 pub use live::{Surface, is_streamed, routine_stream};
 pub use style::{Color, Palette, Role, Style};
 pub use term::{ColorChoice, Stream};

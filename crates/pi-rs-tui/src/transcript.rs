@@ -127,6 +127,24 @@ impl DiagnosticFilter {
   /// Severity-gating and event-gating are deliberately one question here. Split
   /// them and a renderer filters by severity, then forgets that a session summary is
   /// not a diagnostic.
+  /// Whether this event is printed at this level, in either view of a session.
+  ///
+  /// One rule for two views on purpose: the live surface and the recorded trace must
+  /// agree line for line, or `--quiet` would mean one thing while a turn runs and
+  /// another afterwards. An event that streamed is judged as routine or news, because
+  /// "it arrived and succeeded" is routine while "it failed, was refused, or never
+  /// recorded a completion" is not; anything else is judged by category.
+  pub fn prints(self, event: &AgentEvent) -> bool {
+    if crate::live::is_streamed(event) {
+      return match self {
+        Self::None => false,
+        Self::All | Self::State => true,
+        Self::WarnAndError => !crate::live::routine_stream(event),
+      };
+    }
+    self.shows(event)
+  }
+
   pub fn shows(self, event: &AgentEvent) -> bool {
     use AgentEvent as E;
     match event {

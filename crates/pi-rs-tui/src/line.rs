@@ -13,7 +13,7 @@ use std::fmt;
 
 use crate::{
   style::{Palette, Role},
-  width::{MIN_COLUMN, display_width, wrap},
+  width::{MIN_COLUMN, char_width, display_width},
 };
 
 /// One run of text with one semantic role.
@@ -116,49 +116,87 @@ impl RenderLine {
   /// contributes.
   ///
   /// Wrapping a *segmented* line rather than its flat text is what preserves the
-  /// operation/argument/path distinction on continuation lines. A wide segment is
-  /// hard-split at the column budget; the pieces keep their role, which is why a
-  /// path that wraps across two lines is still recognisably a path on both.
+  /// operation/argument/path distinction on continuation lines. A wide atom is hard
+  /// split at the column budget; the pieces keep their role, which is why a path that
+  /// wraps across two lines is still recognisably a path on both.
+  ///
+  /// Wrapping fills lines rather than flushing them. Wrapping each segment inside its
+  /// own budget was the first approach, and it failed twice in the same way: the
+  /// separator between two segments landed at a line break and the next segment was
+  /// glued to it (`[tool failed]exec\u{b7}` at twenty columns), and a short label
+  /// followed by one long body segment got a line to itself with eleven columns of the
+  /// answer still unwritten. Filling treats the line as one stream of words with roles
+  /// attached, which is both what a reader expects and what keeps every column usable.
   pub fn wrapped(&self, width: usize, narrow_decoration: NarrowDecoration) -> Vec<RenderLine> {
-    if self.width() <= width {
+    // `0` is not "one column wide", it is "no budget at all": a piped transcript is
+    // written unwrapped, which is the whole point of the width-0 convention.
+    if width == 0 || self.width() <= width {
       return vec![self.clone()];
     }
+    let width = width.max(1);
     let indent = match narrow_decoration {
       NarrowDecoration::Keep if width >= MIN_COLUMN => leading_columns(self),
       _ => 0,
     };
-    debug_assert!(indent <= width, "indent was measured from this line");
-    let indent = indent.min(width.saturating_sub(1));
-    let body_width = (width - indent).max(1);
+    let indent = indent.min(width - 1);
 
-    let mut lines = Vec::new();
+    let mut lines: Vec<RenderLine> = Vec::new();
     let mut current = RenderLine::new();
-    let mut current_width = 0usize;
-    let mut pending_indent = indent > 0;
+    let mut filled = false;
+    // Whitespace is held rather than written: it belongs to a line only if the word it
+    // precedes fits there too. This is what keeps a wrapped line from ending in a space,
+    // and from starting with one.
+    let mut pending: Option<Atom<'_>> = None;
 
-    for segment in &self.segments {
-      // `wrap` already falls back to hard splitting below the narrow-column
-      // floor, so the same call serves both decoration modes.
-      let pieces = wrap(&segment.text, body_width);
-      for piece in pieces {
-        let piece_width = display_width(&piece);
-        if current_width + piece_width > body_width && !current.is_empty() {
+    for atom in atoms(self) {
+      if atom.space {
+        pending = Some(atom);
+        continue;
+      }
+      let mut rest = atom.text;
+      loop {
+        let separator = pending.map(|atom| display_width(atom.text)).unwrap_or(0);
+        let atom_width = display_width(rest);
+        // A held separator counts against the budget: "the word plus the space before
+        // it" is the unit that has to fit. Saturating, because a budget this small means
+        // the indent or the space has already taken the line.
+        let remaining = width.saturating_sub(current.width());
+        // A separator that would consume the whole line is dropped rather than written:
+        // at four columns of budget, an indent of four is worth less than the word it
+        // would leave out. Whitespace is the cheapest thing on a line to give up.
+        let separator = if separator >= remaining {
+          pending = None;
+          0
+        } else {
+          separator
+        };
+        if filled && atom_width + separator > remaining {
           lines.push(std::mem::take(&mut current));
-          current_width = 0;
-          pending_indent = indent > 0;
+          start_continuation(&mut current, indent);
+          filled = false;
+          pending = None;
+          continue;
         }
-        if pending_indent && indent > 0 {
-          current.push(&" ".repeat(indent), Role::Muted);
-          current_width += indent;
-          pending_indent = false;
-        }
-        current.push(&piece, segment.role);
-        current_width += piece_width;
-        if current_width >= body_width {
+        if !filled && atom_width + separator > width {
+          // Nothing on this line, and the word alone is wider than the budget: the only
+          // way to make progress is to split inside it.
+          let (head, tail) = split_prefix(rest, remaining.saturating_sub(separator).max(1));
+          emit(&mut current, &mut pending);
+          current.push(&head, atom.role);
           lines.push(std::mem::take(&mut current));
-          current_width = 0;
-          pending_indent = indent > 0;
+          start_continuation(&mut current, indent);
+          filled = false;
+          pending = None;
+          rest = tail;
+          if rest.is_empty() {
+            break;
+          }
+          continue;
         }
+        emit(&mut current, &mut pending);
+        current.push(rest, atom.role);
+        filled = true;
+        break;
       }
     }
     if !current.is_empty() {
@@ -169,6 +207,83 @@ impl RenderLine {
     }
     lines
   }
+}
+
+/// Write held whitespace, now that a word follows it on the same line.
+fn emit<'a>(current: &mut RenderLine, pending: &mut Option<Atom<'a>>) {
+  if let Some(atom) = pending.take() {
+    current.push(atom.text, atom.role);
+  }
+}
+
+/// A line built for content after the first: the indent is decoration, not content.
+fn start_continuation(line: &mut RenderLine, indent: usize) {
+  if indent > 0 {
+    line.push(&" ".repeat(indent), Role::Muted);
+  }
+}
+
+/// Split off the longest character prefix that fits `budget` columns.
+///
+/// This path only exists for an atom with no space in it that is wider than an entire
+/// line, which is a path or a token someone pasted. Splitting between characters keeps
+/// the text intact and the widths honest; a combining mark may end up on the next line
+/// from its base character, which is a worse outcome than losing the text or looping
+/// forever, and no narrower option exists without a segmentation crate.
+fn split_prefix(text: &str, budget: usize) -> (String, &str) {
+  let mut head = String::new();
+  let mut head_width = 0usize;
+  let mut rest = text;
+  for (offset, c) in text.char_indices() {
+    let c_width = char_width(c);
+    if head_width + c_width > budget {
+      rest = &text[offset..];
+      break;
+    }
+    head.push(c);
+    head_width += c_width;
+    rest = &text[offset + c.len_utf8()..];
+  }
+  if head.is_empty() {
+    // A single character wider than the whole budget still has to be emitted, or the
+    // caller would loop forever on it.
+    let mut chars = text.chars();
+    if let Some(c) = chars.next() {
+      head.push(c);
+      rest = &text[c.len_utf8()..];
+    }
+  }
+  (head, rest)
+}
+
+/// One wrap candidate: a run of spaces, or a run of non-spaces.
+#[derive(Debug, Clone, Copy)]
+struct Atom<'a> {
+  text: &'a str,
+  role: Role,
+  space: bool,
+}
+
+fn atoms(line: &RenderLine) -> Vec<Atom<'_>> {
+  let mut atoms = Vec::new();
+  for segment in &line.segments {
+    let mut offset = 0usize;
+    while offset < segment.text.len() {
+      let space = segment.text[offset..].starts_with(' ');
+      let end = segment.text[offset..]
+        .char_indices()
+        .find(|(_, c)| (*c == ' ') != space)
+        .map(|(i, _)| offset + i)
+        .unwrap_or(segment.text.len());
+      atoms.push(Atom {
+        text: &segment.text[offset..end],
+        role: segment.role,
+        space,
+      });
+      offset = end;
+    }
+  }
+  atoms
 }
 
 impl fmt::Display for RenderLine {
@@ -261,6 +376,59 @@ mod tests {
         line.plain()
       );
     }
+  }
+
+  #[test]
+  fn a_zero_budget_means_do_not_wrap() {
+    // A piped transcript has no column budget, which is not the same as a budget of
+    // one column. Conflating them turns every line into one character per line.
+    let mut line = RenderLine::new();
+    line.push("[answer] ", Role::Muted);
+    line.push("one line, written whole", Role::Assistant);
+    assert_eq!(line.wrapped(0, NarrowDecoration::Keep).len(), 1);
+    assert_eq!(line.wrapped(0, NarrowDecoration::Strip).len(), 1);
+  }
+
+  #[test]
+  fn wrapping_does_not_glue_two_segments_together() {
+    // Wrapping each segment inside its own budget used to lose the space between them
+    // whenever that space landed on a break: `[tool failed]` and `exec` came out as
+    // `[tool failed]exec`. The separator belongs to whichever line holds both.
+    let mut line = RenderLine::new();
+    line.push("[tool failed] ", Role::Muted);
+    line.push("exec", Role::Operation);
+    line.push(" \u{b7} ", Role::Muted);
+    line.push("exit 1", Role::Error);
+    let lines = line.wrapped(20, NarrowDecoration::Keep);
+    let texts: Vec<String> = lines.iter().map(|line| line.plain()).collect();
+    for text in &texts {
+      assert!(!text.ends_with(' '), "trailing space: {text:?}");
+      assert!(!text.starts_with(' '), "leading space: {text:?}");
+    }
+    assert_eq!(
+      texts,
+      vec!["[tool failed] exec \u{b7}", "exit 1"],
+      "{texts:?}"
+    );
+  }
+
+  #[test]
+  fn a_short_label_does_not_get_a_line_to_itself() {
+    // A long body segment after a short label used to flush the label onto its own line
+    // and leave most of the first line blank. Filling keeps the reader's columns usable.
+    let mut line = RenderLine::new();
+    line.push("[answer] ", Role::Muted);
+    line.push("one two three four five six seven", Role::Assistant);
+    let texts: Vec<String> = line
+      .wrapped(20, NarrowDecoration::Keep)
+      .iter()
+      .map(|line| line.plain())
+      .collect();
+    assert_eq!(
+      texts,
+      vec!["[answer] one two", "three four five six", "seven"],
+      "{texts:?}"
+    );
   }
 
   #[test]
