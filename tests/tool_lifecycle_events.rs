@@ -1,12 +1,15 @@
 //! Prove that a tool action leaves durable lifecycle records in the trace journal.
 //!
-//! Two invariants, checked end-to-end: the real binary drives a turn that performs
+//! Four invariants, checked end-to-end: the real binary drives a turn that performs
 //! more than one tool action against the deterministic fake provider, and the trace
 //! is then read back out of the store. What the journal must show is that
 //!
-//! 1. one durable call id ties every record of one tool action together, and
+//! 1. one durable call id ties every record of one tool action together,
 //! 2. each tool action leaves exactly one terminal record, ordered after the record
-//!    that started it.
+//!    that started it,
+//! 3. a failing action is closed by a failure record, not a bare success, and
+//! 4. an action whose completion the runtime could not observe stays unknown: it is
+//!    never recorded as either success or failure.
 
 use std::{
   fs,
@@ -178,6 +181,78 @@ fn a_failing_tool_action_records_a_failure() {
       panic!("the failing action was recorded as a success: {event:?}");
     }
     other => panic!("the failing action closed with {other:?}, not a failure"),
+  }
+}
+
+/// A command killed at its timeout boundary is an outcome the runtime cannot
+/// determine. The journal must record it as unknown: the runtime may not pick
+/// between success and failure for a command that could already have written state.
+#[test]
+fn an_outcome_the_runtime_cannot_determine_is_not_coerced_into_success_or_failure() {
+  // `sleep 5` cannot finish inside `timeout_ms`, so the command is killed while it
+  // is still running and its completion is never observed.
+  let records = turn_records(
+    &[
+      tool_response(
+        UNOBSERVED_CALL,
+        "exec",
+        r#"{"command":"sleep 5","timeout_ms":250}"#,
+      ),
+      text_response("completed"),
+    ],
+    2,
+  );
+
+  let action: Vec<&Record> = records
+    .iter()
+    .filter(|record| call_id(&record.event) == Some(UNOBSERVED_CALL))
+    .collect();
+  assert!(
+    action.len() > 1,
+    "the unobserved action left {action:?}, which is not a lifecycle"
+  );
+  let terminals: Vec<&&Record> = action
+    .iter()
+    .filter(|record| matches!(stage(&record.event), Some(Stage::Terminal)))
+    .collect();
+  assert_eq!(
+    terminals.len(),
+    1,
+    "the unobserved action left {} terminal records: {terminals:?}",
+    terminals.len(),
+  );
+
+  // The decided states belong to the coercion this test rules out, so neither may
+  // appear anywhere in the action, terminal record or not.
+  for record in &action {
+    assert!(
+      !matches!(
+        record.event,
+        AgentEvent::ToolCompleted(_) | AgentEvent::ToolFailed(_)
+      ),
+      "the runtime coerced an outcome it could not observe into a decided state: {:?}",
+      record.event,
+    );
+  }
+
+  match &terminals[0].event {
+    AgentEvent::ToolUnknown(event) => {
+      assert_eq!(event.name, "exec");
+      assert!(
+        event.mutating,
+        "a killed command that may have changed the workspace was recorded as read-only"
+      );
+      // What the journal holds for this action is the boundary the runtime stopped
+      // at, not a verdict: the command was killed and its completion was never
+      // observed. The killed command is not named there, so the test does not
+      // claim that it is.
+      assert!(
+        event.why.contains("killed") && event.why.contains("unknown"),
+        "the unknown record does not name the boundary that was not observed: {:?}",
+        event.why,
+      );
+    }
+    other => panic!("the unobserved action closed with {other:?}, not an unknown"),
   }
 }
 
