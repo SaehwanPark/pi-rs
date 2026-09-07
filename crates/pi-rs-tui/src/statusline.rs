@@ -76,7 +76,10 @@ pub struct Status<'a> {
 pub fn line(status: &Status<'_>) -> RenderLine {
   let activity = Segment::new(status.activity.word(), Role::Status);
   let turns = if status.turns > 0 {
-    Some(Segment::new(format!("{} turns", status.turns), Role::Meta))
+    // A status line is read at a glance by a person, and "1 turns" reads like a bug in
+    // the thing being reported rather than in the grammar.
+    let word = if status.turns == 1 { "turn" } else { "turns" };
+    Some(Segment::new(format!("{} {word}", status.turns), Role::Meta))
   } else {
     None
   };
@@ -166,6 +169,15 @@ mod tests {
   fn wide_renders_every_segment_in_order() {
     let line = line(&status(80));
     assert_eq!(line.plain(), "vulcan-70b · idle · 3 turns · ? for commands");
+
+    let single = Status {
+      turns: 1,
+      ..status(80)
+    };
+    assert_eq!(
+      super::line(&single).plain(),
+      "vulcan-70b · idle · 1 turn · ? for commands"
+    );
   }
 
   #[test]

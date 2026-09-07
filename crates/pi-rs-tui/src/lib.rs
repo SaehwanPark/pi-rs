@@ -51,7 +51,10 @@ pub mod width;
 pub use command::{Input, Span};
 pub use line::{NarrowDecoration, RenderLine, Segment};
 pub use live::{Surface, is_streamed, routine_stream};
-pub use statusline::{Activity, Status, line};
+// `line` is deliberately not re-exported at the crate root: `statusline::line` would sit next to
+// the `line` module in the same prelude, and a reader should not have to know which namespace a
+// bare `line` resolves to.
+pub use statusline::{Activity, Status};
 pub use style::{Color, Palette, Role, Style};
 pub use term::{ColorChoice, Stream};
 pub use trace::{RenderedEntry, TraceSelection, render_trace};
