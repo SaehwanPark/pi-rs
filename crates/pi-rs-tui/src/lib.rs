@@ -20,8 +20,9 @@
 //! Plus [`editor`] for the buffer a user types into, [`keys`] for the terminal
 //! events that become editing intents, [`live`] for streaming,
 //! [`command`] for input classification, [`mod@format`] for the repeated scalar
-//! renderings, and [`term`] for the two environment probes a surface needs before
-//! it can decide what to emit.
+//! renderings, [`statusline`] for the one-line snapshot of what the loop is doing,
+//! and [`term`] for the two environment probes a surface needs before it can decide
+//! what to emit.
 //!
 //! # Two destinations
 //!
@@ -45,6 +46,7 @@ pub mod format;
 pub mod keys;
 pub mod line;
 pub mod live;
+pub mod statusline;
 pub mod style;
 pub mod term;
 pub mod trace;
@@ -56,6 +58,10 @@ pub use editor::{Cursor, Editor, Intent, Layout, Outcome};
 pub use keys::{intent, key_intent};
 pub use line::{NarrowDecoration, RenderLine, Segment};
 pub use live::{Surface, is_streamed, routine_stream};
+// `line` is deliberately not re-exported at the crate root: `statusline::line` would sit next to
+// the `line` module in the same prelude, and a reader should not have to know which namespace a
+// bare `line` resolves to.
+pub use statusline::{Activity, Status};
 pub use style::{Color, Palette, Role, Style};
 pub use term::{ColorChoice, Stream};
 pub use trace::{RenderedEntry, TraceSelection, render_trace};
