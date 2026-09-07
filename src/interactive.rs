@@ -47,7 +47,7 @@ use crossterm::{
   terminal::{self, Clear, ClearType},
 };
 
-use pi_rs_tui::{Editor, Intent, Outcome, display_width, keys::intent, term, truncate};
+use pi_rs_tui::{Editor, Intent, Outcome, display_width, keys::intent, statusline, term};
 
 use crate::{
   cli::{InteractiveArgs, SurfaceArgs},
@@ -131,18 +131,36 @@ fn is_ctrl_c(event: &Event) -> bool {
     && matches!(key.code, KeyCode::Char('c' | 'C'))
 }
 
+/// What the waiting line offers the user.
+const WAITING_HINT: &str = "enter submits, ctrl-c quits";
+
 /// The one status line: which model answers, and what the session is doing.
 ///
-/// Cut to `columns` because a status line that wraps leaves the frame holding more
-/// lines than the loop counted, and every later redraw would land on the wrong row.
-/// The model is named in both states rather than only in one: knowing which model
-/// answered is what makes a surprising answer interpretable afterwards.
-fn status_line(model: &str, state: TurnState, columns: usize) -> String {
-  let line = match state {
-    TurnState::Idle => format!("{model} · idle · enter submits, ctrl-c quits"),
-    TurnState::Working => format!("{model} · turn running"),
-  };
-  truncate(&line, columns)
+/// The wording belongs to [`statusline`]: it is a projection that can be tested
+/// without a terminal, and the loop only says what it honestly knows. The model is
+/// named in both states rather than only in one: knowing which model answered is
+/// what makes a surprising answer interpretable afterwards.
+///
+/// `columns` is the width the editor is laid out at, because two width notions in
+/// one frame is a bug. A status line that wraps leaves the frame holding more lines
+/// than the loop counted, and every later redraw would land on the wrong row; the
+/// projection cuts to that budget by dropping whole segments rather than wrapping.
+fn status_line(model: &str, state: TurnState, turns: usize, columns: usize) -> String {
+  let waiting = matches!(state, TurnState::Idle);
+  statusline::line(&statusline::Status {
+    model,
+    activity: if waiting {
+      statusline::Activity::Waiting
+    } else {
+      statusline::Activity::Running
+    },
+    turns,
+    columns,
+    // The hint is what the loop accepts right now. While a turn runs, enter does not
+    // submit, so it goes away rather than offering a key that does nothing.
+    hint: waiting.then_some(WAITING_HINT),
+  })
+  .to_string()
 }
 
 /// Rows of the frame for a buffer of `rows` display rows plus the status line.
@@ -200,6 +218,8 @@ struct Loop {
   /// What the status line names as the model.
   model: String,
   state: TurnState,
+  /// Turns that have finished. The status line counts them; `0` says nothing yet.
+  turns: usize,
   /// Columns available to this surface, as the terminal last reported them.
   columns: usize,
   /// How many lines the cursor sits below the row the current frame starts on.
@@ -218,6 +238,7 @@ impl Loop {
       editor: Editor::new(),
       model,
       state: TurnState::Idle,
+      turns: 0,
       columns: 1,
       above: 0,
     };
@@ -290,7 +311,7 @@ impl Loop {
     self.state = TurnState::Working;
     write_line(
       &mut out,
-      &status_line(&self.model, self.state, self.columns),
+      &status_line(&self.model, self.state, self.turns, self.columns),
     )?;
     out.flush()
   }
@@ -305,7 +326,7 @@ impl Loop {
     }
     write_line(
       &mut out,
-      &status_line(&self.model, self.state, self.columns),
+      &status_line(&self.model, self.state, self.turns, self.columns),
     )?;
     let up = caret_lines_up(layout.rows.len(), layout.cursor.line);
     if up > 0 {
@@ -486,10 +507,10 @@ mod tests {
 
   #[test]
   fn the_status_line_names_the_model_and_the_turn() {
-    let idle = status_line("local/vulcan", TurnState::Idle, 80);
+    let idle = status_line("local/vulcan", TurnState::Idle, 0, 80);
     assert!(idle.starts_with("local/vulcan"));
     assert!(idle.contains("idle"));
-    let working = status_line("local/vulcan", TurnState::Working, 80);
+    let working = status_line("local/vulcan", TurnState::Working, 1, 80);
     assert!(working.starts_with("local/vulcan"));
     assert!(working.contains("turn"));
     assert!(!working.contains("ctrl-c"));
@@ -503,10 +524,13 @@ mod tests {
     let wide = status_line(
       "a/very-long-model-name-that-does-not-fit",
       TurnState::Idle,
+      3,
       20,
     );
     assert!(display_width(&wide) <= 20, "{wide}");
-    assert_eq!(status_line("a/b", TurnState::Idle, 0), "");
+    // No budget at all: the projection keeps the activity word rather than return
+    // an empty line, and it is still one line, which is what the frame counted.
+    assert_eq!(status_line("a/b", TurnState::Idle, 0, 0), "idle");
   }
 
   #[test]
