@@ -18,8 +18,30 @@ use crate::cli::SurfaceArgs;
 use crate::cli::RunArgs;
 
 pub fn execute(args: RunArgs) -> Result<(), String> {
-  // Every fallible input and composition check precedes `run_turn`, the only
-  // operation in this command that can contact a provider.
+  // A one-shot run is a session that holds exactly one turn. It is built on the
+  // same handle an interactive loop reuses for many turns, so the composition is
+  // written once, in `open_session`.
+  open_session(&args, |session| match session.turn(&args.prompt) {
+    Ok(()) => session.close().map_err(session_error),
+    Err(error) => Err(turn_error(&session.close_after_failure(error))),
+  })
+}
+
+/// Open one durable session and hand it to `turns`, which may run as many turns as
+/// the caller wants before closing it.
+///
+/// The composition lives here alone, and its order is the contract: every fallible
+/// input and composition check precedes the first `run_turn`, the only operation
+/// that can contact a provider, so a bad config never spends a turn.
+///
+/// The handle borrows these parts rather than owning them because `TurnLoop` holds
+/// `&mut dyn Trace`: a handle that owned both would be self-referential. Scoping
+/// the borrow to this call is what keeps it sound, and it is why a caller closes
+/// from inside `turns` rather than after this function returns.
+fn open_session(
+  args: &RunArgs,
+  turns: impl FnOnce(&mut SessionHandle<'_>) -> Result<(), String>,
+) -> Result<(), String> {
   let config_text = fs::read_to_string(&args.config)
     .map_err(|error| format!("cannot read config '{}': {error}", args.config.display()))?;
   let config =
@@ -98,50 +120,107 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
 
   let options = surface_options(&args.surface);
   let mut trace = ReportingTrace::new(StoreTrace::new(session), options);
-  let mut progress = CliProgress::new(&tools, options);
-  // A transcript write failure must not decide whether the session closes: the
-  // durable record is the product, so the failure is carried out and reported after
-  // the session has ended.
-  let transcript_error: Option<io::Error>;
-  let result = {
-    let mut runtime = TurnLoop::new(
-      &provider,
-      &tools,
-      &policy,
-      &mut trace,
-      session_id,
-      TraceId::new(),
-    )
-    .with_working_dir(canonical_cwd)
-    .with_thinking(config.thinking);
-    if let Some(backup) = &backup {
-      // Failover is off until a backup exists. Attaching one is the whole
-      // configuration surface: the policy comes from the primary's own capabilities.
-      runtime = runtime.with_backup(backup);
-    }
-    match runtime.run_turn(&args.prompt, &CancelToken::new(), &mut progress) {
-      Ok(_) => {
-        // Flush before the summary line: the surface may hold an unterminated
-        // reasoning line, and the durable `SessionEnded` event renders underneath it.
-        transcript_error = progress.finish().err();
-        runtime.end_session(SessionEndReason::UserExit)
-      }
-      Err(error) => {
-        if error.session_recoverable() {
-          runtime
-            .end_session(SessionEndReason::Fatal {
-              message: turn_error(&error),
-            })
-            .map_err(|sink_error| turn_error(&sink_error))?;
-        }
-        return Err(turn_error(&error));
-      }
-    }
+  let progress = CliProgress::new(&tools, options);
+  let mut runtime = TurnLoop::new(
+    &provider,
+    &tools,
+    &policy,
+    &mut trace,
+    session_id,
+    TraceId::new(),
+  )
+  .with_working_dir(canonical_cwd)
+  .with_thinking(config.thinking);
+  if let Some(backup) = &backup {
+    // Failover is off until a backup exists. Attaching one is the whole
+    // configuration surface: the policy comes from the primary's own capabilities.
+    runtime = runtime.with_backup(backup);
+  }
+  let mut session = SessionHandle {
+    runtime,
+    progress,
+    transcript_error: None,
   };
-  result.map_err(|error| turn_error(&error))?;
-  match transcript_error {
-    Some(error) => Err(format!("cannot write transcript: {error}")),
-    None => Ok(()),
+  turns(&mut session)
+}
+
+/// One session, open for as many turns as the caller wants.
+///
+/// The runtime is long-lived on purpose, and the handle is what keeps it that way:
+/// the memory between turns is the history `TurnLoop` already owns, so a caller
+/// that rebuilt a loop per turn would silently discard that history and re-emit
+/// `SessionStarted`. Built by [`open_session`], which owns the providers, tools,
+/// context policy, and sink the handle borrows.
+pub struct SessionHandle<'a> {
+  runtime: TurnLoop<'a>,
+  progress: CliProgress<'a>,
+  /// A transcript write failure must not decide whether the session closes: the
+  /// durable record is the product, so the failure is carried out and reported
+  /// after the session has ended.
+  transcript_error: Option<io::Error>,
+}
+
+impl SessionHandle<'_> {
+  /// Run one user turn.
+  ///
+  /// The cancellation token is created here, per turn, exactly as a one-shot run
+  /// creates one: a turn carries its own cancellation, and nothing shares it.
+  pub fn turn(&mut self, prompt: &str) -> Result<(), TurnError> {
+    self
+      .runtime
+      .run_turn(prompt, &CancelToken::new(), &mut self.progress)
+      .map(|_| ())
+  }
+
+  /// Flush the transcript, end the session as a user exit, and report what the
+  /// caller should show.
+  ///
+  /// The flush precedes the end event: the surface may hold an unterminated
+  /// reasoning line, and the durable `SessionEnded` event renders underneath it. A
+  /// write failure is reported only once the session is durably closed, and a sink
+  /// failure outranks it, because a lost line is not worth losing the record.
+  pub fn close(&mut self) -> Result<(), SessionError> {
+    self.transcript_error = self.progress.finish().err();
+    self
+      .runtime
+      .end_session(SessionEndReason::UserExit)
+      .map_err(SessionError::Turn)?;
+    match self.transcript_error.take() {
+      Some(error) => Err(SessionError::Transcript(error)),
+      None => Ok(()),
+    }
+  }
+
+  /// End a session whose turn already failed, and return the error to report.
+  ///
+  /// A recoverable failure still gets a durable end event that carries what
+  /// happened; a sink failure while writing that event is the more urgent fact and
+  /// replaces it. The transcript is not flushed here — only a completed turn gets a
+  /// summary line.
+  pub fn close_after_failure(&mut self, error: TurnError) -> TurnError {
+    if error.session_recoverable() {
+      if let Err(sink_error) = self.runtime.end_session(SessionEndReason::Fatal {
+        message: turn_error(&error),
+      }) {
+        return sink_error;
+      }
+    }
+    error
+  }
+}
+
+/// Why a session did not end quietly.
+pub enum SessionError {
+  /// The turn failed, or the durable sink could not record it.
+  Turn(TurnError),
+  /// The transcript could not be written; the durable record is intact.
+  Transcript(io::Error),
+}
+
+fn session_error(error: SessionError) -> String {
+  match error {
+    SessionError::Turn(error) => turn_error(&error),
+    SessionError::Transcript(error) => format!("cannot write transcript: {error}"),
   }
 }
 
