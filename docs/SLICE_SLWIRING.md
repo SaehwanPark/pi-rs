@@ -40,3 +40,19 @@ interactive --store /tmp/slwiring-store' /dev/null` (or explain why not).
 
 Commit `--allow-empty -m "chore: start"` first, commit after every step, always compiling. Do not
 merge, rebase, push, open PRs, or touch other branches or /home/saehwan/repos/pi-rs.
+
+---
+
+## Context discipline (this is why three sibling slices died at once)
+
+Three children were launched simultaneously on the shared local model server, and all three died with
+the server-side error *"Context size has been exceeded"*. The server was healthy; four concurrent
+~100k sessions (three children + the parent) exceeded what it will serve. You are the **only** child
+running now. Behave accordingly:
+
+- Never grep repo-wide. Grep the **one** file you need, with `| head -15`.
+- Read at most ~40 lines per `read`; use `offset`. Whole-file reads of `src/interactive.rs` or
+  `src/run.rs` will end this run.
+- Keep any single command's output under 15 lines.
+- Commit after every step. If you die, the last compiling commit is the deliverable — that is a fine
+  outcome, not a failure to hide.
