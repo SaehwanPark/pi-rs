@@ -49,7 +49,7 @@ use crossterm::{
 
 use pi_rs_core::TurnStatus;
 use pi_rs_runtime::TurnError;
-use pi_rs_tui::{Editor, Intent, Outcome, display_width, keys::intent, statusline, term};
+use pi_rs_tui::{Editor, Intent, Outcome, display_width, keys::intent, statusline, term, truncate};
 
 use crate::{
   cli::{InteractiveArgs, SurfaceArgs},
@@ -177,7 +177,7 @@ const WAITING_HINT: &str = "enter submits, ctrl-c quits";
 /// projection cuts to that budget by dropping whole segments rather than wrapping.
 fn status_line(model: &str, state: TurnState, turns: usize, columns: usize) -> String {
   let waiting = matches!(state, TurnState::Idle);
-  statusline::line(&statusline::Status {
+  let line = statusline::line(&statusline::Status {
     model,
     activity: if waiting {
       statusline::Activity::Waiting
@@ -189,8 +189,17 @@ fn status_line(model: &str, state: TurnState, turns: usize, columns: usize) -> S
     // The hint is what the loop accepts right now. While a turn runs, enter does not
     // submit, so it goes away rather than offering a key that does nothing.
     hint: waiting.then_some(WAITING_HINT),
-  })
-  .to_string()
+  });
+  // The projection's floor is one word, so it always says something; the loop's
+  // budget is the harder rule, because a line of `columns + 1` is a redraw on the
+  // wrong row. Where the projection could not drop its way into budget, the tail is
+  // cut here, and with no columns at all that leaves nothing to draw.
+  let plain = line.plain();
+  if line.width() > columns {
+    truncate(&plain, columns)
+  } else {
+    plain
+  }
 }
 
 /// Rows of the frame for a buffer of `rows` display rows plus the status line.
@@ -572,9 +581,9 @@ mod tests {
       20,
     );
     assert!(display_width(&wide) <= 20, "{wide}");
-    // No budget at all: the projection keeps the activity word rather than return
-    // an empty line, and it is still one line, which is what the frame counted.
-    assert_eq!(status_line("a/b", TurnState::Idle, 0, 0), "idle");
+    // No budget at all: the projection would still say `idle`, but nothing fits in
+    // zero columns, and a drawn word there is the spill the frame cannot survive.
+    assert_eq!(status_line("a/b", TurnState::Idle, 0, 0), "");
   }
 
   #[test]
