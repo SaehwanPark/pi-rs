@@ -447,9 +447,10 @@ mod tests {
       let text = format!(
         concat!(
           "{{\"type\":\"session\",\"version\":3,\"id\":\"s1\"}}\n",
-          "{{\"type\":\"message\",\"id\":\"e1\",\"parentId\":null,\"timestamp\":\"{stamp}\",",
+          "{{\"type\":\"message\",\"id\":\"e1\",\"parentId\":null,\"timestamp\":\"{}\",",
           "\"message\":{{\"role\":\"user\",\"content\":\"x\"}}}}\n"
         ),
+        stamp
       );
       let parsed = pi_import::parse("emitted.jsonl", &text).expect("the emitted line parses");
       let entry = parsed.entries.first().expect("the message entry");
@@ -485,7 +486,7 @@ mod tests {
       .iter()
       .map(|line| line["parentId"].as_str().unwrap())
       .collect();
-    assert_eq!(parents, [&ids[0], &ids[1], &ids[2]]);
+    assert_eq!(parents, [ids[0], ids[1], ids[2]]);
     assert!(dropped.is_empty(), "a plain conversation loses nothing: {dropped:?}");
   }
 
