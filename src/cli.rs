@@ -9,6 +9,7 @@ pub const TOP_HELP: &str = concat!(
   "Usage: pi-rs run --config <file> --cwd <workspace> --prompt <text>\n",
   "       pi-rs trace [session-id] [--config <file>]\n",
   "       pi-rs import-pi <pi-session.jsonl> [--store <dir> | --config <file>] [--write]\n",
+  "       pi-rs export <session-id> --config <file> [--out <path>]\n",
 );
 pub const RUN_HELP: &str = concat!(
   "Usage: pi-rs run --config <file> --cwd <workspace> --prompt <text> [surface flags]\n",
@@ -89,12 +90,38 @@ pub const IMPORT_HELP: &str = concat!(
   "  --help                   Show this help.\n",
 );
 
+pub const EXPORT_HELP: &str = concat!(
+  "Usage: pi-rs export <session-id> --config <file> [--out <path>]\n",
+  "\n",
+  "Writes one pi-rs session back out as a Pi session file: a `session` header line, then\n",
+  "one `message` entry per user turn and per assistant reply, in trace order. The JSONL\n",
+  "goes to stdout unless --out names a file. The trace is already redacted, so an export\n",
+  "is redacted output, never the bytes a provider sent.\n",
+  "\n",
+  "Whatever the canonical trace holds that Pi's shape cannot carry is named on stderr as\n",
+  "dropped. Reasoning is the obvious case: Pi records thinking text but no provenance, and\n",
+  "labelling one kind of reasoning as another is not a loss this tool will make quietly.\n",
+  "\n",
+  "Selection:\n",
+  "  <session-id>             Session id or prefix, resolved exactly as `pi-rs trace`\n",
+  "                           resolves it: one match or an error. Required, because\n",
+  "                           exporting the newest session by accident is worse than\n",
+  "                           asking which one.\n",
+  "\n",
+  "Output:\n",
+  "  --config <file>          Configuration whose state root holds the traces.\n",
+  "  --out <path>             Write here instead of stdout, creating the parent\n",
+  "                           directories this path needs and nothing else.\n",
+  "  --help                   Show this help.\n",
+);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
   Help(&'static str),
   Run(RunArgs),
   Trace(TraceArgs),
   Import(ImportArgs),
+  Export(ExportArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +210,26 @@ impl Default for ImportArgs {
   }
 }
 
+/// `pi-rs export`: one session out of the store, in the shape Pi reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportArgs {
+  /// Session id or prefix. Required: this command never guesses a session.
+  pub session: Option<String>,
+  pub config: PathBuf,
+  /// Where to write. Absent means stdout.
+  pub out: Option<PathBuf>,
+}
+
+impl Default for ExportArgs {
+  fn default() -> Self {
+    Self {
+      session: None,
+      config: PathBuf::new(),
+      out: None,
+    }
+  }
+}
+
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
   let mut args = args.into_iter();
   let Some(command) = args.next() else {
@@ -200,6 +247,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
   }
   if command == "import-pi" || command == "import" {
     return parse_import(&remaining);
+  }
+  if command == "export" {
+    return parse_export(&remaining);
   }
   // A bare argument is not a command. Guessing which command the user meant is worse
   // than naming the two that exist.
@@ -433,7 +483,8 @@ fn inline_value(arg: &std::ffi::OsStr) -> Option<(&str, &std::ffi::OsStr)> {
   let (flag, value) = arg.to_str()?.split_once('=')?;
   matches!(
     flag,
-    "--config" | "--cwd" | "--prompt" | "--color" | "--width" | "--session" | "--epoch" | "--store"
+    "--config" | "--cwd" | "--prompt" | "--color" | "--width" | "--session" | "--epoch"
+      | "--store" | "--out"
   )
   .then_some((flag, OsStr::new(value)))
 }
@@ -504,6 +555,71 @@ fn parse_import(remaining: &[OsString]) -> Result<Command, String> {
     store,
     config,
     write,
+  }))
+}
+
+/// `pi-rs export`: one session id, the config that says where the store is, and an
+/// optional destination.
+fn parse_export(remaining: &[OsString]) -> Result<Command, String> {
+  if remaining.iter().any(|arg| arg == "--help" || arg == "-h") {
+    return Ok(Command::Help(EXPORT_HELP));
+  }
+  let mut session: Option<String> = None;
+  let mut config: Option<PathBuf> = None;
+  let mut out: Option<PathBuf> = None;
+  let remaining: &[OsString] = &expand_inline(remaining);
+  let mut index = 0;
+  while index < remaining.len() {
+    let flag = remaining[index]
+      .to_str()
+      .ok_or_else(|| format!("export argument name is not valid UTF-8\n{EXPORT_HELP}"))?;
+    index += 1;
+    match flag {
+      "--config" | "--out" => {
+        let value = remaining
+          .get(index)
+          .ok_or_else(|| format!("{flag} requires a value\n{EXPORT_HELP}"))?;
+        let value = value
+          .to_str()
+          .ok_or_else(|| format!("{flag} must be valid UTF-8\n{EXPORT_HELP}"))?;
+        // `--out --write` is a missing file, not a file named `--write`, and an id that
+        // starts with a dash is a flag the parser has never heard of, never a session.
+        if value.is_empty() || value.starts_with('-') {
+          return Err(format!("{flag} requires a value\n{EXPORT_HELP}"));
+        }
+        index += 1;
+        let slot = if flag == "--config" { &mut config } else { &mut out };
+        if slot.replace(PathBuf::from(value)).is_some() {
+          return Err(format!("{flag} may be supplied only once\n{EXPORT_HELP}"));
+        }
+      }
+      other if !other.starts_with('-') => {
+        if session.is_some() {
+          return Err(format!(
+            "expected one session id, and '{other}' would be a second\n{EXPORT_HELP}"
+          ));
+        }
+        session = Some(other.to_string());
+      }
+      other => return Err(format!("unknown export argument '{other}'\n{EXPORT_HELP}")),
+    }
+  }
+  let session = session.ok_or_else(|| {
+    format!("a session id is required: pi-rs export <session-id>\n{EXPORT_HELP}")
+  })?;
+  // An empty prefix matches every session, so accepting it would turn a typo into an
+  // ambiguity error that does not mention what was actually wrong.
+  if session.is_empty() {
+    return Err(format!("a session id cannot be empty\n{EXPORT_HELP}"));
+  }
+  // The store is not guessed from a default location: an export is read out of a state
+  // root the caller named, the same way `pi-rs trace` reads it.
+  let config = config
+    .ok_or_else(|| format!("an export needs a state root: --config <file>\n{EXPORT_HELP}"))?;
+  Ok(Command::Export(ExportArgs {
+    session: Some(session),
+    config,
+    out,
   }))
 }
 

@@ -1,4 +1,5 @@
 mod cli;
+mod export_pi;
 mod import_pi;
 mod run;
 mod trace;
@@ -17,6 +18,7 @@ fn main() {
     cli::Command::Run(args) => report(run::execute(args)),
     cli::Command::Trace(args) => report(trace::execute(args)),
     cli::Command::Import(args) => report(import_pi::execute(args)),
+    cli::Command::Export(args) => report(export_pi::execute(args)),
   }
 }
 
