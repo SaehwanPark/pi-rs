@@ -47,6 +47,8 @@ use crossterm::{
   terminal::{self, Clear, ClearType},
 };
 
+use pi_rs_core::TurnStatus;
+use pi_rs_runtime::TurnError;
 use pi_rs_tui::{Editor, Intent, Outcome, display_width, keys::intent, statusline, term};
 
 use crate::{
@@ -56,6 +58,34 @@ use crate::{
 
 /// What is drawn before the first row of the buffer.
 const PROMPT_PREFIX: &str = "> ";
+
+/// What the loop does with a turn that has ended.
+///
+/// A cancellation is something the user did on purpose, so it is not a reason to
+/// lose the session: the loop says so in the transcript, where there is room to say
+/// what happened, and takes the buffer back. Only a failure the loop cannot see a
+/// way past ends it.
+enum AfterTurn {
+  /// The turn ran to the end; it counts.
+  Done,
+  /// What the loop prints about the user's own cancellation.
+  Cancelled(&'static str),
+  /// The failure that ends the session.
+  Failed(run::SessionError),
+}
+
+/// Sort one turn's result into those three cases.
+///
+/// The status line is not what reports a cancellation. It cannot see why a turn
+/// stopped, so a line that tried to say more than `waiting` would be guessing; it
+/// goes back to waiting and the loop owns the explanation.
+fn after_turn(result: Result<(), TurnError>) -> AfterTurn {
+  match result {
+    Ok(()) => AfterTurn::Done,
+    Err(TurnError::Aborted(TurnStatus::Cancelled)) => AfterTurn::Cancelled("turn cancelled"),
+    Err(error) => AfterTurn::Failed(run::SessionError::Turn(error)),
+  }
+}
 
 /// Columns to assume when the terminal will not say how wide it is.
 ///
@@ -294,8 +324,20 @@ impl Loop {
     // rather than keep saying what the config said when the session opened.
     self.model = session.model().to_string();
     take_line().map_err(terminal_failure)?;
+    let outcome = after_turn(result);
+    // The loop's own line about a cancellation, written while the terminal still
+    // translates it into a row of its own.
+    if let AfterTurn::Cancelled(note) = &outcome {
+      write_line(&mut io::stdout(), note).map_err(terminal_failure)?;
+    }
     terminal::enable_raw_mode().map_err(terminal_failure)?;
-    result.map_err(|error| run::session_error(run::SessionError::Turn(error)))?;
+    match outcome {
+      AfterTurn::Done => self.turns += 1,
+      // The note above is the report; the frame below it goes back to saying
+      // `waiting`, which is all the projection is allowed to claim.
+      AfterTurn::Cancelled(_) => {}
+      AfterTurn::Failed(error) => return Err(run::session_error(error)),
+    }
     self.state = TurnState::Idle;
     self.draw().map_err(terminal_failure)
   }
