@@ -56,8 +56,8 @@ use pi_rs_tui::{Editor, Intent};
 /// Each budget is ten times the median above, rounded up to something worth reading, and floored
 /// at 2 us where the median is inside the noise. The two redraw cases dominate, which is the
 /// point: an edit is a string operation on a line, and a redraw lays the whole buffer out again.
-/// A case printed as microseconds per keystroke is per forced redraw where the case is redraw
-/// only. Re-measure rather than raising a budget because a number moved.
+/// The redraw-only case is priced per redraw, because a redraw is exactly what one keystroke owes
+/// the terminal. Re-measure rather than raising a budget because a number moved.
 const BUDGETS: &[(&str, f64)] = &[
   ("insert_end", 2.0),
   ("insert_middle", 2.0),
