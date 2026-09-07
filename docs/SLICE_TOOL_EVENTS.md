@@ -47,3 +47,15 @@ ignore reason.
 
 Commit `--allow-empty -m "chore: start"` first, then commit after every step, always compiling. Keep
 every command output under 20 lines. Do not merge, rebase, push, open PRs, or touch other branches.
+
+---
+
+## Context discipline (why three sibling runs died)
+
+The shared local model server will not admit four ~100k sessions at once; three children launched
+together all died with *"Context size has been exceeded"*, and a fourth died on its own output limit
+after committing nothing. You are the only child running. So: no repo-wide greps (grep one file, `|
+head -15`); `read` with `offset`/`limit`, ~40 lines at a time, never a whole file; keep any single
+command output under 15 lines; commit after every numbered step. A timeout with a compiling commit is
+a fine outcome, not a failure to hide. If you find yourself re-reading something you already read,
+stop and write instead.
