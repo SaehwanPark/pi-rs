@@ -586,6 +586,41 @@ mod tests {
     assert_eq!(status_line("a/b", TurnState::Idle, 0, 0), "");
   }
 
+  /// The line the loop draws is the projection's output, separators and all, so the
+  /// wording cannot fork back into the loop the moment the projection changes.
+  #[test]
+  fn the_status_line_is_the_projection_word_for_word() {
+    // `turns` is nonzero on purpose: a line that dropped the turn segment would
+    // still match a hand-written `model · idle · hint`, so it proves nothing.
+    let waiting = status_line("local/vulcan", TurnState::Idle, 2, 120);
+    assert_eq!(
+      waiting,
+      statusline::line(&statusline::Status {
+        model: "local/vulcan",
+        activity: statusline::Activity::Waiting,
+        turns: 2,
+        columns: 120,
+        hint: Some(WAITING_HINT),
+      })
+      .plain()
+    );
+    // The running line is the same projection with the other activity word and no
+    // hint, because enter does not submit while a turn is in flight.
+    let running = status_line("local/vulcan", TurnState::Working, 2, 120);
+    assert_eq!(
+      running,
+      statusline::line(&statusline::Status {
+        model: "local/vulcan",
+        activity: statusline::Activity::Running,
+        turns: 2,
+        columns: 120,
+        hint: None,
+      })
+      .plain()
+    );
+    assert!(!running.contains(WAITING_HINT));
+  }
+
   #[test]
   fn a_frame_is_the_buffer_rows_plus_one_line() {
     // The empty buffer is one row, so the frame is that row and the status line.
