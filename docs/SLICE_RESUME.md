@@ -29,3 +29,28 @@ command output ≤ 15 lines; `cargo test --workspace` at most twice per step (`-
 Report ≤ 25 lines. Never weaken an assertion to get green. Do not mark any ROADMAP gate checked.
 No merges, rebases, pushes, PRs; do not touch other worktrees. Check `git rev-parse HEAD` before each
 commit; if it moved without your commit, stop and report.
+
+---
+
+# Step 2: retire the refusal with a real continuation
+
+Step 1 (`2edffec`) resolves the name and **refuses** to append, because the request is built from the
+prompt alone. Keep every step-1 test passing except the ones that assert the refusal itself, and update
+those to assert continuation instead.
+
+1. Resolve the id through the **same** `resolve_session` the trace command uses (exact id or unique
+   prefix; ambiguous = error). No second resolver.
+2. Rebuild the model-visible context from what the store actually holds — checkpoint plus
+   post-checkpoint active events, per `AGENTS.md`. Do **not** hydrate the full session when a
+   checkpoint path exists.
+3. Append the new turn to the **same session id**, through the existing store append path. No new
+   session, no second file.
+4. If the rebuild is impossible, keep failing loudly with the missing part named; a partial context
+   must never be silently presented as a continuation.
+
+Required test additions (same file, provider-free where possible): a recorded session gains a second
+turn under the **same** id and the store holds exactly one session; the second request's model-visible
+messages contain the first turn's prompt (assert what the provider is actually sent).
+
+Step-1 tests that must stay: leading-dash rejection, missing value, unknown id → non-zero exit and no
+store/session created, ambiguous prefix → error.
