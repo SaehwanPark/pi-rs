@@ -436,3 +436,6 @@ impl Trace for ReportingTrace {
     self.inner.flush()
   }
 }
+
+#[cfg(test)]
+mod tests;
