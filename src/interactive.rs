@@ -285,6 +285,14 @@ impl Loop {
     self.editor.set_width(text.max(1));
   }
 
+  /// The status line this surface would draw right now.
+  ///
+  /// Cut to [`Loop::columns`] — the same width the editor is laid out at — and
+  /// never more than one line, which is what the frame counted.
+  fn status(&self) -> String {
+    status_line(&self.model, self.state, self.turns, self.columns)
+  }
+
   /// Read events until the user leaves.
   ///
   /// A turn failure ends the loop with that failure, so the terminal is restored on
@@ -351,10 +359,7 @@ impl Loop {
     let mut out = io::stdout();
     self.erase(&mut out)?;
     self.state = TurnState::Working;
-    write_line(
-      &mut out,
-      &status_line(&self.model, self.state, self.turns, self.columns),
-    )?;
+    write_line(&mut out, &self.status())?;
     out.flush()
   }
 
@@ -366,10 +371,7 @@ impl Loop {
     for row in &layout.rows {
       write_line(&mut out, row)?;
     }
-    write_line(
-      &mut out,
-      &status_line(&self.model, self.state, self.turns, self.columns),
-    )?;
+    write_line(&mut out, &self.status())?;
     let up = caret_lines_up(layout.rows.len(), layout.cursor.line);
     if up > 0 {
       queue!(out, MoveToPreviousLine(terminal_lines(up)))?;
