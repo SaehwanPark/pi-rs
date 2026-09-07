@@ -202,8 +202,14 @@ struct Loop {
   state: TurnState,
   /// Columns available to this surface, as the terminal last reported them.
   columns: usize,
-  /// Lines the last frame occupied, status line included; `0` when nothing is drawn.
-  drawn: usize,
+  /// How many lines the cursor sits below the row the current frame starts on.
+  ///
+  /// Not the frame's height: a frame ends with the cursor parked on the caret, and
+  /// the caret is usually above the frame's bottom row. This is the distance an erase
+  /// has to travel to get back to the top of what the loop owns, and `0` means the
+  /// loop owns no rows — which is the state during and after handing the screen to a
+  /// turn, because everything below that point belongs to the turn's output.
+  above: usize,
 }
 
 impl Loop {
@@ -213,7 +219,7 @@ impl Loop {
       model,
       state: TurnState::Idle,
       columns: 1,
-      drawn: 0,
+      above: 0,
     };
     surface.set_columns(columns);
     surface
@@ -266,6 +272,7 @@ impl Loop {
     // Failover changes which model answers, so the frame has to ask the runtime
     // rather than keep saying what the config said when the session opened.
     self.model = session.model().to_string();
+    take_line().map_err(terminal_failure)?;
     terminal::enable_raw_mode().map_err(terminal_failure)?;
     result.map_err(|error| run::session_error(run::SessionError::Turn(error)))?;
     self.state = TurnState::Idle;
@@ -300,24 +307,28 @@ impl Loop {
       &mut out,
       &status_line(&self.model, self.state, self.columns),
     )?;
-    self.drawn = frame_lines(layout.rows.len());
     let up = caret_lines_up(layout.rows.len(), layout.cursor.line);
     if up > 0 {
       queue!(out, MoveToPreviousLine(terminal_lines(up)))?;
     }
     queue!(out, MoveToColumn(terminal_columns(layout.cursor.column)))?;
+    // Recorded after the move, because it says where the cursor ended up rather than
+    // how much was written. The move leaves the cursor on the caret, and the caret's
+    // line index is exactly its distance from the row the frame starts on.
+    self.above = layout.cursor.line;
     out.flush()
   }
 
-  /// Pull the cursor back to where the last frame began and erase it.
+  /// Pull the cursor back to the row the last frame started on and erase from there.
   ///
-  /// Erasing from there down reaches only what this loop wrote: a frame is always
-  /// the most recent thing on the screen, so anything above it is output a turn
-  /// printed, and that output is the record the user came here to read.
+  /// The distance is [`Loop::above`], not the frame's height: overshooting upward
+  /// would take the erase into the output of an earlier turn, which is the record the
+  /// user came here to read. Erasing downward is safe because a frame is always the
+  /// most recent thing on the screen, so nothing below it belongs to anyone else.
   fn erase(&mut self, out: &mut impl Write) -> io::Result<()> {
-    if self.drawn > 0 {
-      queue!(out, MoveToPreviousLine(terminal_lines(self.drawn)))?;
-      self.drawn = 0;
+    if self.above > 0 {
+      queue!(out, MoveToPreviousLine(terminal_lines(self.above)))?;
+      self.above = 0;
     }
     queue!(out, MoveToColumn(0), Clear(ClearType::FromCursorDown))?;
     out.flush()
@@ -331,6 +342,19 @@ impl Loop {
 fn write_line(out: &mut impl Write, text: &str) -> io::Result<()> {
   out.write_all(text.as_bytes())?;
   out.write_all(b"\r\n")
+}
+
+/// Move onto a line of our own.
+///
+/// A streamed answer is not newline-terminated until the session closes, so after a
+/// turn the cursor can be sitting at the end of one. Drawing the next frame without
+/// taking a line would overwrite that answer, which is the one thing on the screen
+/// the user asked for. Called while the terminal still translates a newline into a
+/// row change, so this is the only place a bare `\n` is enough.
+fn take_line() -> io::Result<()> {
+  let mut out = io::stdout();
+  out.write_all(b"\n")?;
+  out.flush()
 }
 
 /// `pi-rs interactive`: a session that holds many turns.
@@ -500,6 +524,25 @@ mod tests {
     assert_eq!(terminal_lines(usize::from(u16::MAX) + 5), u16::MAX);
     assert_eq!(terminal_columns(7), 7);
     assert_eq!(terminal_columns(usize::from(u16::MAX) + 5), u16::MAX);
+  }
+
+  #[test]
+  fn an_erase_returns_to_the_row_the_frame_started_on() {
+    // The cursor arithmetic a redraw depends on, as the terminal sees it: writing the
+    // frame leaves the cursor one line below it, the move after that parks it on the
+    // caret, and the erase has to end on the row the frame began on. A distance that
+    // overshoots upward takes the erase into an earlier turn's output, which is the
+    // one part of the screen the loop was never allowed to touch.
+    for rows in 1..=4usize {
+      for caret_row in 0..rows {
+        let started_on = 40usize;
+        let below_the_frame = started_on + frame_lines(rows);
+        let parked_on_caret = below_the_frame - caret_lines_up(rows, caret_row);
+        assert_eq!(parked_on_caret, started_on + caret_row);
+        // What `Loop::erase` travels is the caret's own line index.
+        assert_eq!(parked_on_caret - caret_row, started_on, "{rows} rows");
+      }
+    }
   }
 
   #[test]
