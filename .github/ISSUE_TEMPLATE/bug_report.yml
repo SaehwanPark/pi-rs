@@ -1,0 +1,77 @@
+name: Bug report
+description: A runtime, provider, store, tools, or TUI behaviour that is wrong
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Redact anything sensitive before pasting. Session and trace files contain prompts,
+        paths, and sometimes credentials; pi-rs writes them under its state directory and
+        redacts durable trace output, but an issue body is not redacted.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: >
+        The command you ran, what came back, and what you expected instead. Exact strings
+        beat descriptions: paste the error line, not "it errored".
+      placeholder: |
+        pi-rs run --model local-vulcan/qwen3.8-flash "fix the build"
+        expected: a turn with two tool calls
+        actual: session aborted with `provider: stream ended before a finish reason`
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >
+        Smallest sequence that reproduces it, including the provider and model, the OS, and
+        whether a session was resumed. If it needs a specific session file, say what is in
+        it rather than attaching it.
+      placeholder: |
+        1. cargo run -p pi-rs -- run ...
+        2. ...
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: >
+        Relevant session or trace lines (redacted), a failing test name, or a benchmark
+        number with the machine it was measured on.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: pi-rs version or commit
+      description: git rev-parse --short HEAD
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - core (events, session, trace, provenance)
+        - provider
+        - store (journal, session log, blobs, import/export)
+        - tools
+        - runtime (loop, failover, context policy)
+        - tui (rendering, editor, input)
+        - cli
+        - mcp
+        - compatibility (Pi parity)
+        - build or CI
+    validations:
+      required: true
+  - type: textarea
+    id: invariant
+    attributes:
+      label: Which invariant might be violated
+      description: >
+        Optional, but useful: provenance, canonical history, unknown-not-failure, startup
+        latency, redaction, Pi compatibility, or a layer boundary. See CONTRIBUTING.md.

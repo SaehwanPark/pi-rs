@@ -1,0 +1,63 @@
+name: Pi compatibility gap
+description: pi-rs and Pi disagree about skills, prompts, packages, sessions, or extensions
+labels: ["compatibility"]
+body:
+  - type: input
+    id: pi-version
+    attributes:
+      label: Pi version
+      description: The Pi release or commit you compared against
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      description: Priority order in COMPATIBILITY.md is skills, prompts, packages, sessions,
+        extension tools and commands, then lifecycle
+      options:
+        - skills
+        - prompts
+        - packages
+        - sessions
+        - extension tools or commands
+        - lifecycle
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: pi-says
+    attributes:
+      label: What Pi does
+      description: >
+        The observed behaviour, with the file or directory layout that produces it. Quote
+        the SKILL.md frontmatter, template body, session line, or manifest rather than
+        paraphrasing it — a paraphrase loses exactly the detail that decides the mapping.
+    validations:
+      required: true
+  - type: textarea
+    id: pi-rs-says
+    attributes:
+      label: What pi-rs does
+      description: >
+        Include the pi-rs command you ran. Where a compatibility report exists, paste the
+        line for this path: a report that stayed silent about it is part of the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: fixture
+    attributes:
+      label: Representative input
+      description: >
+        A minimal fixture that shows the disagreement, or a description precise enough that
+        one could be written. COMPATIBILITY.md treats silence as a claim, so the fixture is
+        what decides whether pi-rs should follow Pi, report a warning, or refuse.
+      render: json
+  - type: textarea
+    id: decision
+    attributes:
+      label: Which way should it go
+      description: >
+        Follow Pi, report a warning naming the path and reason, or refuse and say what could
+        not be carried. An import never executes anything and never invents provenance, so
+        some disagreements are resolved by reporting, not by carrying.

@@ -24,7 +24,7 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [x] Add `ROADMAP.md`.
 - [x] Add `AGENTS.md`.
 - [x] Add canonical project design under `docs/`.
-- [ ] Define contribution and issue templates.
+- [x] Define contribution and issue templates.
 - [x] Add benchmark harness directory.
 
 ### Core contracts
