@@ -18,8 +18,9 @@
 //!   shared by the live transcript, `pi-rs trace`, and any later export.
 //!
 //! Plus [`live`] for streaming, [`command`] for input classification, [`mod@format`] for
-//! the repeated scalar renderings, and [`term`] for the two environment probes a
-//! surface needs before it can decide what to emit.
+//! the repeated scalar renderings, [`statusline`] for the one-line snapshot of what
+//! the loop is doing, and [`term`] for the two environment probes a surface needs
+//! before it can decide what to emit.
 //!
 //! # Two destinations
 //!
@@ -40,6 +41,7 @@ pub mod command;
 pub mod format;
 pub mod line;
 pub mod live;
+pub mod statusline;
 pub mod style;
 pub mod term;
 pub mod trace;
@@ -49,6 +51,7 @@ pub mod width;
 pub use command::{Input, Span};
 pub use line::{NarrowDecoration, RenderLine, Segment};
 pub use live::{Surface, is_streamed, routine_stream};
+pub use statusline::{Activity, Status, line};
 pub use style::{Color, Palette, Role, Style};
 pub use term::{ColorChoice, Stream};
 pub use trace::{RenderedEntry, TraceSelection, render_trace};
