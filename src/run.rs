@@ -1,6 +1,7 @@
 use std::{
   fs,
   io::{self, Stderr, Stdout, Write},
+  path::Path,
 };
 
 use pi_rs_core::{
@@ -21,10 +22,15 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
   // A one-shot run is a session that holds exactly one turn. It is built on the
   // same handle an interactive loop reuses for many turns, so the composition is
   // written once, in `open_session`.
-  open_session(&args, |session| match session.turn(&args.prompt) {
-    Ok(()) => session.close().map_err(session_error),
-    Err(error) => Err(turn_error(&session.close_after_failure(error))),
-  })
+  open_session(
+    &args.config,
+    &args.cwd,
+    &args.surface,
+    |session| match session.turn(&args.prompt) {
+      Ok(()) => session.close().map_err(session_error),
+      Err(error) => Err(turn_error(&session.close_after_failure(error))),
+    },
+  )
 }
 
 /// Open one durable session and hand it to `turns`, which may run as many turns as
@@ -38,12 +44,14 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
 /// `&mut dyn Trace`: a handle that owned both would be self-referential. Scoping
 /// the borrow to this call is what keeps it sound, and it is why a caller closes
 /// from inside `turns` rather than after this function returns.
-fn open_session(
-  args: &RunArgs,
+pub(crate) fn open_session(
+  config: &Path,
+  cwd: &Path,
+  surface: &SurfaceArgs,
   turns: impl FnOnce(&mut SessionHandle<'_>) -> Result<(), String>,
 ) -> Result<(), String> {
-  let config_text = fs::read_to_string(&args.config)
-    .map_err(|error| format!("cannot read config '{}': {error}", args.config.display()))?;
+  let config_text = fs::read_to_string(config)
+    .map_err(|error| format!("cannot read config '{}': {error}", config.display()))?;
   let config =
     RuntimeConfig::parse(&config_text).map_err(|error| format!("invalid config: {error}"))?;
   let endpoint = config.endpoint_for(&config.primary).ok_or_else(|| {
@@ -61,8 +69,8 @@ fn open_session(
   // overwhelming majority of sessions never need.
   let backup = backup_provider(&config)?;
 
-  let workspace = Workspace::new(&args.cwd)
-    .map_err(|error| format!("invalid workspace '{}': {error}", args.cwd.display()))?
+  let workspace = Workspace::new(cwd)
+    .map_err(|error| format!("invalid workspace '{}': {error}", cwd.display()))?
     .with_read_outside(false);
   let canonical_cwd = workspace
     .root()
@@ -118,7 +126,7 @@ fn open_session(
     })
     .map_err(|error| format!("cannot start durable session: {error}"))?;
 
-  let options = surface_options(&args.surface);
+  let options = surface_options(surface);
   let mut trace = ReportingTrace::new(StoreTrace::new(session), options);
   let progress = CliProgress::new(&tools, options);
   let mut runtime = TurnLoop::new(

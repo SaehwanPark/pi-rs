@@ -39,7 +39,7 @@ fn a_second_turn_on_one_handle_sends_the_first_turn_with_it() {
     surface: SurfaceArgs::default(),
   };
 
-  open_session(&args, |session| {
+  open_session(&args.config, &args.cwd, &args.surface, |session| {
     session
       .turn("remember the word orchid")
       .map_err(|error| turn_error(&error))?;
