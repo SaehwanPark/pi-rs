@@ -178,6 +178,15 @@ impl SessionHandle<'_> {
   ///
   /// The cancellation token is created here, per turn, exactly as a one-shot run
   /// creates one: a turn carries its own cancellation, and nothing shares it.
+  /// Which model will answer the next request.
+  ///
+  /// Asked of the runtime rather than read from the config once: a failover changes
+  /// the answer mid-session, and a surface that named the model configured at the
+  /// start would be quietly wrong from that moment on.
+  pub fn model(&self) -> ModelRef {
+    self.runtime.active_model()
+  }
+
   pub fn turn(&mut self, prompt: &str) -> Result<(), TurnError> {
     self
       .runtime
@@ -230,7 +239,7 @@ pub enum SessionError {
   Transcript(io::Error),
 }
 
-fn session_error(error: SessionError) -> String {
+pub(crate) fn session_error(error: SessionError) -> String {
   match error {
     SessionError::Turn(error) => turn_error(&error),
     SessionError::Transcript(error) => format!("cannot write transcript: {error}"),

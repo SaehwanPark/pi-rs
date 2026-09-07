@@ -1,0 +1,514 @@
+//! `pi-rs interactive`: one durable session, many turns, one terminal.
+//!
+//! The buffer ([`pi_rs_tui::editor`]), the keymap ([`pi_rs_tui::keys`]), and the
+//! transcript renderer already exist. What they deliberately do not contain is the
+//! loop: reading keys, owning raw mode, and deciding whether a keystroke means
+//! "leave" are composition and terminal plumbing, and a crate that renders events
+//! must not be the one that decides what a key means. That is why this module lives
+//! in the composition root and pulls the runtime in through [`crate::run`].
+//!
+//! # One screen
+//!
+//! ```text
+//! > what the user is typing           <- Editor::display(PROMPT_PREFIX)
+//!   and its continuation rows
+//! openai/gpt-5 · idle · enter submits, ctrl-c quits   <- one status line
+//! ```
+//!
+//! There is no alternate screen. A turn's answer and transcript are ordinary writes
+//! to stdout and stderr, and they belong in the terminal's scrollback the way any
+//! other program's output does; a frame that kept its ordering intact would have to
+//! own the whole screen and take the runtime's output with it. So the frame is
+//! drawn, erased before each turn, and redrawn underneath whatever the turn printed.
+//!
+//! # Redraw discipline
+//!
+//! A frame is written only when something visible changed: the buffer changed, the
+//! terminal was resized, or a turn ended. [`Outcome::Unchanged`] and an unmapped key
+//! draw nothing, which is what keeps a held-down key from repainting the screen.
+//!
+//! # Why raw mode is suspended for a turn
+//!
+//! `crossterm::terminal::enable_raw_mode` is `cfmakeraw`, which clears `OPOST` and
+//! `ONLCR`: a `\n` stops carrying the column reset with it. This module writes its
+//! own `\r\n`, but a turn's output is written by the runtime through plain writers
+//! that do not know they are attached to a raw terminal, and would render as a
+//! staircase. Raw mode is therefore handed back for the duration of a turn. The
+//! side effect is honest and documented: inside a turn, Ctrl-C is the terminal's own
+//! signal rather than a key this loop reads, and interrupting a turn is a separate
+//! runtime slice rather than something to imitate here.
+
+use std::io::{self, Write};
+
+use crossterm::{
+  cursor::{MoveToColumn, MoveToPreviousLine},
+  event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+  queue,
+  terminal::{self, Clear, ClearType},
+};
+
+use pi_rs_tui::{Editor, Intent, Outcome, display_width, keys::intent, term, truncate};
+
+use crate::{
+  cli::{InteractiveArgs, SurfaceArgs},
+  run::{self, SessionHandle},
+};
+
+/// What is drawn before the first row of the buffer.
+const PROMPT_PREFIX: &str = "> ";
+
+/// Columns to assume when the terminal will not say how wide it is.
+///
+/// Reaching this needs a terminal that answers `is a terminal` but not `size`,
+/// which is unusual enough that guessing is better than refusing to draw.
+const FALLBACK_COLUMNS: usize = 80;
+
+/// What the status line reports about the session's turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnState {
+  /// Waiting for input.
+  Idle,
+  /// A turn is running; no event is read until it ends.
+  Working,
+}
+
+/// What one terminal event asks the loop to do.
+///
+/// The whole of the loop's decision-making, made in a function that has never seen
+/// a terminal: see [`action`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum LoopAction {
+  /// Hand this intent to the buffer, then repaint if the buffer changed.
+  Edit(Intent),
+  /// Ctrl-C with something typed: keep the draft and do nothing else.
+  KeepDraft,
+  /// Leave the loop.
+  Quit,
+  /// The terminal is `columns` wide now; reflow the buffer and repaint.
+  Resize { columns: usize },
+}
+
+/// Decide what one event means, without touching a terminal.
+///
+/// `Ctrl-C` is decided here rather than in the keymap, and the fact the keymap
+/// cannot have is whether anything is typed, which `buffer_is_empty` supplies. An
+/// empty buffer means the user meant to leave. Anything in it means they did not,
+/// and neither exiting nor discarding their text is this loop's to choose.
+///
+/// Everything else goes to the keymap, including events it reports as
+/// [`Intent::Noop`]: an unmapped key is an edit that changed nothing, and "changed
+/// nothing" is already how the loop decides not to repaint.
+pub fn action(event: &Event, buffer_is_empty: bool) -> LoopAction {
+  if is_ctrl_c(event) {
+    return if buffer_is_empty {
+      LoopAction::Quit
+    } else {
+      LoopAction::KeepDraft
+    };
+  }
+  if let Event::Resize(columns, _rows) = event {
+    // Rows are what a surface that scrolls or pages needs. This one draws at the
+    // bottom of the screen and never scrolls, so only the width changes anything.
+    return LoopAction::Resize {
+      columns: usize::from(*columns),
+    };
+  }
+  LoopAction::Edit(intent(event))
+}
+
+/// The one key the keymap deliberately refuses to bind.
+///
+/// A terminal delivering `Ctrl-C` as the byte `0x03` still arrives here, because
+/// crossterm decodes that byte to `Char('c')` with `CONTROL`. A release is ignored:
+/// on platforms that report press and release, treating both as keystrokes would
+/// double every edit, and a release cannot be the first statement of an intent.
+fn is_ctrl_c(event: &Event) -> bool {
+  let Event::Key(key) = event else {
+    return false;
+  };
+  key.kind != KeyEventKind::Release
+    && key.modifiers.contains(KeyModifiers::CONTROL)
+    && matches!(key.code, KeyCode::Char('c' | 'C'))
+}
+
+/// The one status line: which model answers, and what the session is doing.
+///
+/// Cut to `columns` because a status line that wraps leaves the frame holding more
+/// lines than the loop counted, and every later redraw would land on the wrong row.
+/// The model is named in both states rather than only in one: knowing which model
+/// answered is what makes a surprising answer interpretable afterwards.
+fn status_line(model: &str, state: TurnState, columns: usize) -> String {
+  let line = match state {
+    TurnState::Idle => format!("{model} · idle · enter submits, ctrl-c quits"),
+    TurnState::Working => format!("{model} · turn running"),
+  };
+  truncate(&line, columns)
+}
+
+/// Rows of the frame for a buffer of `rows` display rows plus the status line.
+fn frame_lines(rows: usize) -> usize {
+  rows + 1
+}
+
+/// Lines to move up from just below the frame to land on display row `caret_row`.
+///
+/// The frame is `rows` buffer rows then the status line, and the writes above leave
+/// the cursor one line below that, so the distance back is the whole frame minus the
+/// row the caret is on.
+fn caret_lines_up(rows: usize, caret_row: usize) -> usize {
+  frame_lines(rows) - caret_row
+}
+
+/// A line count for a cursor move; terminals count these in 16 bits.
+fn terminal_lines(lines: usize) -> u16 {
+  u16::try_from(lines).unwrap_or(u16::MAX)
+}
+
+/// A column for a cursor move, on the same terms as [`terminal_lines`].
+fn terminal_columns(columns: usize) -> u16 {
+  u16::try_from(columns).unwrap_or(u16::MAX)
+}
+
+/// Raw mode for exactly as long as this value is alive.
+///
+/// `Drop` is the only exit, and that is the point: every path out of the loop —
+/// Ctrl-C, a turn that failed, an early `?`, a panic unwinding through a caller —
+/// passes through here, so the terminal is never left in a mode that nothing is
+/// driving any more.
+struct RawTerminal;
+
+impl RawTerminal {
+  fn enter() -> io::Result<Self> {
+    terminal::enable_raw_mode()?;
+    Ok(Self)
+  }
+}
+
+impl Drop for RawTerminal {
+  fn drop(&mut self) {
+    // A destructor has nowhere to report a failure and nothing to retry it with.
+    // Failing here means the terminal is still raw, which the caller cannot fix
+    // either; the reason to have entered raw mode is gone, and this is the last
+    // thing this program can do about it.
+    let _ = terminal::disable_raw_mode();
+  }
+}
+
+/// The interactive loop: the buffer, the frame it draws, the events it reads.
+struct Loop {
+  editor: Editor,
+  /// What the status line names as the model.
+  model: String,
+  state: TurnState,
+  /// Columns available to this surface, as the terminal last reported them.
+  columns: usize,
+  /// Lines the last frame occupied, status line included; `0` when nothing is drawn.
+  drawn: usize,
+}
+
+impl Loop {
+  fn new(model: String, columns: usize) -> Self {
+    let mut surface = Self {
+      editor: Editor::new(),
+      model,
+      state: TurnState::Idle,
+      columns: 1,
+      drawn: 0,
+    };
+    surface.set_columns(columns);
+    surface
+  }
+
+  /// Set the width the buffer soft-wraps at and the status line is cut to.
+  fn set_columns(&mut self, columns: usize) {
+    self.columns = columns.max(1);
+    // The prefix is drawn in front of the first row, so it spends columns that the
+    // buffer cannot also spend on text.
+    let text = self.columns.saturating_sub(display_width(PROMPT_PREFIX));
+    self.editor.set_width(text.max(1));
+  }
+
+  /// Read events until the user leaves.
+  ///
+  /// A turn failure ends the loop with that failure, so the terminal is restored on
+  /// the way out and the reason is what gets reported.
+  fn run(&mut self, session: &mut SessionHandle<'_>) -> Result<(), String> {
+    self.draw().map_err(terminal_failure)?;
+    loop {
+      let event = event::read().map_err(|error| format!("cannot read the terminal: {error}"))?;
+      match action(&event, self.editor.is_empty()) {
+        LoopAction::Quit => return Ok(()),
+        // Something is typed, so the key meant "stop that", not "leave". The draft
+        // stays where it is, and there is nothing new to draw.
+        LoopAction::KeepDraft => {}
+        LoopAction::Resize { columns } => {
+          self.set_columns(columns);
+          self.draw().map_err(terminal_failure)?;
+        }
+        LoopAction::Edit(key) => match self.editor.apply(key) {
+          // Nothing moved, so nothing moved on the screen.
+          Outcome::Unchanged => {}
+          Outcome::Changed | Outcome::Cancelled => self.draw().map_err(terminal_failure)?,
+          Outcome::Submit(prompt) => self.turn(session, &prompt)?,
+        },
+      }
+    }
+  }
+
+  /// One turn of the open session, with the screen handed over while it runs.
+  fn turn(&mut self, session: &mut SessionHandle<'_>, prompt: &str) -> Result<(), String> {
+    self.hand_over().map_err(terminal_failure)?;
+    // See the module comment: a turn writes plain `\n`s, and raw mode has taken the
+    // terminal's own translation of them away. From here until the matching enable,
+    // the terminal is the one the runtime's writers expect.
+    terminal::disable_raw_mode().map_err(terminal_failure)?;
+    let result = session.turn(prompt);
+    // Failover changes which model answers, so the frame has to ask the runtime
+    // rather than keep saying what the config said when the session opened.
+    self.model = session.model().to_string();
+    terminal::enable_raw_mode().map_err(terminal_failure)?;
+    result.map_err(|error| run::session_error(run::SessionError::Turn(error)))?;
+    self.state = TurnState::Idle;
+    self.draw().map_err(terminal_failure)
+  }
+
+  /// Replace the frame with the one line that stays up while a turn runs.
+  ///
+  /// The buffer is gone because the submitted prompt is what the turn prints first,
+  /// and a frame left on the screen would be counted as more lines than the terminal
+  /// still holds by the time the next redraw lands.
+  fn hand_over(&mut self) -> io::Result<()> {
+    let mut out = io::stdout();
+    self.erase(&mut out)?;
+    self.state = TurnState::Working;
+    write_line(
+      &mut out,
+      &status_line(&self.model, self.state, self.columns),
+    )?;
+    out.flush()
+  }
+
+  /// Write the frame, then leave the terminal's cursor on the caret.
+  fn draw(&mut self) -> io::Result<()> {
+    let mut out = io::stdout();
+    self.erase(&mut out)?;
+    let layout = self.editor.display(PROMPT_PREFIX);
+    for row in &layout.rows {
+      write_line(&mut out, row)?;
+    }
+    write_line(
+      &mut out,
+      &status_line(&self.model, self.state, self.columns),
+    )?;
+    self.drawn = frame_lines(layout.rows.len());
+    let up = caret_lines_up(layout.rows.len(), layout.cursor.line);
+    if up > 0 {
+      queue!(out, MoveToPreviousLine(terminal_lines(up)))?;
+    }
+    queue!(out, MoveToColumn(terminal_columns(layout.cursor.column)))?;
+    out.flush()
+  }
+
+  /// Pull the cursor back to where the last frame began and erase it.
+  ///
+  /// Erasing from there down reaches only what this loop wrote: a frame is always
+  /// the most recent thing on the screen, so anything above it is output a turn
+  /// printed, and that output is the record the user came here to read.
+  fn erase(&mut self, out: &mut impl Write) -> io::Result<()> {
+    if self.drawn > 0 {
+      queue!(out, MoveToPreviousLine(terminal_lines(self.drawn)))?;
+      self.drawn = 0;
+    }
+    queue!(out, MoveToColumn(0), Clear(ClearType::FromCursorDown))?;
+    out.flush()
+  }
+}
+
+/// One line of the frame.
+///
+/// The column reset is written here rather than left to the terminal, because raw
+/// mode has removed the translation that would otherwise have supplied it.
+fn write_line(out: &mut impl Write, text: &str) -> io::Result<()> {
+  out.write_all(text.as_bytes())?;
+  out.write_all(b"\r\n")
+}
+
+/// `pi-rs interactive`: a session that holds many turns.
+pub fn execute(args: InteractiveArgs) -> Result<(), String> {
+  if !term::Stream::Stdout.is_terminal() {
+    // Checked before anything is opened, so a piped invocation is one clear line
+    // rather than a terminal that nobody put back.
+    return Err(
+      "interactive needs a terminal on stdout; for one turn in a script use `pi-rs run`"
+        .to_string(),
+    );
+  }
+  // The surface is not configurable here. Colour and width come from the terminal
+  // the transcript is written to, which this command already requires.
+  let surface = SurfaceArgs::default();
+  run::open_session(&args.config, &args.cwd, &surface, |session| {
+    // Raw mode is entered only once the session is open, so a bad config stays what
+    // it was: a line printed on a terminal nothing has rearranged. From here on the
+    // guard is what restores it, including when `run` returns an error.
+    let _terminal = RawTerminal::enter().map_err(terminal_failure)?;
+    let columns = term::Stream::Stdout.width().unwrap_or(FALLBACK_COLUMNS);
+    Loop::new(session.model().to_string(), columns).run(session)
+  })
+}
+
+/// An I/O failure against the terminal, in the words this command reports.
+fn terminal_failure(error: io::Error) -> String {
+  format!("cannot use the terminal: {error}")
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  use crossterm::event::KeyEvent;
+
+  fn key(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> Event {
+    Event::Key(KeyEvent::new_with_kind(code, modifiers, kind))
+  }
+
+  fn ctrl_c(kind: KeyEventKind) -> Event {
+    key(KeyCode::Char('c'), KeyModifiers::CONTROL, kind)
+  }
+
+  #[test]
+  fn ctrl_c_on_an_empty_buffer_leaves_the_loop() {
+    assert_eq!(action(&ctrl_c(KeyEventKind::Press), true), LoopAction::Quit);
+  }
+
+  #[test]
+  fn ctrl_c_with_text_typed_neither_quits_nor_touches_the_buffer() {
+    let action = action(&ctrl_c(KeyEventKind::Press), false);
+    // Not `Quit`, and not an intent the buffer would be handed: `KeepDraft` is the
+    // action whose only implementation is that the loop does nothing.
+    assert_eq!(action, LoopAction::KeepDraft);
+    let mut editor = Editor::new();
+    editor.apply(Intent::Paste("half a sentence".to_string()));
+    if let LoopAction::Edit(intent) = action {
+      editor.apply(intent);
+    }
+    assert_eq!(editor.text(), "half a sentence");
+  }
+
+  #[test]
+  fn ctrl_c_is_caught_whatever_shape_the_terminal_sends() {
+    // The byte `0x03` is decoded to `Char('c')` plus `CONTROL` by crossterm, and a
+    // terminal that reports the shift state as well must not be a second case.
+    assert_eq!(
+      action(&ctrl_c(KeyEventKind::Repeat), false),
+      LoopAction::KeepDraft
+    );
+    assert_eq!(
+      action(&ctrl_c(KeyEventKind::Repeat), true),
+      LoopAction::Quit
+    );
+    // A release is not a second statement of an intent.
+    assert_eq!(
+      action(&ctrl_c(KeyEventKind::Release), true),
+      LoopAction::Edit(Intent::Noop)
+    );
+  }
+
+  #[test]
+  fn other_control_keys_reach_the_keymap() {
+    // `Ctrl-C` is the only key taken away from the buffer, and taking it by
+    // modifier alone would swallow `Ctrl-D`, `Ctrl-K`, and the rest of readline.
+    assert_eq!(
+      action(
+        &key(
+          KeyCode::Char('d'),
+          KeyModifiers::CONTROL,
+          KeyEventKind::Press
+        ),
+        true
+      ),
+      LoopAction::Edit(Intent::DeleteForward)
+    );
+    assert_eq!(
+      action(
+        &key(KeyCode::Char('c'), KeyModifiers::NONE, KeyEventKind::Press),
+        true
+      ),
+      LoopAction::Edit(Intent::Insert('c'))
+    );
+  }
+
+  #[test]
+  fn everything_else_is_the_keymaps() {
+    let enter = key(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Press);
+    assert_eq!(action(&enter, false), LoopAction::Edit(Intent::Submit));
+    let escape = key(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Press);
+    assert_eq!(action(&escape, false), LoopAction::Edit(Intent::Cancel));
+    // An event with no binding is an edit that changes nothing, which is already the
+    // loop's signal not to repaint.
+    let unknown = key(KeyCode::F(7), KeyModifiers::NONE, KeyEventKind::Press);
+    assert_eq!(action(&unknown, true), LoopAction::Edit(Intent::Noop));
+    let paste = Event::Paste("two\nlines".to_string());
+    assert_eq!(
+      action(&paste, true),
+      LoopAction::Edit(Intent::Paste("two\nlines".to_string()))
+    );
+  }
+
+  #[test]
+  fn a_resize_reports_the_new_width() {
+    let event = Event::Resize(120, 40);
+    assert_eq!(action(&event, true), LoopAction::Resize { columns: 120 });
+  }
+
+  #[test]
+  fn the_status_line_names_the_model_and_the_turn() {
+    let idle = status_line("local/vulcan", TurnState::Idle, 80);
+    assert!(idle.starts_with("local/vulcan"));
+    assert!(idle.contains("idle"));
+    let working = status_line("local/vulcan", TurnState::Working, 80);
+    assert!(working.starts_with("local/vulcan"));
+    assert!(working.contains("turn"));
+    assert!(!working.contains("ctrl-c"));
+    // One line, whatever the state.
+    assert_eq!(idle.matches('\n').count(), 0);
+    assert_eq!(working.matches('\n').count(), 0);
+  }
+
+  #[test]
+  fn the_status_line_never_spills_onto_a_second_row() {
+    let wide = status_line(
+      "a/very-long-model-name-that-does-not-fit",
+      TurnState::Idle,
+      20,
+    );
+    assert!(display_width(&wide) <= 20, "{wide}");
+    assert_eq!(status_line("a/b", TurnState::Idle, 0), "");
+  }
+
+  #[test]
+  fn a_frame_is_the_buffer_rows_plus_one_line() {
+    // The empty buffer is one row, so the frame is that row and the status line.
+    let editor = Editor::new();
+    let layout = editor.display(PROMPT_PREFIX);
+    assert_eq!(frame_lines(layout.rows.len()), 2);
+    // Caret on the only row of a two-line frame: two lines up from below it.
+    assert_eq!(caret_lines_up(1, 0), 2);
+    // Caret on the last buffer row of a three-line frame: two lines up, so it never
+    // lands on the status line or below it.
+    assert_eq!(caret_lines_up(2, 1), 2);
+    assert_eq!(terminal_lines(3), 3);
+    assert_eq!(terminal_lines(usize::from(u16::MAX) + 5), u16::MAX);
+    assert_eq!(terminal_columns(7), 7);
+    assert_eq!(terminal_columns(usize::from(u16::MAX) + 5), u16::MAX);
+  }
+
+  #[test]
+  fn the_buffer_wraps_inside_the_terminal_minus_the_prefix() {
+    let surface = Loop::new("local/vulcan".to_string(), 40);
+    assert_eq!(surface.editor.width(), 38);
+    // A width the buffer cannot work with still leaves it able to draw one column.
+    let narrow = Loop::new("local/vulcan".to_string(), 1);
+    assert_eq!(narrow.editor.width(), 1);
+    assert_eq!(narrow.columns, 1);
+  }
+}
