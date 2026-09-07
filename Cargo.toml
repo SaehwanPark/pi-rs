@@ -49,6 +49,7 @@ pi-rs-provider.workspace = true
 pi-rs-tools.workspace = true
 pi-rs-runtime.workspace = true
 pi-rs-tui.workspace = true
+crossterm.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
