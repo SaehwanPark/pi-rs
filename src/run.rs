@@ -4,8 +4,9 @@ use std::{
 };
 
 use pi_rs_core::{
-  AttributedMessage, CancelToken, EventEnvelope, ModelProvider, ModelRef, ReasoningProvenance,
-  RuntimeConfig, SessionEndReason, SessionHeader, SessionId, SinkError, TraceId, now_millis,
+  AttributedMessage, CancelToken, EventEnvelope, Message, ModelProvider, ModelRef,
+  ReasoningProvenance, RuntimeConfig, SessionEndReason, SessionHeader, SessionId, SinkError,
+  TraceId, now_millis,
 };
 use pi_rs_provider::{Deferred, OpenAiCompat, ProviderConfig};
 use pi_rs_runtime::{StoreTrace, Trace, TurnError, TurnLoop, TurnProgress};
@@ -77,27 +78,52 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
     }
   }
   let write_policy = WritePolicy::from_retention(&config.trace, &config.redaction);
-  if let Some(wanted) = args.resume.as_deref() {
-    return Err(resume_refusal(&config.state_dir, &write_policy, wanted)?);
-  }
+  // The name is resolved against a read-only store, before `Store::open`, because `open`
+  // creates the state layout: an id the store does not hold must leave the store exactly
+  // as it was found, with no session written and no provider contacted. It is resolved by
+  // the trace command's own rule, so a prefix cannot name two things and the two commands
+  // cannot disagree about what one session id means.
+  let continuing = match args.resume.as_deref() {
+    Some(wanted) => {
+      let read_only = Store::new(&config.state_dir, write_policy.clone());
+      Some(crate::trace::resolve_session(&read_only, Some(wanted))?)
+    }
+    None => None,
+  };
   let store = Store::open(&config.state_dir, write_policy)
     .map_err(|error| format!("cannot open durable state: {error}"))?;
-  store
-    .apply_retention(&config.trace, now_millis(), 1)
-    .map_err(|error| format!("cannot apply trace retention: {error}"))?;
-  let session_id = SessionId::new();
-  let session = store
-    .begin(SessionHeader {
-      session_id: session_id.clone(),
-      version: pi_rs_core::session::SESSION_SCHEMA_VERSION,
-      started_at_ms: now_millis(),
-      working_dir: canonical_cwd.clone(),
-      model: provider.model().clone(),
-      parent_session: None,
-      branched_from_event: None,
-      imported_from: None,
-    })
-    .map_err(|error| format!("cannot start durable session: {error}"))?;
+  // Retention sheds history and protects only the newest sessions, so a pass would delete
+  // the older session `--resume` was asked to continue. Shedding is what starting a new
+  // session is for, and nothing else.
+  if continuing.is_none() {
+    store
+      .apply_retention(&config.trace, now_millis(), 1)
+      .map_err(|error| format!("cannot apply trace retention: {error}"))?;
+  }
+  let context = match &continuing {
+    Some(session_id) => continue_context(&store, session_id)?,
+    None => Vec::new(),
+  };
+  let session_id = continuing.clone().unwrap_or_else(SessionId::new);
+  let session = match &continuing {
+    // The existing log is reopened and appended to: a continuation is one session file,
+    // and a second file under a new id is not a continuation of anything.
+    Some(session_id) => store
+      .resume(session_id)
+      .map_err(|error| format!("cannot continue session {}: {error}", session_id.as_str()))?,
+    None => store
+      .begin(SessionHeader {
+        session_id: session_id.clone(),
+        version: pi_rs_core::session::SESSION_SCHEMA_VERSION,
+        started_at_ms: now_millis(),
+        working_dir: canonical_cwd.clone(),
+        model: provider.model().clone(),
+        parent_session: None,
+        branched_from_event: None,
+        imported_from: None,
+      })
+      .map_err(|error| format!("cannot start durable session: {error}"))?,
+  };
 
   let options = surface_options(&args.surface);
   let mut trace = ReportingTrace::new(StoreTrace::new(session), options);
@@ -115,6 +141,8 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
       session_id,
       TraceId::new(),
     )
+    // Empty for a session that has just begun, so this only ever carries a resumed one.
+    .with_messages(context)
     .with_working_dir(canonical_cwd)
     .with_thinking(config.thinking);
     if let Some(backup) = &backup {
@@ -161,30 +189,45 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
 /// failover gate needs beforehand — the model reference and the capability
 /// declaration — is read from config, so a backup that is never needed costs
 /// nothing at startup and never touches a credential it does not use.
-/// Why `--resume <wanted>` cannot be honoured, or why the name was rejected.
+/// The model-visible context a resumed session is asked to continue from.
 ///
-/// The name is resolved against a read-only store, before `Store::open`, because
-/// `open` creates the state layout: an id the store does not hold must leave the store
-/// exactly as it was found, with no session written and no provider contacted.
+/// This is the store's checkpoint path, not a full hydration: where a checkpoint barrier
+/// exists the records before it are already summarized inside the capsule, so the
+/// post-barrier window is both the cheaper and the honest reading of what a live session
+/// would have held.
 ///
-/// A session the store does hold is reported as not continuable rather than appended
-/// to. `run_turn` builds its request from the prompt alone, so a turn recorded under
-/// an existing session id would be a fresh conversation wearing that id — a
-/// continuation fabricated rather than rebuilt. Rebuilding the model-visible context
-/// from the session log is what retires this refusal.
-fn resume_refusal(
-  state_dir: &str,
-  write_policy: &WritePolicy,
-  wanted: &str,
-) -> Result<String, String> {
-  let store = Store::new(state_dir, write_policy.clone());
-  let session = crate::trace::resolve_session(&store, Some(wanted))?;
-  Ok(format!(
-    "cannot continue session {}: the model-visible context of a recorded session is not \
-     rebuilt from its session log, and a turn without that context is a new session, not \
-     a continuation",
-    session.as_str()
-  ))
+/// A context that cannot be rebuilt is refused here rather than answered with a shorter
+/// conversation. Silently dropping the part that is missing is how a continuation becomes
+/// a fabrication: the user asked to continue a session, so the answer has to say which
+/// part of it could not be recovered.
+fn continue_context(store: &Store, session_id: &SessionId) -> Result<Vec<Message>, String> {
+  let restored = store
+    .restore(session_id)
+    .map_err(|error| format!("cannot continue session {session_id}: {error}"))?;
+  if restored.malformed_records > 0 {
+    return Err(format!(
+      "cannot continue session {}: {} record(s) of its session log are unreadable, so the \
+       earlier turns it would continue from are missing",
+      session_id.as_str(),
+      restored.malformed_records
+    ));
+  }
+  if restored.messages.is_empty() && restored.summarized_messages > 0 {
+    return Err(format!(
+      "cannot continue session {}: all {} recorded message(s) were summarized into its \
+       checkpoint capsule and nothing survives past the barrier, and the runtime cannot \
+       place a capsule in front of a model",
+      session_id.as_str(),
+      restored.summarized_messages
+    ));
+  }
+  Ok(
+    restored
+      .messages
+      .into_iter()
+      .map(|message| message.message)
+      .collect(),
+  )
 }
 
 fn backup_provider(config: &RuntimeConfig) -> Result<Option<Deferred>, String> {

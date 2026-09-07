@@ -1,19 +1,26 @@
-//! `pi-rs run --resume`: the flag surface and the paths that refuse to run.
+//! `pi-rs run --resume`: the flag surface, the paths that refuse to run, and a turn
+//! appended to a recorded session.
 //!
 //! These tests drive the binary and check what the command leaves behind, because the
 //! contract is about the store as much as about the message: a name that does not match
-//! a recorded session must not be able to create one, and a value that looks like a
-//! flag must be refused while the command line is still all the command has read.
+//! a recorded session must not be able to create one, a value that looks like a
+//! flag must be refused while the command line is still all the command has read, and a
+//! name that does match must gain a turn in the same session file rather than a new one.
 //!
-//! No test here needs a provider. The endpoint points at a port that was bound and
+//! The refusals need no provider: their endpoint points at a port that was bound and
 //! released, so any request would fail with a connection error rather than a resume
-//! error, which is what makes "the run never reached the provider" visible.
+//! error, which is what makes "the run never reached the provider" visible. The one
+//! continuation test answers from a fake provider, because only a request shows what the
+//! model was actually given to continue from.
 
 use std::{
   fs,
-  net::TcpListener,
+  io::{Read, Write},
+  net::{SocketAddr, TcpListener, TcpStream},
   path::{Path, PathBuf},
   process::{Command, Output},
+  thread,
+  time::{Duration, Instant},
 };
 
 use pi_rs_core::{
@@ -35,6 +42,12 @@ fn closed_endpoint() -> String {
 
 /// Config whose store root is `root/state`, which may or may not exist yet.
 fn write_config(root: &Path) -> PathBuf {
+  write_config_at(root, &closed_endpoint())
+}
+
+/// The same config answering from `base_url`, so a test can hold the store still and
+/// move only the endpoint.
+fn write_config_at(root: &Path, base_url: &str) -> PathBuf {
   let state = root.join("state");
   let mut config = RuntimeConfig::new(
     ModelRef::new("fake", "agent"),
@@ -43,7 +56,7 @@ fn write_config(root: &Path) -> PathBuf {
   config.endpoints.push(ModelEndpoint {
     provider: "fake".into(),
     model: "agent".into(),
-    base_url: Some(closed_endpoint()),
+    base_url: Some(base_url.to_string()),
     api_key_env: None,
     api_key: None,
     capabilities: ModelCapabilities {
@@ -83,12 +96,17 @@ fn recorded_count(state: &Path) -> usize {
 }
 
 fn run(config: &Path, cwd: &Path, extra: &[&str]) -> Output {
+  run_prompt(config, cwd, "continue this", extra)
+}
+
+fn run_prompt(config: &Path, cwd: &Path, prompt: &str, extra: &[&str]) -> Output {
   Command::new(env!("CARGO_BIN_EXE_pi-rs"))
     .args(["run", "--config"])
     .arg(config)
     .arg("--cwd")
     .arg(cwd)
-    .args(["--prompt", "continue this"])
+    .arg("--prompt")
+    .arg(prompt)
     .args(extra)
     .output()
     .expect("run pi-rs")
@@ -96,6 +114,116 @@ fn run(config: &Path, cwd: &Path, extra: &[&str]) -> Output {
 
 fn stderr(out: &Output) -> String {
   String::from_utf8_lossy(&out.stderr).to_string()
+}
+
+/// The session ids the store holds, as written text, so an id can be sliced into a
+/// prefix and compared against the one that was named.
+fn recorded_ids(state: &Path) -> Vec<String> {
+  StateLayout::new(state)
+    .list_session_ids()
+    .expect("list sessions")
+    .iter()
+    .map(|id| id.as_str().to_string())
+    .collect()
+}
+
+/// A provider that answers each request with the next scripted body and keeps the
+/// request bytes, because the contract is about what the model was actually sent.
+struct FakeServer {
+  addr: SocketAddr,
+  handle: thread::JoinHandle<Vec<String>>,
+}
+
+impl FakeServer {
+  fn answer(responses: Vec<String>) -> Self {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider");
+    let addr = listener.local_addr().expect("fake provider address");
+    listener.set_nonblocking(true).unwrap();
+    let handle = thread::spawn(move || {
+      responses
+        .into_iter()
+        .map(|response| {
+          let deadline = Instant::now() + Duration::from_secs(5);
+          let mut socket = loop {
+            match listener.accept() {
+              Ok((socket, _)) => break socket,
+              Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < deadline, "timed out waiting for a request");
+                thread::sleep(Duration::from_millis(5));
+              }
+              Err(error) => panic!("accept provider request: {error}"),
+            }
+          };
+          let request = drain_request(&mut socket);
+          socket
+            .write_all(response.as_bytes())
+            .expect("write response");
+          socket.flush().expect("flush response");
+          request
+        })
+        .collect()
+    });
+    Self { addr, handle }
+  }
+
+  fn base_url(&self) -> String {
+    format!("http://{}/v1", self.addr)
+  }
+
+  fn requests(self) -> Vec<String> {
+    self.handle.join().expect("fake provider thread")
+  }
+}
+
+fn drain_request(socket: &mut TcpStream) -> String {
+  let mut bytes = Vec::new();
+  let mut buffer = [0u8; 1024];
+  let mut expected = None;
+  loop {
+    let read = socket.read(&mut buffer).unwrap_or(0);
+    if read == 0 {
+      break;
+    }
+    bytes.extend_from_slice(&buffer[..read]);
+    if expected.is_none()
+      && let Some(end) = find(&bytes, b"\r\n\r\n")
+    {
+      let body_start = end + 4;
+      let headers = String::from_utf8_lossy(&bytes[..body_start]).to_ascii_lowercase();
+      let content_length = headers
+        .split("\r\n")
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+      expected = Some(body_start + content_length);
+    }
+    if expected.is_some_and(|length| bytes.len() >= length) {
+      break;
+    }
+  }
+  String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+  haystack
+    .windows(needle.len())
+    .position(|part| part == needle)
+}
+
+/// One complete assistant answer, as the OpenAI-compatible stream the runtime reads.
+fn text_response(text: &str) -> String {
+  let body = format!(
+    "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+    serde_json::json!({ "choices": [{ "delta": { "content": text } }] }),
+    serde_json::json!({
+      "choices": [{ "delta": {}, "finish_reason": "stop" }],
+      "usage": { "prompt_tokens": 20, "completion_tokens": 3 }
+    }),
+  );
+  format!(
+    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+    body.len()
+  )
 }
 
 #[test]
@@ -150,10 +278,76 @@ fn an_unknown_session_id_is_refused_without_creating_a_session() {
 }
 
 #[test]
-fn a_recorded_session_is_refused_rather_than_replaced_by_a_fresh_one() {
-  // Continuing a session means appending to it. Until the model-visible context of a
-  // recorded session is rebuilt from its log, the command refuses: a turn built from
-  // the prompt alone would be a new conversation wearing an existing session id.
+fn a_recorded_session_gains_a_second_turn_under_the_same_id() {
+  // Continuing a session means two things at once: the turn is appended to the session
+  // file that was named, and the model is actually given the earlier turn to continue
+  // from. Both are checked from outside, because either half can be satisfied without
+  // the other — a second file under a new id, or one file whose next request was built
+  // from the prompt alone.
+  let temp = TempDir::new().expect("temp dir");
+  let workspace = temp.path().join("workspace");
+  fs::create_dir(&workspace).expect("create the workspace");
+  let state = temp.path().join("state");
+
+  // The first turn is an ordinary run, so the session it creates is one the store
+  // really holds rather than one written by hand.
+  let first = FakeServer::answer(vec![text_response("the first answer")]);
+  let config = write_config_at(temp.path(), &first.base_url());
+  let out = run_prompt(&config, &workspace, "recite the old promise", &[]);
+  assert!(out.status.success(), "stderr: {}", stderr(&out));
+  assert_eq!(first.requests().len(), 1, "the first turn is one request");
+  let recorded = recorded_ids(&state);
+  assert_eq!(recorded.len(), 1, "the first turn creates one session");
+  let session_id = &recorded[0];
+
+  // The second turn names that session by a prefix, exactly as `pi-rs trace` would.
+  let second = FakeServer::answer(vec![text_response("the second answer")]);
+  let config = write_config_at(temp.path(), &second.base_url());
+  let out = run_prompt(
+    &config,
+    &workspace,
+    "keep the promise",
+    &["--resume", &session_id[..8]],
+  );
+  assert!(out.status.success(), "stderr: {}", stderr(&out));
+
+  // What the provider was actually sent, not what the runtime claims to remember.
+  let requests = second.requests();
+  assert_eq!(requests.len(), 1);
+  let asked = &requests[0];
+  assert!(asked.contains("recite the old promise"), "{asked}");
+  assert!(asked.contains("the first answer"), "{asked}");
+  assert!(asked.contains("keep the promise"), "{asked}");
+
+  // Still one session, still the id that was named: a continuation is one session file.
+  assert_eq!(
+    recorded_ids(&state),
+    vec![session_id.clone()],
+    "resuming must not create a session"
+  );
+  assert_eq!(recorded_count(&state), 1);
+  // Both turns are in the log that was appended to, in order.
+  let log = fs::read_to_string(
+    StateLayout::new(&state).session_path(&SessionId::from_string(session_id.clone())),
+  )
+  .expect("read the session log");
+  let earlier = log
+    .find("recite the old promise")
+    .expect("the first turn is still recorded");
+  let later = log
+    .find("keep the promise")
+    .expect("the resumed turn was appended");
+  assert!(
+    earlier < later,
+    "the resumed turn is appended, not prepended"
+  );
+}
+
+#[test]
+fn a_session_whose_log_cannot_be_read_is_refused_without_creating_a_session() {
+  // A named session whose log cannot be rebuilt is not continued with a partial context.
+  // This fixture holds no header record at all, so the command names the session, says
+  // what is missing, and writes nothing.
   let temp = TempDir::new().expect("temp dir");
   let config = write_config(temp.path());
   let state = temp.path().join("state");
@@ -166,12 +360,10 @@ fn a_recorded_session_is_refused_rather_than_replaced_by_a_fresh_one() {
   let message = stderr(&out);
   assert!(message.contains("cannot continue session"), "{message}");
   assert!(message.contains(RECORDED), "{message}");
-  assert!(message.contains("context"), "{message}");
-
-  // No second session, and the named one is untouched: refusal writes nothing.
+  assert!(message.contains("no session header"), "{message}");
+  // Refusal writes nothing: no second session, and the named one is untouched.
   assert_eq!(recorded_count(&state), 1);
-  assert_eq!(
-    fs::read(&session).expect("re-read the session file"),
-    before
-  );
+  assert_eq!(fs::read(&session).expect("re-read"), before);
+  // And it never reached the endpoint.
+  assert!(!message.contains("connection"), "{message}");
 }
