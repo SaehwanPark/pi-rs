@@ -35,13 +35,14 @@ use std::{collections::BTreeMap, fs, path::Path};
 use serde_json::Value;
 
 use pi_rs_core::{
-  AgentEvent, AssistantDelta, Diagnostic, DiagnosticLevel, EventEnvelope, EventMeta, ModelRef,
-  ModelRequestCompleted, ModelRequestStarted, ReasoningDelta, ReasoningProvenance, SessionHeader,
-  SessionId, ToolCallId, ToolCompleted, ToolExecutionState, ToolFailed, ToolRequested, TraceId,
-  UserMessage, session::SESSION_SCHEMA_VERSION,
+  AgentEvent, AssistantDelta, ContentBlock, Diagnostic, DiagnosticLevel, EventEnvelope, EventMeta,
+  Message, ModelRef, ModelRequestCompleted, ModelRequestStarted, ReasoningDelta,
+  ReasoningProvenance, Role, SessionHeader, SessionId, ToolCallBlock, ToolCallId, ToolCompleted,
+  ToolExecutionState, ToolFailed, ToolRequested, ToolResultBlock, TraceId, TurnId, UserMessage,
+  session::SESSION_SCHEMA_VERSION,
 };
 
-use crate::{Store, StoreError};
+use crate::{Payload, Store, StoreError};
 
 /// A parsed Pi session file: its header line and every entry that followed it.
 #[derive(Debug, Clone)]
@@ -405,6 +406,11 @@ pub struct ImportReport {
   pub content: BTreeMap<String, u32>,
   /// The cwd the header was built with, when the file had one.
   pub cwd: Option<String>,
+  /// Conversation messages recorded in the session log, which is what a resume would see.
+  ///
+  /// This can be fewer than the imported entries: not every entry pi-rs can describe as an
+  /// event is also a message a model would be shown.
+  pub messages: u32,
   /// Anything a reader needs to know that is not a count.
   pub notes: Vec<String>,
 }
@@ -442,12 +448,76 @@ impl ImportReport {
 pub struct Mapped {
   /// Pi's entry id, kept so a report line can point back at the file.
   pub entry_id: String,
+  /// Line of the file the entry was read from, for the same reason.
+  pub line: usize,
   /// Pi's wall-clock time when it wrote the entry.
   pub timestamp_ms: Option<u64>,
   pub event: AgentEvent,
-  /// Output text that only the store can place: a tool result's bytes become a blob, and a
-  /// blob needs the store's path layout. Planning stays pure without losing the output.
+  /// Output text that only the store can place: whether a tool result's bytes become a blob
+  /// depends on the store's inline threshold, and a blob needs its path layout. Planning stays
+  /// pure without losing the output.
   pub payload: Option<String>,
+  /// The turn the event belongs to. Pi's file has no turn ids, so the import anchors one on
+  /// the user entry that opened the turn; it is stable across re-imports.
+  pub turn_id: Option<TurnId>,
+  /// A conversation message this event introduces, which the store records in the session log
+  /// bound to this event. Binding to the introducing event is what lets a resume rebuild the
+  /// conversation without matching ids, exactly as for a native session.
+  pub message: Option<MappedMessage>,
+}
+
+/// A message to record, and the model to attribute it to.
+#[derive(Debug, Clone)]
+pub struct MappedMessage {
+  pub message: Message,
+  pub model: ModelRef,
+}
+
+/// The calls as message blocks, in the order the model asked for them.
+fn call_blocks(calls: &[ToolCallBlock]) -> Vec<ContentBlock> {
+  calls
+    .iter()
+    .map(|call| ContentBlock::ToolCall(call.clone()))
+    .collect()
+}
+
+/// One message record, or none when the entry carried nothing a message would hold.
+///
+/// An empty message is not recorded because a resume would carry a blank turn into the next
+/// request. The trace still holds what the entry was, and the report still counts it.
+fn message_record(extracted: &Extracted, role: Role, model: &ModelRef) -> Option<MappedMessage> {
+  if extracted.blocks.is_empty() {
+    return None;
+  }
+  Some(MappedMessage {
+    message: Message::new(role, extracted.blocks.clone()),
+    model: model.clone(),
+  })
+}
+
+/// The model in effect for an entry that does not name one of its own.
+///
+/// A user message has no model, but a message record is attributed to one, so the import gives
+/// it the last assistant model recorded *before* it. Before the first assistant entry the file
+/// has named no model, and `unknown` is the honest answer: what the user had configured is not
+/// in the file, and naming one would attribute a message to a model the file never showed.
+fn current_model(model: &PiModel) -> ModelRef {
+  let named = |recorded: &Option<String>| {
+    recorded
+      .clone()
+      .filter(|text| !text.is_empty())
+      .unwrap_or_else(|| "unknown".to_string())
+  };
+  ModelRef::new(named(&model.provider), named(&model.model))
+}
+
+/// The id a turn is anchored on: Pi's entry id when the file has ids, its line otherwise.
+fn turn_anchor(entry: &PiEntry) -> String {
+  if entry.id.is_empty() {
+    format!("line-{}", entry.line)
+  } else {
+    entry.id.clone()
+  }
 }
 
 /// An info diagnostic, which is what every "Pi recorded this, pi-rs states it" note is.
@@ -456,6 +526,15 @@ fn info(message: String) -> AgentEvent {
     level: DiagnosticLevel::Info,
     message,
   })
+}
+
+/// A turn anchor for an event whose entry had no opening user message: it anchors its own turn.
+fn anchor_of(mapped: &Mapped) -> String {
+  if mapped.entry_id.is_empty() {
+    format!("line-{}", mapped.line)
+  } else {
+    mapped.entry_id.clone()
+  }
 }
 
 /// The last assistant model seen, and the provider that served it.
@@ -540,6 +619,12 @@ impl PiEntry {
 struct Extracted {
   text: String,
   attachments: u32,
+  /// The same content as pi-rs's own blocks, for the session log's message record.
+  ///
+  /// The trace records a message's prose in one event; the log keeps the block structure a
+  /// model request needs. Deriving both from one pass is what stops the log claiming a block
+  /// the trace never counted, or a count the log has nothing behind.
+  blocks: Vec<ContentBlock>,
 }
 
 impl Extracted {
@@ -556,6 +641,7 @@ impl Extracted {
 fn message_parts(source: &PiSession, entry: &PiEntry, report: &mut ImportReport) -> Extracted {
   let mut extracted = match entry.value.get("message").and_then(|m| m.get("content")) {
     Some(Value::String(text)) => Extracted {
+      blocks: text_blocks(text),
       text: text.clone(),
       attachments: 0,
     },
@@ -577,6 +663,7 @@ fn message_parts(source: &PiSession, entry: &PiEntry, report: &mut ImportReport)
 /// The text inside content blocks, counting the blocks that carried none.
 fn content_text(source: &PiSession, report: &mut ImportReport, blocks: &[Value]) -> Extracted {
   let mut parts: Vec<String> = Vec::new();
+  let mut owned: Vec<ContentBlock> = Vec::new();
   let mut attachments = 0u32;
   for block in blocks {
     match block.get("type").and_then(Value::as_str) {
@@ -584,6 +671,9 @@ fn content_text(source: &PiSession, report: &mut ImportReport, blocks: &[Value])
         if let Some(text) = block.get("text").and_then(Value::as_str) {
           if !text.is_empty() {
             parts.push(text.to_string());
+            owned.push(ContentBlock::Text {
+              text: text.to_string(),
+            });
           }
         }
       }
@@ -593,6 +683,23 @@ fn content_text(source: &PiSession, report: &mut ImportReport, blocks: &[Value])
       // A call is neither prose nor an attachment: the caller maps it to `ToolRequested`,
       // and counting it here too would report one thing as both imported and left out.
       Some("toolCall") => {}
+      // An image carries bytes, so the session log can hold it the way a native session does:
+      // inline, as an image block. One with no data cannot be held, so it stays a counted and
+      // reported attachment instead of a block with nothing in it.
+      Some("image") => {
+        attachments += 1;
+        match block.get("data").and_then(Value::as_str) {
+          Some(data) => owned.push(ContentBlock::Image {
+            mime: block
+              .get("mimeType")
+              .and_then(Value::as_str)
+              .unwrap_or("image/png")
+              .to_string(),
+            data_base64: data.to_string(),
+          }),
+          None => report.content("image without data"),
+        }
+      }
       other => {
         attachments += 1;
         report.content(other.unwrap_or("block without a type"));
@@ -603,7 +710,56 @@ fn content_text(source: &PiSession, report: &mut ImportReport, blocks: &[Value])
   Extracted {
     text: parts.join("\n\n"),
     attachments,
+    blocks: owned,
   }
+}
+
+/// One text block, or none when the message was a bare empty string.
+fn text_blocks(text: &str) -> Vec<ContentBlock> {
+  if text.is_empty() {
+    Vec::new()
+  } else {
+    vec![ContentBlock::Text {
+      text: text.to_string(),
+    }]
+  }
+}
+
+/// The calls one assistant message asked for, in order, with pi-rs ids.
+///
+/// A call Pi did not id gets a derived one so that the lifecycle still has a durable key; the
+/// derivation is from the entry, so it is stable across reruns.
+fn tool_call_blocks(
+  entry: &PiEntry,
+  blocks: &[Value],
+  report: &mut ImportReport,
+) -> Vec<ToolCallBlock> {
+  let mut calls: Vec<ToolCallBlock> = Vec::new();
+  for block in blocks {
+    if block.get("type").and_then(Value::as_str) != Some("toolCall") {
+      continue;
+    }
+    let Some(name) = block.get("name").and_then(Value::as_str) else {
+      report.content("tool call without a name");
+      continue;
+    };
+    report.import("toolCall");
+    calls.push(ToolCallBlock {
+      id: ToolCallId::from_string(
+        block
+          .get("id")
+          .and_then(Value::as_str)
+          .filter(|text| !text.is_empty())
+          .unwrap_or(&format!("{}-{}", entry.id, calls.len() + 1)),
+      ),
+      name: name.to_string(),
+      arguments: block
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json_string("Pi recorded no arguments")),
+    });
+  }
+  calls
 }
 
 /// Turn a Pi session into pi-rs events.
@@ -627,28 +783,41 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
   let mut events: Vec<Mapped> = Vec::with_capacity(active.len());
   let mut model = PiModel::default();
   let mut requests = 0u32;
+  // Pi's file groups turns implicitly. The import opens a turn at each user entry and stamps
+  // every later entry with it, which is also what makes an imported session resumable: the
+  // store's message records are keyed by turn.
+  let mut turn: Option<TurnId> = None;
+  let mut turns: BTreeMap<usize, Option<TurnId>> = BTreeMap::new();
 
   for entry in &active {
     let timestamp_ms = entry.timestamp_ms();
-    let mut push = |event: AgentEvent, payload: Option<String>| {
+    let mut push = |event: AgentEvent, payload: Option<String>, message: Option<MappedMessage>| {
       events.push(Mapped {
         entry_id: entry.id.clone(),
+        line: entry.line,
         timestamp_ms,
         event,
         payload,
+        turn_id: None,
+        message,
       });
     };
     match entry.entry_type.as_str() {
       "message" => match entry.message_role().unwrap_or("") {
         "user" => {
           report.import("message:user");
+          // A turn is one user entry plus everything until the next one. Pi records no turn id,
+          // so the import anchors one on the entry that opened the turn.
+          turn = Some(TurnId::from_string(format!("turn-{}", turn_anchor(entry))));
           let extracted = message_parts(source, entry, &mut report);
+          let message = message_record(&extracted, Role::User, &current_model(&model));
           push(
             AgentEvent::UserMessage(UserMessage {
-              text: extracted.text,
+              text: extracted.text.clone(),
               attachments: extracted.attachments,
             }),
             None,
+            message,
           );
         }
         "assistant" => {
@@ -675,6 +844,31 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
               .unwrap_or_else(|| "unknown".to_string()),
             model.model.clone().unwrap_or_else(|| "unknown".to_string()),
           );
+          let blocks = entry
+            .message_field_array("content")
+            .cloned()
+            .unwrap_or_default();
+          let extracted = content_text(source, &mut report, &blocks);
+          let calls = tool_call_blocks(entry, &blocks, &mut report);
+          // Prose and calls together are one assistant message, which is what a resume feeds
+          // the next request. Reasoning stays out of it because pi-rs keeps a model's
+          // reasoning out of the next request's messages by construction.
+          let message = message_record(
+            &Extracted {
+              blocks: [extracted.blocks.clone(), call_blocks(&calls)].concat(),
+              ..extracted.clone()
+            },
+            Role::Assistant,
+            &model_ref,
+          );
+          // A message binds to the event that introduces it, and for an assistant message that
+          // is the first delta. A reply with no prose has no delta, so it binds to the request
+          // that produced the calls.
+          let (started_message, delta_message) = if extracted.text.is_empty() {
+            (message, None)
+          } else {
+            (None, message)
+          };
           push(
             AgentEvent::ModelRequestStarted(ModelRequestStarted {
               epoch: 0,
@@ -684,6 +878,7 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
               model: model_ref.clone(),
             }),
             None,
+            started_message,
           );
           let mut saw_reasoning = false;
           // Older Pi files kept reasoning in a top-level array; current ones put thinking
@@ -702,13 +897,10 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
                   chunk_index: 0,
                 }),
                 None,
+                None,
               );
             }
           }
-          let blocks = entry
-            .message_field_array("content")
-            .cloned()
-            .unwrap_or_default();
           for block in blocks.iter().filter(|block| is_thinking(block)) {
             let text = thinking_text(std::slice::from_ref(block));
             if !text.is_empty() {
@@ -720,48 +912,31 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
                   chunk_index: 0,
                 }),
                 None,
+                None,
               );
             }
           }
-          let extracted = content_text(source, &mut report, &blocks);
-          if let Some(text) = extracted.clone().non_empty() {
+          if let Some(text) = extracted.non_empty() {
             push(
               AgentEvent::AssistantDelta(AssistantDelta {
                 text,
                 chunk_index: 0,
               }),
               None,
+              delta_message,
             );
           }
-          let mut tool_calls = 0u32;
-          for block in blocks.iter() {
-            if block.get("type").and_then(Value::as_str) != Some("toolCall") {
-              continue;
-            }
-            let Some(name) = block.get("name").and_then(Value::as_str) else {
-              report.content("tool call without a name");
-              continue;
-            };
-            tool_calls += 1;
-            report.import("toolCall");
-            // A call Pi did not id gets a derived one so that the lifecycle still has a
-            // durable key; the derivation is from the entry, so it is stable across reruns.
-            let fallback_id = format!("{}-{}", entry.id, tool_calls);
+          for call in &calls {
             push(
               AgentEvent::ToolRequested(ToolRequested {
-                call_id: ToolCallId::from_string(
-                  block
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&fallback_id),
-                ),
-                name: name.to_string(),
-                arguments: block
-                  .get("arguments")
-                  .cloned()
-                  .unwrap_or_else(|| json_string("Pi recorded no arguments")),
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+                // pi-rs cannot re-run Pi's tools, and the safe direction to be wrong in is
+                // the one that asks before executing.
                 read_only: false,
               }),
+              None,
               None,
             );
           }
@@ -791,13 +966,14 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
               // Pi stores no per-request wall time; zero states "not recorded" better than
               // the difference between two entry timestamps would.
               duration_ms: 0,
-              tool_calls,
+              tool_calls: calls.len() as u32,
               // Pi's reasoning text was never streamed to pi-rs, so the span says which
               // provenance the text it does hold came from. An entry that stored no
               // reasoning gets no provenance at all: naming one would claim a reasoning
               // channel for a request the file says nothing about.
               reasoning_provenance: saw_reasoning.then_some(ReasoningProvenance::ProviderSummary),
             }),
+            None,
             None,
           );
         }
@@ -815,7 +991,31 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
             .filter(|text| !text.is_empty())
             .unwrap_or("unknown")
             .to_string();
-          if entry.message_flag("isError") {
+          // A tool result is a message of its own, bound to the terminal event, whether or not
+          // the call succeeded: a resume needs what the tools answered, including the failures
+          // the model then had to work around.
+          let failed = entry.message_flag("isError");
+          let record = message_record(
+            &Extracted {
+              blocks: vec![ContentBlock::ToolResult(ToolResultBlock {
+                id: call_id.clone(),
+                name: name.clone(),
+                state: if failed {
+                  ToolExecutionState::Failed
+                } else {
+                  ToolExecutionState::Succeeded
+                },
+                text: extracted.text.clone(),
+                is_error: failed,
+                // pi-rs reduced nothing: these are Pi's bytes as Pi stored them.
+                reduced: false,
+              })],
+              ..Default::default()
+            },
+            Role::Tool,
+            &current_model(&model),
+          );
+          if failed {
             push(
               AgentEvent::ToolFailed(ToolFailed {
                 call_id,
@@ -825,6 +1025,7 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
                 status: None,
               }),
               None,
+              record,
             );
           } else {
             let text = extracted.text;
@@ -842,6 +1043,7 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
                 visible_bytes: text.len() as u64,
               }),
               Some(text),
+              record,
             );
           }
         }
@@ -860,6 +1062,7 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
             "imported from Pi: the model changed to {provider}/{to}"
           )),
           None,
+          None,
         );
       }
       "thinking_level_change" => {
@@ -869,6 +1072,7 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
             "imported from Pi: thinking level set to {}",
             entry.str("thinkingLevel").unwrap_or("unknown")
           )),
+          None,
           None,
         );
       }
@@ -882,6 +1086,7 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
             "imported from Pi: a compaction boundary (first kept entry {})",
             entry.str("firstKeptEntryId").unwrap_or("unknown")
           )),
+          None,
           None,
         );
       }
@@ -897,7 +1102,15 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
       "session" | "more" => {}
       other => report.skip(other, "no pi-rs event corresponds to this entry type"),
     }
+    turns.insert(entry.line, turn.clone());
   }
+  for mapped in events.iter_mut() {
+    mapped.turn_id = turns.get(&mapped.line).cloned().flatten();
+  }
+  report.messages = events
+    .iter()
+    .filter(|mapped| mapped.message.is_some())
+    .count() as u32;
 
   for entry in source.off_path(&active) {
     *report.off_path.entry(entry.entry_type.clone()).or_insert(0) += 1;
@@ -990,14 +1203,16 @@ fn pi_session_id(pi_id: &str) -> String {
 
 /// File the plan as a new session and return the store's session id.
 ///
-/// Imported tool output is filed as a recovery blob whatever its size. pi-rs keeps a tool
-/// *result* in the session's message log, which an import does not write — and an inline
-/// payload has no field on `ToolCompleted` to live in. A store configured to keep small
-/// payloads inline must not be able to silently drop an imported output.
+/// Two durable records come out of one plan. Each event goes to the trace journal, and each
+/// message the events introduce goes to the session log bound to its introducing event — the
+/// binding the store uses to read a conversation back without matching ids. The message log is
+/// what makes an imported session resumable; the trace is what makes it inspectable.
 ///
-/// The bytes pass through the store's durable redaction policy, exactly as bytes pi-rs
-/// produced itself would. `reduced` stays what the plan mapped: pi-rs reduced nothing, so it
-/// must not claim to have.
+/// Imported tool output follows the same inline rule as native output: past the store's inline
+/// threshold its bytes become a blob, and below it the message record is their only durable
+/// copy. The bytes pass through the store's durable redaction policy either way, exactly as
+/// bytes pi-rs produced itself would. `reduced` stays what the plan mapped: pi-rs reduced
+/// nothing, so it must not claim to have.
 pub fn write(store: &Store, plan: &ImportPlan) -> Result<SessionId, StoreError> {
   let mut session = store.begin(plan.header.clone())?;
   let session_id = session.id().clone();
@@ -1006,9 +1221,15 @@ pub fn write(store: &Store, plan: &ImportPlan) -> Result<SessionId, StoreError> 
   for mapped in &plan.events {
     let mut event = mapped.event.clone();
     if let Some(text) = &mapped.payload {
-      let blob = session.put_recovery_blob(text.as_bytes())?;
+      // A tool result's durable copy is its message record, which is what the next request
+      // reads, so the trace needs a blob only past the store's inline threshold. That is the
+      // rule a native session follows; filing every imported output would keep the same bytes
+      // twice for no reason. Nothing is marked reduced because pi-rs reduced nothing: these
+      // are Pi's bytes as Pi stored them.
       if let AgentEvent::ToolCompleted(completed) = &mut event {
-        completed.blob = Some(blob);
+        if let Payload::Blob(blob) = session.put_payload(text.as_bytes())? {
+          completed.blob = Some(blob);
+        }
       }
     }
     let mut meta = EventMeta::new(session_id.clone(), trace_id.clone());
@@ -1018,6 +1239,17 @@ pub fn write(store: &Store, plan: &ImportPlan) -> Result<SessionId, StoreError> 
     }
     let mut envelope = EventEnvelope::new(meta, event);
     session.emit(&mut envelope)?;
+    if let Some(record) = &mapped.message {
+      // The message record is bound to the event that introduces it, so reading the session
+      // back finds it through that binding instead of matching ids. The event has its sequence
+      // number by now, which is what the binding points at. Epoch 0 because a Pi file records
+      // no failover.
+      let turn_id = mapped
+        .turn_id
+        .clone()
+        .unwrap_or_else(|| TurnId::from_string(format!("turn-{}", anchor_of(mapped))));
+      session.append_message(&turn_id, &record.message, 0, &record.model, &envelope)?;
+    }
     emitted += 1;
   }
   // A session that imported nothing still needs the one event that says so, or a reader
@@ -1254,7 +1486,7 @@ mod tests {
   }
 
   #[test]
-  fn images_are_counted_not_dropped_silently() {
+  fn images_are_carried_where_native_sessions_carry_them() {
     let source = parse_ok(&format!(
       "{}\n{}",
       HEADER,
@@ -1266,7 +1498,39 @@ mod tests {
     };
     assert_eq!(message.text, "look");
     assert_eq!(message.attachments, 1);
-    assert_eq!(plan.report.content.get("image"), Some(&1));
+    // pi-rs keeps an image inline in the session's messages, so an import does too, and the
+    // report no longer says the image was left out.
+    assert!(!plan.report.content.contains_key("image"));
+    let recorded = plan.events[0]
+      .message
+      .as_ref()
+      .expect("the user message is recorded");
+    assert!(matches!(
+      recorded.message.content[1],
+      ContentBlock::Image {
+        ref mime,
+        ref data_base64
+      } if mime == "image/png" && data_base64 == "AAA"
+    ));
+  }
+
+  #[test]
+  fn an_image_without_bytes_is_still_reported() {
+    let source = parse_ok(&format!(
+      "{}\n{}",
+      HEADER,
+      r#"{"type":"message","id":"u1","parentId":null,"timestamp":"2026-07-24T09:00:01.000Z","message":{"role":"user","content":[{"type":"image"}]}}"#
+    ));
+    let plan = plan(&source).unwrap();
+    let AgentEvent::UserMessage(message) = &plan.events[0].event else {
+      panic!("expected a user message");
+    };
+    assert_eq!(message.attachments, 1);
+    assert_eq!(plan.report.content.get("image without data"), Some(&1));
+    assert!(
+      plan.events[0].message.is_none(),
+      "a block with no bytes has nothing to record"
+    );
   }
 
   #[test]

@@ -90,6 +90,9 @@ fn a_dry_run_reports_on_stdout_and_writes_nothing() {
   }
   // The sibling branch is counted, not silently folded into the mainline.
   assert!(stdout.contains("off the active path"), "{stdout}");
+  // An import writes conversation records too, so that the session can be resumed; the report
+  // says how many, because that is the number that says whether the conversation came across.
+  assert!(stdout.contains("conversation messages"), "{stdout}");
   assert!(
     stdout.contains(SESSION_ID),
     "the report must name the session id it would file: \n{stdout}"
@@ -133,16 +136,40 @@ fn write_files_a_session_the_store_lists_and_trace_reads() {
   assert!(journal.contains("which files changed?"), "{journal}");
   assert!(journal.contains("Checking the working tree."), "{journal}");
   assert!(journal.contains("provider_summary"), "{journal}");
-  // The tool's output has to be in the session somewhere: a blob when the config's inline
-  // threshold is smaller than it, journal bytes when it is not.
+  // A tool result's durable copy is its record in the session log, because that is what a
+  // resumed session reads. The trace only needs a blob once the bytes pass the store's inline
+  // threshold, and at 121 bytes this config's default threshold keeps them out of one.
+  let session_log =
+    fs::read_to_string(layout.session_path(&session_id)).expect("session log exists");
+  assert!(
+    session_log.contains("src/lib.rs"),
+    "the imported tool output is not in the session log"
+  );
   let blobs = layout.blobs_dir(&session_id);
   let blob_count = fs::read_dir(&blobs)
     .map(|dir| dir.count())
     .unwrap_or_default();
+  // The threshold the CLI wrote under is the config's own retention, so that is what decides.
+  let written = RuntimeConfig::parse(&fs::read_to_string(&config).expect("config reads"))
+    .expect("config parses");
+  let expected = if 121 >= written.trace.inline_threshold_bytes {
+    1
+  } else {
+    0
+  };
+  assert_eq!(
+    blob_count, expected,
+    "output filing must follow the inline threshold, not the import"
+  );
+  // Nothing was summarized on the way in, so the journal must not claim a reduction even
+  // where it records the field that says so.
   assert!(
-    blob_count >= 1 || journal.contains("src/lib.rs"),
-    "the imported tool output is neither under {} nor in the journal",
-    blobs.display()
+    journal.contains("\"reduced\":false"),
+    "an import that reduced nothing must not say it did: {journal}"
+  );
+  assert!(
+    !journal.contains("context_reduced"),
+    "an import reduces nothing, so it emits no reduction event: {journal}"
   );
 }
 

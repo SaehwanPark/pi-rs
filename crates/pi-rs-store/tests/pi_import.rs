@@ -11,7 +11,7 @@ use std::{
   path::{Path, PathBuf},
 };
 
-use pi_rs_core::{AgentEvent, ModelRef};
+use pi_rs_core::{AgentEvent, ContentBlock, ModelRef, Role, SessionMessage, ToolExecutionState};
 use pi_rs_store::{SessionLog, Store, TraceJournal, WritePolicy, pi_import};
 
 fn fixture() -> PathBuf {
@@ -53,7 +53,10 @@ fn the_report_says_what_was_imported_and_what_was_left_out() {
   // e-branch is a sibling of the path Pi's cursor ended on: counted by type, not hidden.
   assert_eq!(plan.report.off_path.get("message"), Some(&1));
   // Pi recorded cache usage and an image; pi-rs's events have no field for either.
-  assert_eq!(plan.report.content.get("image"), Some(&1));
+  // Kinds an import cannot carry are counted, not quietly dropped. An image is not one of
+  // them: pi-rs holds images inline in a session's messages, so an import does the same.
+  assert_eq!(plan.report.content.get("image"), None);
+  assert_eq!(plan.report.messages, 6);
   assert_eq!(plan.report.content.get("usage:cacheRead"), Some(&1));
 }
 
@@ -112,7 +115,7 @@ fn writing_files_one_session_the_store_can_read_back() {
   let AgentEvent::ToolCompleted(completed) = &tool.envelope.event else {
     unreachable!("filtered above");
   };
-  // The output is a blob because an imported output has no inline home at all.
+  // 121 bytes is over this store's 64-byte threshold, so the trace keeps a blob.
   let blob = completed.blob.clone().expect("output filed as a blob");
   assert!(!completed.reduced, "pi-rs reduced nothing");
   assert_eq!(blob.size, 121);
@@ -122,12 +125,12 @@ fn writing_files_one_session_the_store_can_read_back() {
 }
 
 #[test]
-fn imported_tool_output_is_filed_whatever_its_size() {
-  // pi-rs keeps a tool result in the session's message log, which an import does not write,
-  // and `ToolCompleted` has no inline field to carry one. So the output's durable home is a
-  // blob at either threshold: a store that keeps small payloads inline must not be able to
-  // lose an imported output, and pi-rs must not claim it reduced what it never showed.
-  for threshold in [64u64, 4_096] {
+fn imported_tool_output_follows_the_native_inline_rule() {
+  // A tool result's durable copy is its message record, which is what the next request reads,
+  // so the trace needs a blob only past the inline threshold. Filing small imported output
+  // too would keep the same bytes twice for no reason, and marking it reduced would claim a
+  // summary pi-rs never made.
+  for (threshold, expect_blob) in [(64u64, true), (4_096, false)] {
     let root = StoreTempDir::new("import-output");
     let store = store_in(root.path(), threshold);
     let source = read_fixture();
@@ -145,12 +148,30 @@ fn imported_tool_output_is_filed_whatever_its_size() {
     else {
       unreachable!("filtered above");
     };
-    let blob = completed.blob.clone().expect("output filed at {threshold}");
-    assert!(!completed.reduced);
+    assert!(!completed.reduced, "pi-rs reduced nothing at {threshold}");
     assert_eq!(completed.visible_bytes, 121);
-    let stored = fs::read(store.layout().blob_path(&session_id, &blob)).expect("blob resolves");
-    assert_eq!(stored.len() as u64, blob.size);
-    assert!(String::from_utf8(stored).unwrap().contains("src/lib.rs"));
+    assert_eq!(
+      completed.blob.is_some(),
+      expect_blob,
+      "threshold {threshold}"
+    );
+    if let Some(blob) = &completed.blob {
+      let stored = fs::read(store.layout().blob_path(&session_id, blob)).expect("blob resolves");
+      assert_eq!(stored.len() as u64, blob.size);
+      assert!(String::from_utf8(stored).unwrap().contains("src/lib.rs"));
+    }
+    // Either way the message record holds the output, because that is what a resume reads.
+    let restored = store.restore(&session_id).expect("restores");
+    let tool = restored
+      .messages
+      .iter()
+      .find(|record| record.role == Role::Tool)
+      .expect("the tool result is a message too");
+    let ContentBlock::ToolResult(result) = &tool.message.content[0] else {
+      panic!("a tool message holds its result block");
+    };
+    assert!(result.text.contains("src/lib.rs"));
+    assert!(!result.reduced);
   }
 }
 
@@ -208,4 +229,158 @@ impl StoreTempDir {
   fn path(&self) -> &Path {
     &self.path
   }
+}
+
+/// What makes a session resumable is its message log, not its trace: the next request is
+/// built from messages. An import therefore has to produce those records, not only events,
+/// and in the roles and order the file recorded them.
+#[test]
+fn an_imported_session_resumes_from_messages_not_only_a_trace() {
+  let root = StoreTempDir::new("import-messages");
+  let store = store_in(root.path(), 64);
+  let source = read_fixture();
+  let plan = pi_import::plan(&source).expect("fixture plans");
+  let session_id = pi_import::write(&store, &plan).expect("import writes");
+
+  let restored = store
+    .restore(&session_id)
+    .expect("imported session restores");
+  assert_eq!(restored.malformed_records, 0);
+  assert_eq!(
+    restored.messages.iter().map(describe).collect::<Vec<_>>(),
+    vec![
+      "user: which files changed?",
+      "assistant: Checking the working tree. | call bash",
+      "tool: bash ok",
+      "assistant: Two tracked paths and three new ones.",
+      "user: and this compile error? | image image/png",
+      "assistant: Here is the failing line.",
+    ],
+    "the conversation Pi recorded, in Pi's order, with the blocks a request would send"
+  );
+  // The compaction boundary stays in the trace only. Importing its summary text as well
+  // would put one conversation into the history twice.
+  assert_eq!(restored.checkpoint, None);
+}
+
+/// Turn identity and message binding are what let `load_session` read a session back without
+/// matching ids, and both have to come out of Pi's entry tree rather than be invented.
+#[test]
+fn message_records_bind_to_the_event_that_introduced_them() {
+  let root = StoreTempDir::new("import-bind");
+  let store = store_in(root.path(), 64);
+  let source = read_fixture();
+  let plan = pi_import::plan(&source).expect("fixture plans");
+  let session_id = pi_import::write(&store, &plan).expect("import writes");
+  let records = store
+    .restore(&session_id)
+    .expect("imported session restores")
+    .messages;
+
+  let journal = TraceJournal::read(&store.layout().trace_path(&session_id)).expect("journal reads");
+  let event = |record: &SessionMessage| {
+    journal
+      .items
+      .iter()
+      .find(|entry| entry.envelope.meta.seq == record.seq)
+      .unwrap_or_else(|| panic!("no journal event at {:?}", record.seq))
+      .envelope
+      .event
+      .clone()
+  };
+  for record in &records {
+    let introduced_by = event(record);
+    match (&record.role, &introduced_by) {
+      (Role::User, AgentEvent::UserMessage(_))
+      | (Role::Assistant, AgentEvent::AssistantDelta(_))
+      | (Role::Tool, AgentEvent::ToolCompleted(_)) => {}
+      (role, other) => {
+        panic!("{role:?} message must bind to the event that introduced it, got {other:?}")
+      }
+    }
+  }
+
+  let first = records
+    .iter()
+    .find(|record| record.role == Role::Assistant)
+    .expect("an assistant message");
+  assert_eq!(first.turn_id.as_str(), "turn-e3");
+  assert_eq!(first.model.as_key(), "anthropic/claude-opus-4-8");
+  assert!(
+    !first
+      .message
+      .content
+      .iter()
+      .any(|block| matches!(block, ContentBlock::Reasoning { .. })),
+    "Pi's stored reasoning belongs to the trace, not to the next request's messages"
+  );
+  assert_eq!(first.epoch, 0, "a Pi file records no failover");
+  let second_turn = records
+    .iter()
+    .find(|record| record.role == Role::User && record.turn_id.as_str() != "turn-e3")
+    .expect("the second user message");
+  assert_eq!(second_turn.turn_id.as_str(), "turn-e8");
+  let last = records.last().expect("the last message");
+  assert_eq!(
+    last.model.as_key(),
+    "openai/gpt-5.4-mini",
+    "the model that produced it, which is what an opened session resumes as"
+  );
+}
+
+/// A turn id derived from Pi's entry ids is a stable identifier, not a per-run one: importing
+/// the same file twice has to produce the same turn structure, or a re-import would look like
+/// a different conversation.
+#[test]
+fn a_reimport_produces_the_same_turns() {
+  let turns = |label: &str| -> Vec<(String, Role)> {
+    let root = StoreTempDir::new(label);
+    let store = store_in(root.path(), 64);
+    let source = read_fixture();
+    let plan = pi_import::plan(&source).expect("fixture plans");
+    let session_id = pi_import::write(&store, &plan).expect("import writes");
+    store
+      .restore(&session_id)
+      .expect("restores")
+      .messages
+      .iter()
+      .map(|record| (record.turn_id.to_string(), record.role))
+      .collect()
+  };
+  let first = turns("reimport-a");
+  let second = turns("reimport-b");
+  assert_eq!(first, second);
+  assert_eq!(first.len(), 6);
+  assert_eq!(
+    first
+      .iter()
+      .map(|(turn, _)| turn.as_str())
+      .collect::<std::collections::HashSet<_>>()
+      .len(),
+    2,
+    "two user messages open two turns"
+  );
+}
+
+/// A one-line rendering of what a message record would put in front of a model.
+fn describe(record: &SessionMessage) -> String {
+  let mut parts: Vec<String> = Vec::new();
+  for block in &record.message.content {
+    match block {
+      ContentBlock::Text { text } => parts.push(text.clone()),
+      ContentBlock::ToolCall(call) => parts.push(format!("call {}", call.name)),
+      ContentBlock::ToolResult(result) => parts.push(format!(
+        "{} {}",
+        result.name,
+        match result.state {
+          ToolExecutionState::Succeeded => "ok",
+          ToolExecutionState::Failed => "failed",
+          _ => "unknown",
+        }
+      )),
+      ContentBlock::Image { mime, .. } => parts.push(format!("image {mime}")),
+      ContentBlock::Reasoning { .. } => parts.push("reasoning".to_string()),
+    }
+  }
+  format!("{}: {}", record.role.as_str(), parts.join(" | "))
 }

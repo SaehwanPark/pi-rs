@@ -128,9 +128,17 @@ is stderr, and a dry run creates no byte on disk.
   streamed it. A request that stored no reasoning gets no provenance at all.
 * `model_change` and `thinking_level_change` become info diagnostics rather than a model
   epoch, which would claim capabilities Pi never recorded.
-* Tool output is filed as a blob whatever its size — a tool *result* lives in the session
-  message log, which an import does not write, and `ToolCompleted` has no inline field.
-  A store configured to keep small payloads inline must not be able to lose an output.
+* Two durable records come out of one plan: the trace journal gets the events, and the
+  session message log gets the conversation, each message bound to the event that introduced
+  it (a user message to its `user_message`, a reply to its first `assistant_delta`, a tool
+  result to its terminal tool event). Reasoning stays trace-only, exactly as in a native
+  session, so a resume sends what Pi's file showed and nothing invented. Turn ids come from
+  Pi's entry tree (`turn-<entry id>`) because Pi records none, and are stable across
+  re-imports.
+* Tool output follows the same inline rule as a native session's: filed as a blob past the
+  store's inline threshold, otherwise held by its message record. Filing every imported
+  output would store the same bytes twice, and `reduced` stays false because pi-rs reduced
+  nothing.
 * Timestamps are parsed without a date library (`Z`, `±HH:MM`, zone-less read as UTC by
   documented convention).
 * Damage is named: an unreadable line is skipped and reported as `line N: …`.
@@ -157,10 +165,9 @@ that the import is a session rather than a transcription.
    coverage also remains deferred; current CI targets Ubuntu and macOS.
 9. A temporal terminal-streaming benchmark is deferred beyond deterministic
    multi-chunk ordering tests.
-10. An import writes the canonical trace journal only. Pi conversation messages are not
-    carried into the session message log, so an imported session has no `SessionRecord::Message`
-    records and context reconstruction from an import starts from the trace, not from a
-    message log.
+10. An import carries a Pi conversation into both records a session has — trace journal and
+    message log — but a resumed imported session has not been exercised against a live
+    provider; the resume path is proven by store-level restoration, not by a real request.
 
 ## Real-endpoint verification
 

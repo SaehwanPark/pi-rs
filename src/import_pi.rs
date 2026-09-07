@@ -102,10 +102,14 @@ fn write_report(
   if let Some(cwd) = &plan.report.cwd {
     writeln!(out, "  cwd {cwd}")?;
   }
+  // Two counts because two things are written: the trace's events, and the conversation a
+  // resume would read. They differ, and a reader who sees only one cannot tell what a resumed
+  // session would actually send.
   writeln!(
     out,
-    "  {} events for session {}",
+    "  {} events, {} conversation messages, for session {}",
     plan.events.len(),
+    plan.report.messages,
     plan.header.session_id.as_str(),
   )?;
   if !source.damaged_lines.is_empty() {

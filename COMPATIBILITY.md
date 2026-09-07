@@ -169,10 +169,19 @@ Mapped, at the fidelity the file supports:
 | --- | --- |
 | `message` (role `user`) | `user_message`, with non-text blocks counted as attachments |
 | `message` (role `assistant`) | one request span: `reasoning_delta`, `assistant_delta`, `tool_requested`, `model_request_completed` carrying Pi's usage and stop reason |
-| `message` (role `toolResult`) | `tool_completed`, output filed as a blob under the durable redaction policy |
+| `message` (role `toolResult`) | `tool_completed`, output filed past the store's inline threshold, under the durable redaction policy |
 | `model_change`, `thinking_level_change` | info `diagnostic`; opening a model epoch would claim capabilities Pi never recorded |
 | entry tree (`id` / `parentId`) | the path from the newest-written entry to the root; everything else is counted per type and named |
 | header line | session id `pi-<pi id>`, `imported_from: "pi"`, Pi's `cwd`, the first readable entry timestamp |
+
+One plan writes two durable records. The trace journal holds the events above. The session
+log holds the conversation as message records, each bound to the event that introduced it: a
+user message to its `user_message`, an assistant reply — its prose and its calls, never its
+reasoning — to the first `assistant_delta`, a tool result to its terminal tool event. That
+binding is what makes an imported session resumable rather than merely readable, and it is
+the same mechanism a native session uses, so `load_session` needs no idea that Pi was
+involved. Pi records no turn ids, so the import anchors one turn per user entry (`turn-<entry
+id>`); it is derived from the file, so re-importing produces the same turns.
 
 Deliberately not carried, each reported by kind with its reason:
 
@@ -180,7 +189,9 @@ Deliberately not carried, each reported by kind with its reason:
   put the conversation in twice;
 * `label`, `custom`, `custom_message` — UI- or extension-owned content with no `pi-rs`
   event, which importing as prose would misattribute to the user or the model;
-* images and `usage.cacheRead` / `cacheWrite` / `cost` — `pi-rs` events have no field for them;
+* `usage.cacheRead` / `cacheWrite` / `cost` — `pi-rs` events have no field for them;
+* an image whose Pi entry carried no bytes — counted as an attachment and reported. An image
+  that did carry bytes is kept inline in the session's messages, where `pi-rs` keeps one;
 * reasoning on a request that stored none receives **no** provenance rather than a plausible one.
 
 Timestamps are parsed without a date library. `Z` and `±HH:MM` are honoured; a zone-less
