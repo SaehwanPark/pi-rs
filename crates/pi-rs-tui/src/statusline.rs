@@ -114,11 +114,9 @@ pub fn line(status: &Status<'_>) -> RenderLine {
     .columns
     .saturating_sub(display_width(SEPARATOR) + activity.width());
   if budget >= MIN_MODEL_COLUMNS {
-    let mut line = RenderLine::new();
-    line.push(&truncate(status.model, budget), Role::Meta);
-    line.push(SEPARATOR, Role::Muted);
-    line.push(activity.text.as_str(), Role::Status);
-    return line;
+    // `joined` so a model that truncates to nothing takes its separator with it.
+    let model = Segment::new(truncate(status.model, budget), Role::Meta);
+    return joined(&[&model, &activity]);
   }
   RenderLine::text(activity.text.as_str(), Role::Status)
 }
@@ -258,6 +256,17 @@ mod tests {
     let line = line(&status);
     assert_eq!(line.plain(), "working");
     assert_eq!(role_of(&line, "working"), Some(Role::Status));
+  }
+
+  #[test]
+  fn an_empty_model_takes_its_separator_with_it() {
+    let mut wide = status(20);
+    wide.model = "";
+    assert_eq!(line(&wide).plain(), "idle · 3 turns");
+
+    let mut narrow = status(MIN_COLUMN);
+    narrow.model = "";
+    assert_eq!(line(&narrow).plain(), "idle");
   }
 
   #[test]
