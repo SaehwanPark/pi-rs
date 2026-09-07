@@ -77,6 +77,9 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
     }
   }
   let write_policy = WritePolicy::from_retention(&config.trace, &config.redaction);
+  if let Some(wanted) = args.resume.as_deref() {
+    return Err(resume_refusal(&config.state_dir, &write_policy, wanted)?);
+  }
   let store = Store::open(&config.state_dir, write_policy)
     .map_err(|error| format!("cannot open durable state: {error}"))?;
   store
@@ -158,6 +161,32 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
 /// failover gate needs beforehand — the model reference and the capability
 /// declaration — is read from config, so a backup that is never needed costs
 /// nothing at startup and never touches a credential it does not use.
+/// Why `--resume <wanted>` cannot be honoured, or why the name was rejected.
+///
+/// The name is resolved against a read-only store, before `Store::open`, because
+/// `open` creates the state layout: an id the store does not hold must leave the store
+/// exactly as it was found, with no session written and no provider contacted.
+///
+/// A session the store does hold is reported as not continuable rather than appended
+/// to. `run_turn` builds its request from the prompt alone, so a turn recorded under
+/// an existing session id would be a fresh conversation wearing that id — a
+/// continuation fabricated rather than rebuilt. Rebuilding the model-visible context
+/// from the session log is what retires this refusal.
+fn resume_refusal(
+  state_dir: &str,
+  write_policy: &WritePolicy,
+  wanted: &str,
+) -> Result<String, String> {
+  let store = Store::new(state_dir, write_policy.clone());
+  let session = crate::trace::resolve_session(&store, Some(wanted))?;
+  Ok(format!(
+    "cannot continue session {}: the model-visible context of a recorded session is not \
+     rebuilt from its session log, and a turn without that context is a new session, not \
+     a continuation",
+    session.as_str()
+  ))
+}
+
 fn backup_provider(config: &RuntimeConfig) -> Result<Option<Deferred>, String> {
   let Some(model) = config.backup.clone() else {
     return Ok(None);
