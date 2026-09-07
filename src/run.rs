@@ -160,6 +160,11 @@ pub struct SessionHandle<'a> {
   transcript_error: Option<io::Error>,
 }
 
+// The turn error carries the full normalized failure the caller has to print, and
+// a session error is either that or one I/O error; boxing either would only move
+// the allocation to the path that reports a failure. Same allowance the runtime
+// crate makes for `TurnError`.
+#[allow(clippy::result_large_err)]
 impl SessionHandle<'_> {
   /// Run one user turn.
   ///
