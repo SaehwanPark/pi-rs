@@ -111,6 +111,20 @@ generate retries forever.
   the provider reported real usage. `measured_input_tokens` from the last completion is
   preferred over any estimate.
 
+## Benchmarks
+
+`bench/startup.sh` measures process startup of the release binary: one cold exec, then warm
+min/mean/median/max. `bench/render.sh` measures the renderer and the command parser per event
+and per line -- width 80 monochrome, width 80 colour, width 20 colour (the wrap-dominated case),
+and `Input::parse` over representative command lines -- and exits non-zero when a case exceeds
+its budget.
+
+Budgets are deliberately not run in CI. Each is about five times a baseline recorded on one
+machine, which is generous locally and meaningless on a shared runner, where identical code
+measures several times slower for reasons nobody changed. They are a pre-merge gate for changes
+to rendering, streaming, or the startup path, and the numbers they were derived from are recorded
+beside them.
+
 ## Not done yet
 
 1. `pi-rs-tui` — ratatui transcript rendering.

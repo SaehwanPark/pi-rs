@@ -52,10 +52,16 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
       floor and is not stable run to run (median delta +0.04, +0.11, +0.04 ms across three runs on
       one dev machine). A real cold-start budget needs root `drop_caches`, `posix_fadvise`/reclaim
       control, or a fresh-VM boot harness. No budget recorded, per `docs/SLICE_COLD_START.md`.)
-- [ ] Add warm-start benchmark.
-- [ ] Add TUI render benchmark.
-- [ ] Add slash-completion benchmark.
-- [ ] Record initial latency budgets.
+- [ ] Add warm-start benchmark (`bench/startup.sh` reports min/mean/median/max over N warm runs).
+- [x] Add TUI render benchmark (`bench/render.sh`; cases in
+      `crates/pi-rs-tui/benches/render.rs`).
+- [ ] Add slash-completion benchmark. Nothing completes a slash command yet:
+      `pi-rs-tui::command` parses. A benchmark for a completion that does not exist would be a
+      number with nothing behind it.
+- [x] Record initial latency budgets. They are the budgets in the bench source, which exits
+      non-zero when a case exceeds one; the recorded baseline, its date, and the machine that
+      produced it are in the same file, so the enforcement point and the number cannot drift
+      apart.
 
 ### Stage gate
 

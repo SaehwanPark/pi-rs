@@ -107,10 +107,11 @@ Before adding startup-path work, ask:
 
 If not, defer it.
 
-Benchmark changes that affect:
+Benchmark before merging changes that affect:
 
-- startup;
-- TUI rendering;
+- startup (`bash bench/startup.sh`);
+- TUI rendering or command parsing (`bash bench/render.sh`, budgets in
+  `crates/pi-rs-tui/benches/render.rs`);
 - session resume;
 - context reconstruction;
 - package discovery;
