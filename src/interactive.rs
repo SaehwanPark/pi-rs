@@ -912,6 +912,188 @@ mod tests {
     assert_eq!(roles(line), [Role::Prompt]);
   }
 
+  /// Frames that cannot fit the width they are given, so every one of them wraps.
+  ///
+  /// [`FRAMES`] is all single-row, and a line that fits cannot show what happens to a
+  /// character that lands on a break. These are the cases PR #40 left out: an argument
+  /// longer than the column count, CJK at an odd width where a glyph worth two cannot
+  /// be spent evenly, an emoji argument, an unterminated quote long enough to wrap, and
+  /// lines that wrap more than twice.
+  const WRAPPING_FRAMES: [(&str, usize); 7] = [
+    // One argument, no spaces to break on, longer than the whole terminal.
+    ("read crates/pi-rs-tui/src/interactive.rs", 12),
+    // Two columns a glyph at an odd width: nine columns for glyphs worth two.
+    ("가나다라마바사아자차카타", 11),
+    ("한글 입력 테스트 입니다", 7),
+    // An emoji argument: two columns wide like the CJK, from another range.
+    ("\u{1f41a} \u{1f41a} \u{1f41a} \u{1f41a} build --all", 9),
+    // An unterminated quote, so classification stops partway down a wrapped line.
+    ("read \"unterminated tail that keeps going", 9),
+    // Long enough to wrap more than twice at the narrow widths used here.
+    ("read src/main.rs --offset=10 --limit=20", 5),
+    ("the quick brown fox jumps over the lazy dog", 6),
+  ];
+
+  /// One cluster of five code points: three people held together by zero-width
+  /// joiners, which is what a single typed character is when the user pastes one.
+  const JOINED_EMOJI: &str = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} ship it now";
+
+  /// The decoration drawn in front of the frame's row at `index`: the prompt on the
+  /// first row, the indent that stands under it on every row after.
+  fn decoration(index: usize) -> String {
+    if index == 0 {
+      PROMPT_PREFIX.to_string()
+    } else {
+      " ".repeat(display_width(PROMPT_PREFIX))
+    }
+  }
+
+  /// The buffer text a drawn row shows: the row with its decoration taken off.
+  fn drawn(row: &str, index: usize) -> &str {
+    let decoration = decoration(index);
+    row.strip_prefix(decoration.as_str()).unwrap_or(row)
+  }
+
+  /// The buffer text of every row in order, with the wrapping-induced breaks removed.
+  fn drawn_rows(rows: &[(String, RenderLine)]) -> Vec<&str> {
+    rows
+      .iter()
+      .enumerate()
+      .map(|(index, (row, _))| drawn(row, index))
+      .collect()
+  }
+
+  #[test]
+  fn wrapping_removes_nothing_from_the_buffer() {
+    for (buffer, columns) in WRAPPING_FRAMES {
+      let rows = painted(buffer, columns);
+      // A frame that does not wrap would prove nothing; these fixtures are here
+      // because they cannot fit.
+      assert!(rows.len() > 1, "{buffer:?} at {columns} fits in one row");
+      // A wrap is a break in the drawing, not an edit of the text: put the rows back
+      // in order, take the decoration off each, and what is left is the input.
+      let recomposed: String = drawn_rows(&rows).concat();
+      assert_eq!(recomposed, buffer, "{buffer:?} at {columns}");
+      // And the painted row says what the drawn row says, so the characters counted
+      // above are the characters the paint path carries, not just the ones `draw`
+      // happened to write.
+      for (row, line) in &rows {
+        assert_eq!(&line.plain(), row, "{buffer:?} at {columns}");
+      }
+    }
+  }
+
+  #[test]
+  fn every_row_of_a_wrapped_frame_fits_and_draws_something() {
+    for (buffer, columns) in WRAPPING_FRAMES {
+      let rows = painted(buffer, columns);
+      assert!(rows.len() > 1, "{buffer:?} at {columns} fits in one row");
+      for (index, (row, line)) in rows.iter().enumerate() {
+        // The prefix spends columns the buffer cannot also spend on text, and a
+        // double-width glyph placed past the edge of the terminal shows up here.
+        assert!(
+          display_width(row) <= columns,
+          "row {index} of {buffer:?} at {columns} costs {} columns",
+          display_width(row)
+        );
+        // The painted row costs exactly what the drawn row costs.
+        assert_eq!(line.width(), display_width(row), "{buffer:?} at {columns}");
+        // An empty row is a row the terminal was told to draw and found nothing on.
+        // Only an empty buffer may produce one, and these buffers are not empty.
+        assert!(
+          !drawn(row, index).is_empty(),
+          "row {index} of {buffer:?} at {columns} draws nothing"
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn wrapping_splits_neither_a_cluster_nor_a_double_width_character() {
+    for (buffer, columns) in WRAPPING_FRAMES {
+      let rows = painted(buffer, columns);
+      assert!(rows.len() > 1, "{buffer:?} at {columns} fits in one row");
+      let pieces = drawn_rows(&rows);
+      let recomposed: String = pieces.concat();
+      // Recompose and measure again: a character broken across a row boundary leaves
+      // one row holding part of its columns, so the pieces cost a different number of
+      // columns than the whole they were cut from.
+      let pieces_width: usize = pieces.iter().map(|piece| display_width(piece)).sum();
+      assert_eq!(
+        display_width(&recomposed),
+        pieces_width,
+        "{buffer:?} at {columns} was broken inside a character"
+      );
+      // A break may only be taken where a new character begins. A row that starts on
+      // something measuring no columns was started in the middle of a cluster, and a
+      // row that ends on a joiner left the joiner behind and put what it joins on the
+      // row after it.
+      for (index, piece) in pieces.iter().enumerate() {
+        if index == 0 {
+          // The first row begins where the buffer begins, decoration aside.
+          continue;
+        }
+        let begins = piece.chars().next().unwrap_or(' ');
+        let mut bytes = [0u8; 4];
+        assert_ne!(
+          display_width(begins.encode_utf8(&mut bytes)),
+          0,
+          "row {index} of {buffer:?} at {columns} begins inside a cluster: {piece:?}"
+        );
+        assert!(
+          !piece.ends_with('\u{200d}'),
+          "row {index} of {buffer:?} at {columns} ends on a joiner: {piece:?}"
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn a_joined_emoji_is_not_broken_across_a_wrapped_row() {
+    // The joiners inside [`JOINED_EMOJI`] measure no columns, so a break taken beside
+    // one is invisible to every width check: the boundary is the only place it shows.
+    for columns in [6, 7, 8] {
+      let rows = painted(JOINED_EMOJI, columns);
+      assert!(
+        rows.len() > 1,
+        "{JOINED_EMOJI:?} at {columns} fits in one row"
+      );
+      for (index, piece) in drawn_rows(&rows).iter().enumerate() {
+        assert!(
+          !piece.ends_with('\u{200d}'),
+          "row {index} of {JOINED_EMOJI:?} at {columns} ends on a joiner: {piece:?}"
+        );
+        assert!(
+          !piece.starts_with('\u{200d}'),
+          "row {index} of {JOINED_EMOJI:?} at {columns} begins on a joiner: {piece:?}"
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn colour_still_adds_up_across_a_wrapped_row() {
+    for (buffer, columns) in WRAPPING_FRAMES {
+      for (row, line) in painted(buffer, columns) {
+        // Monochrome is the reference rendering, and it writes no escape at all — not
+        // on a row the buffer was broken onto and not on the row before it.
+        let plain = line.render(Palette::monochrome());
+        assert_eq!(plain, row, "{buffer:?} at {columns}");
+        assert!(
+          !plain.contains('\u{1b}'),
+          "{buffer:?} at {columns} wrote an escape"
+        );
+        // Strip the coloured rendering and what a terminal shows is the row and
+        // nothing else, so no colour is left open across a row end by the wrap.
+        assert_eq!(
+          visible(&line.render(Palette::colored())),
+          row,
+          "{buffer:?} at {columns}"
+        );
+      }
+    }
+  }
+
   #[test]
   fn the_first_run_of_a_line_is_painted_as_the_operation_and_the_rest_as_arguments() {
     // The roles come from `highlight::tokens`, so the wiring has to reach the row with
