@@ -35,8 +35,24 @@
 //! that do not know they are attached to a raw terminal, and would render as a
 //! staircase. Raw mode is therefore handed back for the duration of a turn. The
 //! side effect is honest and documented: inside a turn, Ctrl-C is the terminal's own
-//! signal rather than a key this loop reads, and interrupting a turn is a separate
-//! runtime slice rather than something to imitate here.
+//! signal rather than a key this loop reads.
+//!
+//! # Interrupting a turn
+//!
+//! What `Ctrl-C` means is decided by [`interrupt_action`], in a function that has
+//! never seen a terminal and holds only the two facts that matter: whether a turn is
+//! in flight, and whether anything is typed. The loop owns one [`CancelToken`] for
+//! the session and starts every turn with it, so a decision to cancel is one store
+//! away from the runtime, and the session and the buffer outlive the turn that was
+//! stopped.
+//!
+//! What is deliberately *not* decided here is how a `Ctrl-C` that arrives while the
+//! screen is handed over gets observed at all. The settings that make a key readable
+//! are the same settings that stop the terminal translating a newline, so during a
+//! turn that `Ctrl-C` is a `SIGINT` and not a key event; observing it needs a signal
+//! handler or a termios mode `crossterm` does not expose. Until one of those exists,
+//! the loop acts on an interrupt while it is reading events, which is to say when a
+//! turn has already ended.
 
 use std::io::{self, Write};
 
@@ -47,6 +63,7 @@ use crossterm::{
   terminal::{self, Clear, ClearType},
 };
 
+use pi_rs_core::CancelToken;
 use pi_rs_tui::{Editor, Intent, Outcome, display_width, keys::intent, term, truncate};
 
 use crate::{
@@ -68,7 +85,7 @@ const FALLBACK_COLUMNS: usize = 80;
 pub enum TurnState {
   /// Waiting for input.
   Idle,
-  /// A turn is running; no event is read until it ends.
+  /// A turn is running; the screen and the terminal's settings are handed to it.
   Working,
 }
 
@@ -80,31 +97,56 @@ pub enum TurnState {
 pub enum LoopAction {
   /// Hand this intent to the buffer, then repaint if the buffer changed.
   Edit(Intent),
-  /// Ctrl-C with something typed: keep the draft and do nothing else.
-  KeepDraft,
-  /// Leave the loop.
-  Quit,
+  /// Ctrl-C, as [`interrupt_action`] reads it.
+  Interrupt(InterruptAction),
   /// The terminal is `columns` wide now; reflow the buffer and repaint.
   Resize { columns: usize },
 }
 
+/// What `Ctrl-C` asks for.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InterruptAction {
+  /// Stop the turn that is running, keep the session, and keep what is typed.
+  Cancel,
+  /// Leave the loop.
+  Quit,
+  /// Nothing typed a turn to stop and nothing to lose: keep the draft and stop.
+  KeepText,
+}
+
+/// Decide what `Ctrl-C` means from the only two facts that decide it.
+///
+/// A turn in flight outranks the buffer: the user is answering a question about what
+/// the session is doing, not about how to end it, so the key stops the turn and both
+/// the session and the draft survive it. With the loop idle, the buffer is what
+/// distinguishes leaving from stopping — an empty one means the user meant to leave,
+/// and anything in it means they did not, because neither exiting nor discarding
+/// their text is this loop's to choose.
+///
+/// A turn is only ever in flight while the screen is handed over, where `Ctrl-C` is a
+/// signal rather than a key; see the module comment for what observing it would take.
+pub fn interrupt_action(turn_in_flight: bool, buffer_is_empty: bool) -> InterruptAction {
+  if turn_in_flight {
+    return InterruptAction::Cancel;
+  }
+  if buffer_is_empty {
+    InterruptAction::Quit
+  } else {
+    InterruptAction::KeepText
+  }
+}
+
 /// Decide what one event means, without touching a terminal.
 ///
-/// `Ctrl-C` is decided here rather than in the keymap, and the fact the keymap
-/// cannot have is whether anything is typed, which `buffer_is_empty` supplies. An
-/// empty buffer means the user meant to leave. Anything in it means they did not,
-/// and neither exiting nor discarding their text is this loop's to choose.
+/// `Ctrl-C` is decided here rather than in the keymap, and the facts the keymap
+/// cannot have are whether a turn is in flight and whether anything is typed.
 ///
 /// Everything else goes to the keymap, including events it reports as
 /// [`Intent::Noop`]: an unmapped key is an edit that changed nothing, and "changed
 /// nothing" is already how the loop decides not to repaint.
-pub fn action(event: &Event, buffer_is_empty: bool) -> LoopAction {
+pub fn action(event: &Event, turn_in_flight: bool, buffer_is_empty: bool) -> LoopAction {
   if is_ctrl_c(event) {
-    return if buffer_is_empty {
-      LoopAction::Quit
-    } else {
-      LoopAction::KeepDraft
-    };
+    return LoopAction::Interrupt(interrupt_action(turn_in_flight, buffer_is_empty));
   }
   if let Event::Resize(columns, _rows) = event {
     // Rows are what a surface that scrolls or pages needs. This one draws at the
@@ -202,6 +244,12 @@ struct Loop {
   state: TurnState,
   /// Columns available to this surface, as the terminal last reported them.
   columns: usize,
+  /// The cancellation this loop's in-flight turn answers to.
+  ///
+  /// One token per session, replaced after each turn rather than cleared, because a
+  /// token is one-shot and nothing ever un-sets it: an interrupted token stays set,
+  /// and a turn started with a spent token would be born cancelled.
+  cancel: CancelToken,
   /// How many lines the cursor sits below the row the current frame starts on.
   ///
   /// Not the frame's height: a frame ends with the cursor parked on the caret, and
@@ -219,6 +267,7 @@ impl Loop {
       model,
       state: TurnState::Idle,
       columns: 1,
+      cancel: CancelToken::new(),
       above: 0,
     };
     surface.set_columns(columns);
@@ -242,11 +291,19 @@ impl Loop {
     self.draw().map_err(terminal_failure)?;
     loop {
       let event = event::read().map_err(|error| format!("cannot read the terminal: {error}"))?;
-      match action(&event, self.editor.is_empty()) {
-        LoopAction::Quit => return Ok(()),
-        // Something is typed, so the key meant "stop that", not "leave". The draft
-        // stays where it is, and there is nothing new to draw.
-        LoopAction::KeepDraft => {}
+      let in_flight = self.state == TurnState::Working;
+      match action(&event, in_flight, self.editor.is_empty()) {
+        LoopAction::Interrupt(action) => match action {
+          InterruptAction::Quit => return Ok(()),
+          // Nothing was typed that the key could mean "throw away", and no turn was
+          // running that it could mean "stop". The draft stays where it is, and there
+          // is nothing new to draw.
+          InterruptAction::KeepText => {}
+          // The token is the whole distance to the runtime: the turn in flight sees it
+          // between stream reads, ends as `Cancelled` rather than as a failure, and
+          // the loop keeps the session and the buffer exactly as they stand.
+          InterruptAction::Cancel => self.cancel.cancel(),
+        },
         LoopAction::Resize { columns } => {
           self.set_columns(columns);
           self.draw().map_err(terminal_failure)?;
@@ -262,13 +319,21 @@ impl Loop {
   }
 
   /// One turn of the open session, with the screen handed over while it runs.
+  ///
+  /// The turn runs under the token this loop owns, which is what makes an interrupt
+  /// able to stop it. A turn that was stopped is a completed report rather than an
+  /// error — the user asked for it — so the only thing the loop has to do with it is
+  /// what it already does for an answer: take the screen back and stay open.
   fn turn(&mut self, session: &mut SessionHandle<'_>, prompt: &str) -> Result<(), String> {
     self.hand_over().map_err(terminal_failure)?;
     // See the module comment: a turn writes plain `\n`s, and raw mode has taken the
     // terminal's own translation of them away. From here until the matching enable,
     // the terminal is the one the runtime's writers expect.
     terminal::disable_raw_mode().map_err(terminal_failure)?;
-    let result = session.turn(prompt);
+    let result = session.turn_with(prompt, &self.cancel);
+    // Done with this token, whether the turn answered, was stopped, or failed: the
+    // next one starts with a fresh token, so a spent one is never reused.
+    self.cancel = CancelToken::new();
     // Failover changes which model answers, so the frame has to ask the runtime
     // rather than keep saying what the config said when the session opened.
     self.model = session.model().to_string();
@@ -401,15 +466,18 @@ mod tests {
 
   #[test]
   fn ctrl_c_on_an_empty_buffer_leaves_the_loop() {
-    assert_eq!(action(&ctrl_c(KeyEventKind::Press), true), LoopAction::Quit);
+    assert_eq!(
+      action(&ctrl_c(KeyEventKind::Press), false, true),
+      LoopAction::Interrupt(InterruptAction::Quit)
+    );
   }
 
   #[test]
   fn ctrl_c_with_text_typed_neither_quits_nor_touches_the_buffer() {
-    let action = action(&ctrl_c(KeyEventKind::Press), false);
-    // Not `Quit`, and not an intent the buffer would be handed: `KeepDraft` is the
+    let action = action(&ctrl_c(KeyEventKind::Press), false, false);
+    // Not `Quit`, and not an intent the buffer would be handed: `KeepText` is the
     // action whose only implementation is that the loop does nothing.
-    assert_eq!(action, LoopAction::KeepDraft);
+    assert_eq!(action, LoopAction::Interrupt(InterruptAction::KeepText));
     let mut editor = Editor::new();
     editor.apply(Intent::Paste("half a sentence".to_string()));
     if let LoopAction::Edit(intent) = action {
@@ -419,20 +487,45 @@ mod tests {
   }
 
   #[test]
+  fn a_turn_in_flight_makes_ctrl_c_a_cancel_even_with_nothing_typed() {
+    // The order the decision turns on. A turn owns the screen, so the buffer is
+    // empty, and the idle rule would read that empty buffer as "leave". It is not:
+    // the key stops the turn, and an interrupt never touches the buffer either way.
+    assert_eq!(interrupt_action(true, true), InterruptAction::Cancel);
+    assert_eq!(interrupt_action(true, false), InterruptAction::Cancel);
+    assert_eq!(
+      action(&ctrl_c(KeyEventKind::Press), true, true),
+      LoopAction::Interrupt(InterruptAction::Cancel)
+    );
+  }
+
+  #[test]
+  fn an_idle_ctrl_c_still_divides_on_the_buffer() {
+    // The idle rules, unchanged: empty means the user meant to leave, and text means
+    // they did not.
+    assert_eq!(interrupt_action(false, true), InterruptAction::Quit);
+    assert_eq!(interrupt_action(false, false), InterruptAction::KeepText);
+  }
+
+  #[test]
   fn ctrl_c_is_caught_whatever_shape_the_terminal_sends() {
     // The byte `0x03` is decoded to `Char('c')` plus `CONTROL` by crossterm, and a
     // terminal that reports the shift state as well must not be a second case.
     assert_eq!(
-      action(&ctrl_c(KeyEventKind::Repeat), false),
-      LoopAction::KeepDraft
+      action(&ctrl_c(KeyEventKind::Repeat), false, false),
+      LoopAction::Interrupt(InterruptAction::KeepText)
     );
     assert_eq!(
-      action(&ctrl_c(KeyEventKind::Repeat), true),
-      LoopAction::Quit
+      action(&ctrl_c(KeyEventKind::Repeat), false, true),
+      LoopAction::Interrupt(InterruptAction::Quit)
+    );
+    assert_eq!(
+      action(&ctrl_c(KeyEventKind::Repeat), true, true),
+      LoopAction::Interrupt(InterruptAction::Cancel)
     );
     // A release is not a second statement of an intent.
     assert_eq!(
-      action(&ctrl_c(KeyEventKind::Release), true),
+      action(&ctrl_c(KeyEventKind::Release), false, true),
       LoopAction::Edit(Intent::Noop)
     );
   }
@@ -448,6 +541,7 @@ mod tests {
           KeyModifiers::CONTROL,
           KeyEventKind::Press
         ),
+        false,
         true
       ),
       LoopAction::Edit(Intent::DeleteForward)
@@ -455,6 +549,7 @@ mod tests {
     assert_eq!(
       action(
         &key(KeyCode::Char('c'), KeyModifiers::NONE, KeyEventKind::Press),
+        false,
         true
       ),
       LoopAction::Edit(Intent::Insert('c'))
@@ -464,16 +559,25 @@ mod tests {
   #[test]
   fn everything_else_is_the_keymaps() {
     let enter = key(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Press);
-    assert_eq!(action(&enter, false), LoopAction::Edit(Intent::Submit));
+    assert_eq!(
+      action(&enter, false, false),
+      LoopAction::Edit(Intent::Submit)
+    );
     let escape = key(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Press);
-    assert_eq!(action(&escape, false), LoopAction::Edit(Intent::Cancel));
+    assert_eq!(
+      action(&escape, false, false),
+      LoopAction::Edit(Intent::Cancel)
+    );
     // An event with no binding is an edit that changes nothing, which is already the
     // loop's signal not to repaint.
     let unknown = key(KeyCode::F(7), KeyModifiers::NONE, KeyEventKind::Press);
-    assert_eq!(action(&unknown, true), LoopAction::Edit(Intent::Noop));
+    assert_eq!(
+      action(&unknown, false, true),
+      LoopAction::Edit(Intent::Noop)
+    );
     let paste = Event::Paste("two\nlines".to_string());
     assert_eq!(
-      action(&paste, true),
+      action(&paste, false, true),
       LoopAction::Edit(Intent::Paste("two\nlines".to_string()))
     );
   }
@@ -481,7 +585,25 @@ mod tests {
   #[test]
   fn a_resize_reports_the_new_width() {
     let event = Event::Resize(120, 40);
-    assert_eq!(action(&event, true), LoopAction::Resize { columns: 120 });
+    assert_eq!(
+      action(&event, false, true),
+      LoopAction::Resize { columns: 120 }
+    );
+  }
+
+  #[test]
+  fn the_loop_holds_one_token_and_setting_it_is_visible_through_a_clone() {
+    // The loop's token has to be fresh when the session opens, since a turn started
+    // with a spent token would be born cancelled, and it has to be the same flag the
+    // turn is running under: a clone is the same token, so whoever observes the key
+    // sets the one the turn is watching. `CancelToken` is never cleared, which is why
+    // the loop replaces it per turn instead. That a session still answers the turn
+    // after a cancelled one is covered at the handle level in `src/run/tests.rs`.
+    let surface = Loop::new("local/vulcan".to_string(), 80);
+    assert!(!surface.cancel.is_cancelled());
+    let observer = surface.cancel.clone();
+    observer.cancel();
+    assert!(surface.cancel.is_cancelled());
   }
 
   #[test]
