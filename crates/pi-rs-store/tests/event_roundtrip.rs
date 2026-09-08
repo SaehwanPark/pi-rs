@@ -881,7 +881,7 @@ fn generated_variant_list_has_a_case_for_every_variant() {
     .filter(|line| !line.is_empty())
     .map(str::to_string)
     .collect();
-  let covered: Vec<String> = all_variants().iter().map(|event| variant(event)).collect();
+  let covered: Vec<String> = all_variants().iter().map(variant).collect();
 
   assert_eq!(
     covered, documented,
