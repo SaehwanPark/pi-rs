@@ -50,8 +50,8 @@ pub(crate) fn open_session(
   config: &Path,
   cwd: &Path,
   surface: &SurfaceArgs,
-  /// A session to continue rather than begin, as written by the caller; `None` opens
-  /// a new session. Resolution against the store happens here, not in parsing.
+  // A session to continue rather than begin, as written by the caller; `None` opens
+  // a new session. Resolution against the store happens here, not in parsing.
   resume: Option<&str>,
   turns: impl FnOnce(&mut SessionHandle<'_>) -> Result<(), String>,
 ) -> Result<(), String> {

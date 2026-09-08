@@ -103,9 +103,7 @@ fn after_turn(result: Result<TurnReport, TurnError>) -> AfterTurn {
   match result {
     // A stopped turn is a report, not a fault: the status is the only place that
     // distinguishes it, and the loop owns the one line that says so.
-    Ok(report) if report.status == TurnStatus::Cancelled => {
-      AfterTurn::Cancelled("turn cancelled")
-    }
+    Ok(report) if report.status == TurnStatus::Cancelled => AfterTurn::Cancelled("turn cancelled"),
     Ok(_) => AfterTurn::Done,
     Err(TurnError::Aborted(TurnStatus::Cancelled)) => AfterTurn::Cancelled("turn cancelled"),
     Err(error) => AfterTurn::Failed(run::SessionError::Turn(error)),
@@ -657,12 +655,7 @@ pub fn execute(args: InteractiveArgs) -> Result<(), String> {
   // The surface is not configurable here. Colour and width come from the terminal
   // the transcript is written to, which this command already requires.
   let surface = SurfaceArgs::default();
-  run::open_session(
-    &args.config,
-    &args.cwd,
-    &surface,
-    None,
-    |session| {
+  run::open_session(&args.config, &args.cwd, &surface, None, |session| {
     // Raw mode is entered only once the session is open, so a bad config stays what
     // it was: a line printed on a terminal nothing has rearranged. From here on the
     // guard is what restores it, including when `run` returns an error.

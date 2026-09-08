@@ -271,6 +271,7 @@ fn kind_name(event: &AgentEvent) -> &'static str {
     AgentEvent::ContextReduced(_) => "context_reduced",
     AgentEvent::ContextCompactionStarted(_) => "context_compaction_started",
     AgentEvent::ContextCompactionCompleted(_) => "context_compaction_completed",
+    AgentEvent::ContextCompactionEpoch(_) => "context_compaction_epoch",
     AgentEvent::CheckpointCreated(_) => "checkpoint_created",
     AgentEvent::TurnCompleted(_) => "turn_completed",
     AgentEvent::Diagnostic(_) => "diagnostic",
@@ -372,6 +373,7 @@ mod tests {
       redactions: 0,
       raw_payload: false,
       raw_ref: None,
+      externalized: Vec::new(),
     }
   }
 

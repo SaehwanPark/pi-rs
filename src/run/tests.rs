@@ -41,10 +41,11 @@ fn a_second_turn_on_one_handle_sends_the_first_turn_with_it() {
     config,
     cwd: workspace.clone(),
     prompt: String::new(),
+    resume: None,
     surface: SurfaceArgs::default(),
   };
 
-  open_session(&args.config, &args.cwd, &args.surface, |session| {
+  open_session(&args.config, &args.cwd, &args.surface, None, |session| {
     session
       .turn("remember the word orchid")
       .map_err(|error| turn_error(&error))?;
@@ -121,10 +122,11 @@ fn a_canceled_turn_ends_cancelled_and_the_same_handle_answers_again() {
     config,
     cwd: workspace.clone(),
     prompt: String::new(),
+    resume: None,
     surface: SurfaceArgs::default(),
   };
 
-  open_session(&args.config, &args.cwd, &args.surface, |session| {
+  open_session(&args.config, &args.cwd, &args.surface, None, |session| {
     let cancel = CancelToken::new();
     interrupt_after(&cancel, Duration::from_millis(80));
     let started = Instant::now();
@@ -191,10 +193,11 @@ fn a_cancel_during_a_mutating_tool_leaves_that_call_unknown() {
     config,
     cwd: workspace.clone(),
     prompt: String::new(),
+    resume: None,
     surface: SurfaceArgs::default(),
   };
 
-  open_session(&args.config, &args.cwd, &args.surface, |session| {
+  open_session(&args.config, &args.cwd, &args.surface, None, |session| {
     let cancel = CancelToken::new();
     interrupt_after(&cancel, Duration::from_millis(150));
     let canceled = session
