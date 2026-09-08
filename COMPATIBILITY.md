@@ -201,6 +201,41 @@ Preferred architecture:
 
 Do not weaken the internal event model merely to force exact storage-format equivalence.
 
+### 10.1 Importing a Pi session
+
+`pi-rs import-pi <session.jsonl>` reads one Pi session file and files it as a pi-rs
+session. It is a reader and a writer, never an executor: a tool call in Pi's file records
+work Pi already did, and `pi-rs` will not do it again.
+
+Mapped, at the fidelity the file supports:
+
+| Pi | `pi-rs` |
+| --- | --- |
+| `message` (role `user`) | `user_message`, with non-text blocks counted as attachments |
+| `message` (role `assistant`) | one request span: `reasoning_delta`, `assistant_delta`, `tool_requested`, `model_request_completed` carrying Pi's usage and stop reason |
+| `message` (role `toolResult`) | `tool_completed`, output filed as a blob under the durable redaction policy |
+| `model_change`, `thinking_level_change` | info `diagnostic`; opening a model epoch would claim capabilities Pi never recorded |
+| entry tree (`id` / `parentId`) | the path from the newest-written entry to the root; everything else is counted per type and named |
+| header line | session id `pi-<pi id>`, `imported_from: "pi"`, Pi's `cwd`, the first readable entry timestamp |
+
+Deliberately not carried, each reported by kind with its reason:
+
+* `compaction` — the boundary is kept as a diagnostic; re-importing the summary text would
+  put the conversation in twice;
+* `label`, `custom`, `custom_message` — UI- or extension-owned content with no `pi-rs`
+  event, which importing as prose would misattribute to the user or the model;
+* images and `usage.cacheRead` / `cacheWrite` / `cost` — `pi-rs` events have no field for them;
+* reasoning on a request that stored none receives **no** provenance rather than a plausible one.
+
+Timestamps are parsed without a date library. `Z` and `±HH:MM` are honoured; a zone-less
+stamp is read as UTC. A consistently wrong reading beats discarding the stamp: entries in
+one file keep their relative order either way, and Pi writes `Z` in practice.
+
+Silence is only for what Pi deliberately ignores. Everything else — a damaged line, an
+unrecognised entry type, an entry off the active path — is reported with the path and the
+reason, and a missing header, duplicate id, dangling parent, or cycle is an error rather
+than something to paper over.
+
 ## 11. Themes and UI
 
 Basic theme semantics may be supported.

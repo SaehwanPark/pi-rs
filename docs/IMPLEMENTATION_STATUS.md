@@ -125,6 +125,33 @@ measures several times slower for reasons nobody changed. They are a pre-merge g
 to rendering, streaming, or the startup path, and the numbers they were derived from are recorded
 beside them.
 
+## Pi session import
+
+`pi-rs import-pi <session.jsonl>` reads one Pi session file and reports what a pi-rs
+session would hold; `--write --store <dir>` (or `--config <file>`, which also supplies
+the write policy) files it as a new session. The report is stdout, the destination line
+is stderr, and a dry run creates no byte on disk.
+
+* Nothing is executed. Pi's tool calls are records of work Pi already did, mapped to
+  `tool_requested` with `read_only: false`: the direction an import is allowed to be
+  wrong in is the one that asks before running.
+* The entry tree is honoured. The path from the newest-written entry back to the root is
+  the import; entries off that path are counted per type and named, never silently folded
+  in. Duplicate ids, dangling parents, and cycles are errors, not repairs.
+* Pi's stored thinking becomes `ReasoningProvenance::ProviderSummary`, because pi-rs never
+  streamed it. A request that stored no reasoning gets no provenance at all.
+* `model_change` and `thinking_level_change` become info diagnostics rather than a model
+  epoch, which would claim capabilities Pi never recorded.
+* Tool output is filed as a blob whatever its size — a tool *result* lives in the session
+  message log, which an import does not write, and `ToolCompleted` has no inline field.
+  A store configured to keep small payloads inline must not be able to lose an output.
+* Timestamps are parsed without a date library (`Z`, `±HH:MM`, zone-less read as UTC by
+  documented convention).
+* Damage is named: an unreadable line is skipped and reported as `line N: …`.
+
+`pi-rs trace` reads an imported session back with no knowledge of Pi, which is the proof
+that the import is a session rather than a transcription.
+
 ## Not done yet
 
 1. `pi-rs-tui` — ratatui transcript rendering.
@@ -146,6 +173,10 @@ beside them.
    coverage also remains deferred; current CI targets Ubuntu and macOS.
 9. A temporal terminal-streaming benchmark is deferred beyond deterministic
    multi-chunk ordering tests.
+10. An import writes the canonical trace journal only. Pi conversation messages are not
+    carried into the session message log, so an imported session has no `SessionRecord::Message`
+    records and context reconstruction from an import starts from the trace, not from a
+    message log.
 
 ## Real-endpoint verification
 

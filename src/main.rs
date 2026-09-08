@@ -1,4 +1,5 @@
 mod cli;
+mod import_pi;
 mod interactive;
 mod prompts;
 mod run;
@@ -22,6 +23,7 @@ fn main() {
     cli::Command::Skills(args) => report(skills::execute(args)),
     cli::Command::Prompts(args) => report(prompts::list(args)),
     cli::Command::Prompt(args) => report(prompts::expand(args)),
+    cli::Command::Import(args) => report(import_pi::execute(args)),
   }
 }
 

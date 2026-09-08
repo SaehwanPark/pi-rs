@@ -15,6 +15,8 @@ pub const TOP_HELP: &str = concat!(
   "  skills       List the skills that would be offered to a model\n",
   "  prompts      List the prompt templates a session would offer\n",
   "  prompt       Expand one prompt template and print the prompt it becomes\n",
+  "  import       Import a Pi session file into the store, reporting what could not\n",
+  "               be carried\n",
   "\n",
   "Run `pi-rs <command> --help` for that command's flags.\n",
 );
@@ -160,6 +162,22 @@ pub const PROMPT_HELP: &str = concat!(
   "  --help                   Show this help.\n",
 );
 
+pub const IMPORT_HELP: &str = concat!(
+  "Usage: pi-rs import-pi <pi-session.jsonl> [options]\n",
+  "\n",
+  "Reads one Pi session file and reports what a pi-rs session would hold. Nothing is\n",
+  "executed and nothing is written: the default is a dry run, and an entry pi-rs cannot\n",
+  "carry is named with the reason rather than mapped onto the nearest-looking event.\n",
+  "The report goes to stdout; where a session was written goes to stderr.\n",
+  "\n",
+  "Options:\n",
+  "  --store <dir>            State root to write into (requires --write).\n",
+  "  --config <file>          State root and write policy from a runtime config.\n",
+  "  --write                  File the import as a new session. Without it, report\n",
+  "                           only. Refuses when that session already exists.\n",
+  "  --help                   Show this help.\n",
+);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
   Help(&'static str),
@@ -169,6 +187,7 @@ pub enum Command {
   Skills(SkillsArgs),
   Prompts(PromptsArgs),
   Prompt(PromptArgs),
+  Import(ImportArgs),
 }
 
 /// `pi-rs prompts`: the templates a session would offer.
@@ -273,6 +292,28 @@ impl Default for TraceArgs {
   }
 }
 
+/// `pi-rs import-pi`: read a Pi session file, and write it only when asked to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportArgs {
+  pub path: PathBuf,
+  /// Where to write. Absent means the state root comes from `--config`.
+  pub store: Option<PathBuf>,
+  pub config: Option<PathBuf>,
+  /// `false` reports the plan and changes nothing on disk.
+  pub write: bool,
+}
+
+impl Default for ImportArgs {
+  fn default() -> Self {
+    Self {
+      path: PathBuf::new(),
+      store: None,
+      config: None,
+      write: false,
+    }
+  }
+}
+
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
   let mut args = args.into_iter();
   let Some(command) = args.next() else {
@@ -299,6 +340,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
   }
   if command == "prompt" {
     return parse_prompt(&remaining);
+  }
+  if command == "import-pi" || command == "import" {
+    return parse_import(&remaining);
   }
   // A bare argument is not a command. Guessing which command the user meant is worse
   // than naming the ones that exist.
@@ -652,9 +696,78 @@ fn inline_value(arg: &std::ffi::OsStr) -> Option<(&str, &std::ffi::OsStr)> {
   let (flag, value) = arg.to_str()?.split_once('=')?;
   matches!(
     flag,
-    "--config" | "--cwd" | "--prompt" | "--color" | "--width" | "--session" | "--epoch"
+    "--config" | "--cwd" | "--prompt" | "--color" | "--width" | "--session" | "--epoch" | "--store"
   )
   .then_some((flag, OsStr::new(value)))
+}
+
+/// `pi-rs import-pi`: one Pi session file, and where to put the pi-rs session made from it.
+fn parse_import(remaining: &[OsString]) -> Result<Command, String> {
+  if remaining.iter().any(|arg| arg == "--help" || arg == "-h") {
+    return Ok(Command::Help(IMPORT_HELP));
+  }
+  let mut path: Option<PathBuf> = None;
+  let mut store: Option<PathBuf> = None;
+  let mut config: Option<PathBuf> = None;
+  let mut write = false;
+  let remaining: &[OsString] = &expand_inline(remaining);
+  let mut index = 0;
+  while index < remaining.len() {
+    let flag = remaining[index]
+      .to_str()
+      .ok_or_else(|| format!("import argument name is not valid UTF-8\n{IMPORT_HELP}"))?;
+    index += 1;
+    match flag {
+      "--store" | "--config" => {
+        let value = remaining
+          .get(index)
+          .ok_or_else(|| format!("{flag} requires a value\n{IMPORT_HELP}"))?;
+        let value = value
+          .to_str()
+          .ok_or_else(|| format!("{flag} must be valid UTF-8\n{IMPORT_HELP}"))?;
+        // `--store --write` is a missing directory, not a directory named `--write`:
+        // swallowing the next flag would write a session somewhere the reader never typed.
+        if value.is_empty() || value.starts_with('-') {
+          return Err(format!("{flag} requires a value\n{IMPORT_HELP}"));
+        }
+        index += 1;
+        let slot = if flag == "--store" {
+          &mut store
+        } else {
+          &mut config
+        };
+        if slot.replace(PathBuf::from(value)).is_some() {
+          return Err(format!("{flag} may be supplied only once\n{IMPORT_HELP}"));
+        }
+      }
+      "--write" => write = true,
+      other if !other.starts_with('-') => {
+        if path.is_some() {
+          return Err(format!(
+            "expected one Pi session file, and '{other}' would be a second\n{IMPORT_HELP}"
+          ));
+        }
+        path = Some(PathBuf::from(other));
+      }
+      other => return Err(format!("unknown import argument '{other}'\n{IMPORT_HELP}")),
+    }
+  }
+  let path = path.ok_or_else(|| {
+    format!("a Pi session file is required: pi-rs import-pi <session.jsonl>\n{IMPORT_HELP}")
+  })?;
+  // Writing needs a destination named on purpose. Importing into whatever root a default
+  // would pick is how a session ends up somewhere the reader then cannot find.
+  if write && store.is_none() && config.is_none() {
+    return Err(format!(
+      "--write needs --store <dir> or --config <file> to say where\n{IMPORT_HELP}"
+    ));
+  }
+  Ok(Command::Import(ImportArgs {
+    path,
+    store,
+    config,
+    write,
+  }))
 }
 
 fn set_once<T>(slot: &mut Option<T>, value: T, flag: &str) -> Result<(), String> {
@@ -933,6 +1046,69 @@ mod tests {
     // wrong slot: silently consuming `--no-reasoning` would print a turn the user
     // asked to be quiet about.
     assert!(run_err(&["--width", "--no-reasoning"]).contains("--width must be"));
+  }
+
+  #[test]
+  fn import_reports_without_a_destination() {
+    let Command::Import(args) =
+      parse(strings(&["import-pi", "/tmp/pi-session.jsonl"])).expect("parses")
+    else {
+      panic!("expected import-pi");
+    };
+    assert_eq!(args.path, PathBuf::from("/tmp/pi-session.jsonl"));
+    assert!(!args.write);
+    assert!(args.store.is_none());
+  }
+
+  #[test]
+  fn import_write_names_a_destination_or_fails() {
+    let error = match parse(strings(&["import-pi", "s.jsonl", "--write"])) {
+      Err(error) => error,
+      Ok(_) => panic!("--write without a destination must fail"),
+    };
+    assert!(error.contains("needs --store"), "{error}");
+    let Command::Import(args) = parse(strings(&[
+      "import-pi",
+      "s.jsonl",
+      "--write",
+      "--store",
+      "/state",
+    ]))
+    .expect("parses") else {
+      panic!("expected import-pi");
+    };
+    assert!(args.write);
+    assert_eq!(args.store, Some(PathBuf::from("/state")));
+  }
+
+  #[test]
+  fn import_flags_do_not_take_the_place_of_the_file() {
+    // A leading flag that consumes the path would report an import of `--write`.
+    let error = match parse(strings(&["import-pi", "--store", "--write"])) {
+      Err(error) => error,
+      Ok(_) => panic!("--store with no value must fail"),
+    };
+    assert!(error.contains("requires a value"), "{error}");
+    let error = match parse(strings(&["import-pi"])) {
+      Err(error) => error,
+      Ok(_) => panic!("a file is required"),
+    };
+    assert!(error.contains("Pi session file is required"), "{error}");
+  }
+
+  #[test]
+  fn import_reads_inline_values_and_refuses_two_files() {
+    let Command::Import(args) =
+      parse(strings(&["import-pi", "a.jsonl", "--store=/state"])).expect("parses")
+    else {
+      panic!("expected import-pi");
+    };
+    assert_eq!(args.store, Some(PathBuf::from("/state")));
+    let error = match parse(strings(&["import-pi", "a.jsonl", "b.jsonl"])) {
+      Err(error) => error,
+      Ok(_) => panic!("two files must fail"),
+    };
+    assert!(error.contains("would be a second"), "{error}");
   }
 
   fn run_err(values: &[&str]) -> String {
