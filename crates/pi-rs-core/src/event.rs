@@ -500,8 +500,9 @@ pub const FIRST_COMPACTION_EPOCH: u32 = 1;
 pub struct ContextCompactionEpoch {
   /// Monotonic epoch ordinal starting at [`FIRST_COMPACTION_EPOCH`]. Claim it with
   /// [`next_context_epoch`] rather than from an in-memory counter, so a resume
-  /// numbers epochs exactly as the writer did.
-  pub epoch: u32,
+  /// numbers epochs exactly as the writer did. Spelled as in
+  /// [`ContextCompactionCompleted`], because a bare `epoch` reads as the model epoch.
+  pub context_epoch: u32,
   /// First canonical sequence number the summary replaces in model-visible context.
   /// Inclusive, and the same coordinate [`EventMeta::seq`] uses — no second
   /// addressing system exists.
@@ -524,7 +525,7 @@ pub fn next_context_epoch<'events>(events: impl IntoIterator<Item = &'events Age
     .into_iter()
     .fold(None::<u32>, |highest, event| match event {
       AgentEvent::ContextCompactionEpoch(record) => {
-        Some(highest.map_or(record.epoch, |high| high.max(record.epoch)))
+        Some(highest.map_or(record.context_epoch, |high| high.max(record.context_epoch)))
       }
       _ => highest,
     });
@@ -671,7 +672,7 @@ mod tests {
 
   fn epoch_record(epoch: u32, from: u64, through: u64) -> ContextCompactionEpoch {
     ContextCompactionEpoch {
-      epoch,
+      context_epoch: epoch,
       replaces_from: EventSeq(from),
       replaces_through: EventSeq(through),
       summary: BlobRef::for_bytes(b"summary text", Some("text/plain")),

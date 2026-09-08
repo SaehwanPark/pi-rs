@@ -425,7 +425,7 @@ fn epoch_fixture(root: &Path, id: &str) -> (Vec<(u32, AgentEvent)>, Fixture, Blo
   events.push((
     0,
     AgentEvent::ContextCompactionEpoch(ContextCompactionEpoch {
-      epoch: next_context_epoch(events.iter().map(|(_, event)| event)),
+      context_epoch: next_context_epoch(events.iter().map(|(_, event)| event)),
       replaces_from: EventSeq(replaced_from),
       replaces_through: EventSeq(replaced_through),
       summary: summary.clone(),
@@ -461,7 +461,7 @@ fn a_compaction_epoch_record_drops_no_canonical_record() {
   // containing it, and says out loud that canonical history survived.
   let epoch_line = text
     .lines()
-    .find(|line| line.contains("[compact] epoch 1 ·"))
+    .find(|line| line.contains("[compact] context epoch 1 ·"))
     .expect("compaction epoch line");
   assert!(epoch_line.contains("replaced 2..4"), "{epoch_line}");
   assert!(epoch_line.contains(&summary.recovery_ref()), "{epoch_line}");

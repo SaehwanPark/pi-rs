@@ -445,7 +445,11 @@ pub fn render_event(event: &AgentEvent, options: &TranscriptOptions) -> Vec<Rend
     }
     E::ContextCompactionEpoch(e) => {
       let mut line = label("compact");
-      fact(&mut line, Role::Meta, &format!("epoch {}", e.epoch));
+      fact(
+        &mut line,
+        Role::Meta,
+        &format!("context epoch {}", e.context_epoch),
+      );
       fact(
         &mut line,
         Role::Meta,
