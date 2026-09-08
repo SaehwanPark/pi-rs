@@ -285,3 +285,191 @@ already found three compaction variants with zero producers; that count matches 
 compaction/checkpoint trio here (`context_compaction_started`,
 `context_compaction_completed`, `checkpoint_created`), and `external_context_retrieved` is
 a fourth zero-producer variant. The state still stands; nothing was changed.
+
+## 2. Session records
+
+Source of truth: `crates/pi-rs-core/src/session.rs` (schema) and
+`crates/pi-rs-store/src/session_log.rs` plus `crates/pi-rs-store/src/store.rs` (the write
+path).
+
+### 2.1 Spec correction: `session_record_kind()` is not found
+
+`docs/SLICE_SCHEMAS.md:11-13` asks for "`session_record_kind()`'s mapping in
+`src/session.rs`". That function does not exist, and neither does that path:
+
+```console
+$ grep -rn "fn session_record_kind" --include=*.rs .
+(no output)
+$ grep -rn "session_record_kind" --include=*.rs .
+(no output)
+$ git log --all --oneline -S"session_record_kind"
+0b48ec4 docs: spec the schema reference slice
+$ ls src/session.rs
+ls: cannot access 'src/session.rs': No such file or directory
+```
+
+`session_record_kind` appears in exactly one commit in this repository's history — the
+commit that wrote the slice spec — and in no file at any revision. The name was never
+introduced, so it was never removed or renamed. It has **not** been recreated, renamed to
+something else, or "regenerated" here. Root `src/` is the CLI binary (`cli.rs`,
+`main.rs`, `run.rs`, `trace.rs`); the session schema lives at
+`crates/pi-rs-core/src/session.rs`. §2.2 documents what the spec wanted — the discriminant
+mapping — using the code that actually produces it.
+
+### 2.2 `SessionRecord` and its discriminant mapping
+
+`SessionRecord` is documented as *"One line of `session.jsonl`."*
+(`crates/pi-rs-core/src/session.rs:29`) and declared at `session.rs:32`:
+
+```rust
+/// One line of `session.jsonl`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] // session.rs:30
+#[serde(rename_all = "snake_case", tag = "type")]              // session.rs:31
+pub enum SessionRecord {                                        // session.rs:32
+```
+
+The mapping is performed by serde's internally-tagged representation, not by a hand-written
+function: the `type` key holds the snake_case variant name (`session.rs:31`).
+
+| Variant | Declared at | `type` value | Payload struct (definition) |
+| --- | --- | --- | --- |
+| `Header` | `session.rs:34` | `"header"` | `SessionHeader` (`session.rs:48`) |
+| `Message` | `session.rs:36` | `"message"` | `SessionMessage` (`session.rs:69`) |
+| `Epoch` | `session.rs:38` | `"epoch"` | `SessionEpochRecord` (`session.rs:87`) |
+| `Compaction` | `session.rs:41` | `"compaction"` | `SessionCompactionRecord` (`session.rs:95`) |
+| `CheckpointBarrier` | `session.rs:43` | `"checkpoint_barrier"` | `SessionCheckpointRecord` (`session.rs:105`) |
+
+Enumerated with:
+
+```sh
+grep -n 'serde(rename_all = "snake_case", tag = "type")\|pub enum SessionRecord\
+\|^  Header\|^  Message\|^  Epoch\|^  Compaction\|^  CheckpointBarrier' \
+  crates/pi-rs-core/src/session.rs
+```
+
+The `"header"` / `"message"` / `"epoch"` / `"compaction"` / `"checkpoint_barrier"` strings
+above are derived from the attribute at `session.rs:31`; **no fixture pins them.**
+`grep -rn "checkpoint_barrier" . --exclude-dir=.git` returns only
+`crates/pi-rs-core/src/session.rs:200`, which is the test function name
+`checkpoint_barrier_carries_the_capsule`, not a wire string. The only test that pins tag
+strings for an internally-tagged union is the event-side one at
+`crates/pi-rs-runtime/src/turn.rs:1926-1934` (`"session_started"`,
+`"model_epoch_started"`, `"user_message"`, `"model_request_started"`,
+`"model_request_completed"`, `"turn_completed"`).
+
+`SESSION_SCHEMA_VERSION: u32 = 1` (`session.rs:27`) is stamped into the header's `version`
+field, and a file claiming a newer version is refused rather than partially read
+(`crates/pi-rs-store/src/session_log.rs:226-231`).
+
+### 2.3 Record payload fields, quoted from `session.rs`
+
+`SessionHeader` (`session.rs:48`) — "Session metadata, written once and readable without
+parsing the rest":
+`session_id: SessionId`, `version: u32`, `started_at_ms: u64`, `working_dir: String`,
+`model: ModelRef`, `parent_session: Option<SessionId>`,
+`branched_from_event: Option<EventId>`, `imported_from: Option<String>`. The last three
+carry `#[serde(default, skip_serializing_if = "Option::is_none")]`, and `imported_from` is
+kept separate "so an import never pretends to be native" (`session.rs:61-62`).
+
+`SessionMessage` (`session.rs:69`) — "A message with the attribution required for
+multi-epoch sessions": `turn_id: TurnId`, `role: Role`, `message: Message`, `epoch: u32`,
+`model: ModelRef`, `event_id: EventId`, `seq: Option<EventSeq>`. `event_id` exists "so a
+session line can always be traced back into the trace" (`session.rs:77-78`); `seq` is
+`#[serde(default, skip_serializing_if = "Option::is_none")]` and is "Sequence number of that
+event, when the log had assigned one" (`session.rs:80`).
+
+`SessionEpochRecord` (`session.rs:87`): `epoch: u32`, `model: ModelRef`,
+`reason: crate::capability::EpochReason`.
+
+`SessionCompactionRecord` (`session.rs:95`): `context_epoch: u32`,
+`level: crate::context::ContextLevel`, `removed_messages: u32`, `retained_from: u32`
+("Line index (0-based, header excluded) of the first retained message.", `session.rs:99`).
+
+`SessionCheckpointRecord` (`session.rs:105`): `checkpoint_id: CheckpointId`,
+`capsule_version: u32`, `capsule_path: String`, `capsule: ContextCapsule`. The capsule is
+"duplicated here so that resume needs one read" (`session.rs:110-111`).
+
+`SessionSummary` (`session.rs:120`) is not a journal line. It is the listing entry —
+`session_id: SessionId`, `started_at_ms: u64`, `working_dir: String`, `model: ModelRef`,
+`messages: u32`, `last_model: Option<ModelRef>`, `last_turn_preview: Option<String>`,
+`closed: bool` — built "from headers plus a tail read, never from full hydration: session
+metadata lookup is a startup-path concern" (`session.rs:117-118`). Produced by
+`SessionLog::summary` (`crates/pi-rs-store/src/session_log.rs:164`) and
+`SessionLog::summary_report` (`session_log.rs:172`), exposed through
+`Store::summaries` (`crates/pi-rs-store/src/store.rs:217`).
+
+### 2.4 The JSONL write path
+
+Two files per session, named by the layout:
+`sessions/<id>.jsonl` (`crates/pi-rs-store/src/layout.rs:75-80`,
+`const SESSION_EXTENSION: &str = "jsonl"` at `layout.rs:39`) and
+`sessions/<id>.trace.jsonl` (`layout.rs:82-84`,
+`const TRACE_SUFFIX: &str = ".trace.jsonl"` at `layout.rs:40`). The module header calls the
+first "semantic session state" and the second "high-resolution trace"
+(`layout.rs:9-10`).
+
+* `SessionLog::create` (`session_log.rs:46`) / `create_with_policy` (`session_log.rs:51`)
+  sanitize the header, serialize it with
+  `serde_json::to_string(&SessionRecord::Header(header.clone()))?` (`session_log.rs:66`),
+  open the writer (`:67`) and write the header as line one (`:68`).
+* `SessionLog::append` (`session_log.rs:112`) is the only way a record is added. A second
+  header is rejected: *"a session header is written exactly once, at creation"*
+  (`session_log.rs:113-116`). Every record goes through `sanitize_record` before it is
+  serialized (`session_log.rs:118`), which round-trips the record through
+  `RedactionPolicy::apply_json` (`session_log.rs:216-223`), and is then written with the
+  durable flag set: `self.writer.write_line(&line, true)?` (`session_log.rs:119`) —
+  *"Session records are always durable."* (`session_log.rs:111`).
+* `Store::record` (`store.rs:366`) is the thin public seam onto that append.
+* `Store::append_message` (`store.rs:379`) builds a `SessionMessage` bound to an already
+  emitted event and appends `SessionRecord::Message(record.clone())` (`store.rs:403`). Its
+  doc states why: "Attribution is not decoration: without the epoch and model that produced
+  a message, a session cannot say which model is responsible for a claim after a failover."
+  (`store.rs:373-375`). The runtime's only production caller is
+  `crates/pi-rs-runtime/src/store_trace.rs:52`.
+* `Store::checkpoint` (`store.rs:415`) writes the capsule file atomically —
+  `path.with_extension("json.tmp")` then `std::fs::rename` (`store.rs:424-426`) — and only
+  then appends the barrier (`store.rs:434-436`).
+* Producers, same rule as §1: `Header` yes (`crates/pi-rs-store/src/session_log.rs:66`),
+  `Message` yes (`crates/pi-rs-store/src/store.rs:403`), `CheckpointBarrier` yes
+  (`store.rs:436`); `Epoch` **none found** and `Compaction` **none found**. Both are read —
+  `restore` accumulates them (`session_log.rs:304-305`) and `summary_report` reads `Epoch`
+  (`session_log.rs:191`) — but no production code appends them. As with §1.4 this is
+  recorded, not fixed.
+
+### 2.5 What the checkpoint barrier is for
+
+The module states the contract directly (`session.rs:10-12`):
+
+> [`SessionRecord::CheckpointBarrier`] marks everything before it as summarized by a
+> capsule. Resume cost is then `latest checkpoint + events after it`, which is what keeps
+> large historical sessions cheap to open.
+
+`restore` implements exactly that, under the doc comment "Restore session state as
+`latest checkpoint + records after it`" (`session_log.rs:285-286`):
+
+```rust
+SessionRecord::CheckpointBarrier(barrier) => {   // session_log.rs:306
+  // A later barrier supersedes an earlier one: everything before it is   // :307-308
+  // already inside the newer capsule's scope.
+  summarized_messages += messages.len();          // :309
+  checkpoint = Some(barrier.capsule.clone());     // :310
+  checkpoint_seq = last_seq;                      // :311
+  messages.clear();                               // :312
+}
+```
+
+Its result is `RestoredSession` (`session_log.rs:264`): `header: SessionHeader`,
+`messages: Vec<SessionMessage>` ("When a checkpoint barrier exists this is the post-barrier
+window only", `session_log.rs:266-267`), `checkpoint: Option<ContextCapsule>`,
+`checkpoint_seq: Option<EventSeq>` ("so that post-checkpoint trace events can be read
+without a full scan", `session_log.rs:272-273`; the read side is
+`Journal::read_after(path, seq)` at `crates/pi-rs-store/src/journal.rs:165`),
+`epochs: Vec<SessionEpochRecord>`, `compactions: Vec<SessionCompactionRecord>`,
+`summarized_messages: usize`, `last_seq: Option<EventSeq>`,
+`malformed_records: usize`, `total_records: usize`.
+
+So the barrier is a resume-cost device, not a truncation: earlier lines stay in the file and
+in canonical history, and `summarized_messages` exists "for honest UI reporting"
+(`session_log.rs:277`). `Store::restore` reaches it through
+`session_log::restore(&self.layout.session_path(session))` (`store.rs:192`). Session state
+never depends on reading `*.trace.jsonl`.
