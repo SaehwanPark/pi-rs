@@ -212,7 +212,7 @@ Semantic state needed for:
 
 High-resolution historical execution.
 
-Large payloads should move to content-addressed or separately indexed storage rather than bloating every JSONL line.
+A journal line carries an inline budget. Above it, whole fields move to the session's content-addressed blob store and the line keeps a bounded preview naming the reference and the original size, plus an `externalized` record beside it so a program can follow the pointer without parsing prose. Envelope bookkeeping and pointer-shaped fields (`*_id`, `*_ref`, `hash`, a `blob` record) are never elided: a line that cannot be attributed, or a pointer that cannot be followed, is worse than a long line. Redaction runs first, so the bytes that leave the line are already sanitized.
 
 Possible layout:
 

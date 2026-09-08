@@ -49,6 +49,12 @@ pub const DEFAULT_INLINE_THRESHOLD_BYTES: u64 = 8 * 1024;
 pub struct WritePolicy {
   pub redaction: RedactionPolicy,
   pub raw_payload: RawPayloadCapture,
+  /// Inline budget for one journal line.
+  ///
+  /// A line that would exceed it has its largest fields stored in the session's
+  /// blob store, keeping a preview and an `externalized` record. The budget is
+  /// per line rather than per field because the unit a reader pays for — `grep`,
+  /// `tail`, a resume that only needs the last few events — is the line.
   pub inline_threshold_bytes: u64,
 }
 
@@ -336,7 +342,12 @@ impl Session {
   /// the caller's in-memory event identical to the line on disk, which is what
   /// lets a session record point at its trace event without guessing.
   pub fn emit(&mut self, envelope: &mut EventEnvelope) -> Result<EventSeq, StoreError> {
-    let seq = self.journal.append(envelope)?;
+    let seq = self.journal.append_bounded(
+      envelope,
+      None,
+      Some(&self.blobs),
+      self.policy.inline_threshold_bytes,
+    )?;
     envelope.meta.seq = Some(seq);
     Ok(seq)
   }
@@ -357,7 +368,14 @@ impl Session {
     }
     let blob = self.blobs.put(raw, None)?;
     let relative = self.layout.blob_relative_path(&blob);
-    let seq = self.journal.append_with(envelope, Some(&relative))?;
+    // The captured body is already in a blob; the line that points at it is still
+    // held to the same inline budget as every other line.
+    let seq = self.journal.append_bounded(
+      envelope,
+      Some(&relative),
+      Some(&self.blobs),
+      self.policy.inline_threshold_bytes,
+    )?;
     envelope.meta.seq = Some(seq);
     Ok(seq)
   }
@@ -479,9 +497,9 @@ mod tests {
     context::CAPSULE_SCHEMA_VERSION,
     event::{
       AgentEvent, CheckpointCreated, Diagnostic, DiagnosticLevel, EventMeta, SessionEndReason,
-      SessionEnded, TurnCompleted, TurnStatus, UserMessage,
+      SessionEnded, ToolRequested, TurnCompleted, TurnStatus, UserMessage,
     },
-    ids::{EventId, TraceId, uuidv7},
+    ids::{EventId, ToolCallId, TraceId, uuidv7},
     session::{SESSION_SCHEMA_VERSION, SessionEpochRecord},
     trace::TraceRetention,
   };
@@ -603,6 +621,125 @@ mod tests {
     );
     assert_eq!(session.last_seq(), Some(EventSeq(1)));
     assert!(session.trace_path().exists());
+  }
+
+  /// A model asking to write a large file is the ordinary way a turn produces a
+  /// field far larger than a line should hold.
+  fn huge_write(id: &SessionId, turn: &TurnId, contents: &str) -> EventEnvelope {
+    EventEnvelope::new(
+      meta(id, turn),
+      AgentEvent::ToolRequested(ToolRequested {
+        call_id: ToolCallId::new(),
+        name: "write".into(),
+        arguments: serde_json::json!({"path": "generated/data.bin", "contents": contents}),
+        read_only: false,
+      }),
+    )
+  }
+
+  fn last_line(path: &Path) -> String {
+    std::fs::read_to_string(path)
+      .unwrap()
+      .lines()
+      .last()
+      .map(str::to_string)
+      .unwrap()
+  }
+
+  #[test]
+  fn an_oversized_event_is_written_within_the_inline_budget() {
+    let tmp = TempDir::new("store-bounded-line");
+    let opened = store(&tmp);
+    let id = SessionId::from_string(uuidv7());
+    let turn = TurnId::new();
+    let mut session = opened.begin(header(&id)).unwrap();
+    let contents = "x".repeat(200 * 1024);
+    let mut envelope = huge_write(&id, &turn, &contents);
+    assert_eq!(session.emit(&mut envelope).unwrap(), EventSeq(1));
+
+    let line = last_line(session.trace_path());
+    assert!(
+      line.len() <= DEFAULT_INLINE_THRESHOLD_BYTES as usize,
+      "a 200 KiB argument must not become a 200 KiB line: {} bytes",
+      line.len()
+    );
+    let report = TraceJournal::read(session.trace_path()).unwrap();
+    assert_eq!(report.malformed, 0);
+    let entry = &report.items[0];
+    assert_eq!(entry.externalized.len(), 1);
+    assert_eq!(entry.externalized[0].field, "arguments/contents");
+    assert_eq!(entry.externalized[0].bytes, contents.len() as u64);
+    assert!(
+      line.contains("generated/data.bin"),
+      "the request is still identifiable"
+    );
+
+    // The bytes are reachable from the recorded reference alone.
+    assert_eq!(
+      session
+        .blobs()
+        .get_relative(&entry.externalized[0].reference)
+        .unwrap(),
+      contents.as_bytes()
+    );
+    session.finish().unwrap();
+  }
+
+  #[test]
+  fn bounding_does_not_disturb_the_surfaces_that_resume_depends_on() {
+    // The session log holds the semantic state resume needs; bounding applies to
+    // journal lines, so a bounded event must leave resume, listing, and byte
+    // accounting behaving as they would have otherwise.
+    let tmp = TempDir::new("store-bounded-resume");
+    let opened = store(&tmp);
+    let id = SessionId::from_string(uuidv7());
+    let turn = TurnId::new();
+    let mut session = opened.begin(header(&id)).unwrap();
+    let contents = "y".repeat(64 * 1024);
+    session
+      .emit(&mut huge_write(&id, &turn, &contents))
+      .unwrap();
+    let mut introduced = EventEnvelope::new(
+      meta(&id, &turn),
+      AgentEvent::UserMessage(UserMessage {
+        text: "write the file".into(),
+        attachments: 0,
+      }),
+    );
+    session.emit(&mut introduced).unwrap();
+    session
+      .append_message(
+        &turn,
+        &pi_rs_core::message::Message::user("write the file"),
+        0,
+        &ModelRef::new("local", "qwen"),
+        &introduced,
+      )
+      .unwrap();
+    session.finish().unwrap();
+
+    let reopened = Store::open(tmp.path(), WritePolicy::default()).unwrap();
+    let listed = reopened.summaries(10).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].session_id, id);
+    let resumed = reopened.resume(&id).unwrap();
+    assert_eq!(
+      resumed.last_seq(),
+      Some(EventSeq(2)),
+      "order survives bounding"
+    );
+    let report = TraceJournal::read(resumed.trace_path()).unwrap();
+    assert_eq!(report.items.len(), 2);
+    assert_eq!(report.items[0].externalized.len(), 1);
+    assert_eq!(
+      report.items[1].externalized.len(),
+      0,
+      "an ordinary line pays nothing"
+    );
+    assert!(
+      reopened.used_bytes().unwrap() >= contents.len() as u64,
+      "spilled bytes are counted as used"
+    );
   }
 
   #[test]

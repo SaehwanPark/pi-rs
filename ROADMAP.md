@@ -192,6 +192,7 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [x] Implement trace filtering by tools.
 - [x] Implement trace filtering by reasoning.
 - [x] Implement model-epoch inspection.
+- [ ] Name the stored-out reference for an externalized field when rendering a recorded line. The transcript budgets a long argument value to keep one request on one line, which cuts the reference off; the marker is in the line and the typed `externalized` record carries the path.
 
 ### Stage gate
 
@@ -202,7 +203,17 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 - [x] A completed session can answer which model produced each major event.
 - [ ] Native reasoning remains distinguishable from all inferred/summarized forms.
-- [ ] Large payloads do not require full inline duplication in trace JSONL.
+- [x] Large payloads do not require full inline duplication in trace JSONL.
+  - Every journal line carries an inline budget (`WritePolicy::inline_threshold_bytes`,
+    8 KiB by default). Above it, whole fields go to the session's blob store once —
+    content addressing means two lines about the same payload share one copy — and
+    the line keeps a bounded preview naming the reference and the original size,
+    plus a typed `externalized` record so the sizes need no prose parsing.
+  - Envelope bookkeeping and pointer-shaped fields are excluded on purpose: an
+    elided identifier or `blob` record cannot be followed, so the alternative to a
+    long line would be an unreadable one.
+  - Bounding runs after redaction, never before, so bytes that leave the line are
+    already the sanitized ones.
 
 ---
 

@@ -27,7 +27,9 @@ use serde_json::{Value, json};
 
 use crate::{
   StoreError,
+  blob::BlobStore,
   jsonl::{LineWriter, ReadReport, read_jsonl, read_jsonl_tail},
+  payload,
 };
 
 /// Bytes read from the end of a journal to recover the last sequence number.
@@ -88,8 +90,12 @@ impl TraceJournal {
   ///
   /// Returns the sequence actually used, which callers must carry into session
   /// records so a message can be traced back into the journal.
+  ///
+  /// This path does not bound the line: it is for callers that own no blob store
+  /// and therefore have nowhere to put bytes they removed. Writes made through
+  /// [`crate::Session`] are bounded.
   pub fn append(&mut self, envelope: &EventEnvelope) -> Result<EventSeq, StoreError> {
-    self.append_with(envelope, None)
+    self.append_bounded(envelope, None, None, u64::MAX)
   }
 
   /// Append one event with an optional raw-payload recovery pointer.
@@ -102,6 +108,26 @@ impl TraceJournal {
     envelope: &EventEnvelope,
     raw_ref: Option<&str>,
   ) -> Result<EventSeq, StoreError> {
+    self.append_bounded(envelope, raw_ref, None, u64::MAX)
+  }
+
+  /// Append one event with the line held to `budget` bytes.
+  ///
+  /// When the line would be longer than the budget, whole fields go to `blobs`
+  /// and the line keeps a bounded preview that names the reference and the
+  /// original size. The redaction policy runs first, so the bytes that leave the
+  /// line are already the sanitized ones; bounding before redaction would move
+  /// secrets out of reach of the only sanitizer in this crate.
+  ///
+  /// Without a `blobs` store there is nowhere for removed bytes to go, and a
+  /// line is never shortened into a loss: the budget is then simply unmet.
+  pub fn append_bounded(
+    &mut self,
+    envelope: &EventEnvelope,
+    raw_ref: Option<&str>,
+    blobs: Option<&BlobStore>,
+    budget: u64,
+  ) -> Result<EventSeq, StoreError> {
     let seq = EventSeq(self.last_seq.map(|seq| seq.0 + 1).unwrap_or(1));
     let raw_attached = raw_ref.filter(|_| self.raw_capture.is_enabled());
     let mut entry = TraceEntry {
@@ -109,6 +135,7 @@ impl TraceJournal {
       redactions: 0,
       raw_payload: raw_attached.is_some(),
       raw_ref: raw_attached.map(str::to_string),
+      externalized: Vec::new(),
     };
     entry.envelope.meta.seq = Some(seq);
 
@@ -117,7 +144,24 @@ impl TraceJournal {
     if redactions > 0 {
       set_field(&mut line, "redactions", json!(redactions));
     }
-    let text = compact_line(&line)?;
+    let mut text = compact_line(&line)?;
+    // An ordinary line is already inside its budget, so bounding costs one length
+    // comparison and never runs. Only an oversized line pays for the search.
+    if text.len() as u64 > budget {
+      if let Some(blobs) = blobs {
+        let externalized = payload::bound(&mut line, blobs, budget, |value| {
+          Ok(compact_line(value)?.len() as u64)
+        })?;
+        if !externalized.is_empty() {
+          set_field(
+            &mut line,
+            "externalized",
+            serde_json::to_value(&externalized)?,
+          );
+          text = compact_line(&line)?;
+        }
+      }
+    }
     // Streaming deltas are the high-frequency case; everything that changes
     // state is written through so that a crash cannot lose a transition.
     let durable = requires_durable_write(&entry.envelope.event);
@@ -249,6 +293,9 @@ mod tests {
     tool::ToolExecutionState,
   };
 
+  use pi_rs_core::BlobRef;
+
+  use crate::StateLayout;
   use crate::tmp::TempDir;
 
   use super::*;
@@ -636,5 +683,186 @@ mod tests {
       self.meta.turn_id = Some(turn);
       self
     }
+  }
+
+  /// A session and the blob store that its lines may point into.
+  fn session_blobs(tmp: &TempDir) -> (SessionId, BlobStore) {
+    let session = SessionId::new();
+    let blobs = BlobStore::for_session(&StateLayout::new(tmp.path()), &session).unwrap();
+    (session, blobs)
+  }
+
+  /// The largest field the model can hand us is a tool argument: a `write`
+  /// request carries the file contents it was asked to produce.
+  fn huge_write_request(session: &SessionId, contents: &str) -> EventEnvelope {
+    EventEnvelope::new(
+      EventMeta::new(session.clone(), TraceId::new()),
+      AgentEvent::ToolRequested(ToolRequested {
+        call_id: ToolCallId::new(),
+        name: "write".into(),
+        arguments: json!({"path": "generated/data.txt", "contents": contents}),
+        read_only: false,
+      }),
+    )
+  }
+
+  /// Reopen the same journal file, which is what a later process does.
+  fn reopen(tmp: &TempDir) -> TraceJournal {
+    journal(tmp, RedactionPolicy::default())
+  }
+
+  fn lines(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+      .unwrap()
+      .lines()
+      .map(str::to_string)
+      .collect()
+  }
+
+  #[test]
+  fn a_bounded_append_keeps_the_written_line_inside_its_budget() {
+    let tmp = TempDir::new("journal-bounded");
+    let mut journal = journal(&tmp, RedactionPolicy::default());
+    let (session, blobs) = session_blobs(&tmp);
+    let contents = "x".repeat(60 * 1024);
+    let seq = journal
+      .append_bounded(
+        &huge_write_request(&session, &contents),
+        None,
+        Some(&blobs),
+        2 * 1024,
+      )
+      .unwrap();
+    assert_eq!(seq, EventSeq(1));
+
+    let written = lines(tmp.path().join("trace.jsonl").as_path());
+    assert_eq!(written.len(), 1);
+    assert!(
+      written[0].len() <= 2 * 1024,
+      "the unit a reader pays for is the line: {} bytes",
+      written[0].len()
+    );
+    let entry: TraceEntry = serde_json::from_str(&written[0]).unwrap();
+    assert_eq!(entry.externalized.len(), 1);
+    assert_eq!(entry.externalized[0].field, "arguments/contents");
+    assert_eq!(entry.externalized[0].bytes, contents.len() as u64);
+
+    // The line still says which tool was asked and for what path; only the bulk
+    // argument moved.
+    assert!(written[0].contains("generated/data.txt"));
+    assert!(
+      !written[0].contains(&"x".repeat(1024)),
+      "the bulk argument is not inline"
+    );
+
+    // And the bytes are where the record claims they are.
+    let blob = BlobRef::for_bytes(contents.as_bytes(), None);
+    assert_eq!(entry.externalized[0].reference, blob.relative_path());
+    assert_eq!(blobs.get(&blob).unwrap(), contents.as_bytes());
+  }
+
+  #[test]
+  fn bounding_spills_the_bytes_the_redaction_policy_already_ran_over() {
+    // Order matters absolutely: bounding first would move unredacted bytes into
+    // the blob store, where the journal's only sanitizer never touches them.
+    let tmp = TempDir::new("journal-bounded-redaction");
+    let policy = RedactionPolicy {
+      literals: vec!["hunter2passphrase".into()],
+      scan_environment: false,
+      ..RedactionPolicy::default()
+    };
+    let mut journal = journal(&tmp, policy);
+    let (session, blobs) = session_blobs(&tmp);
+    let contents = format!("token=hunter2passphrase {}", "p".repeat(40 * 1024));
+    journal
+      .append_bounded(
+        &huge_write_request(&session, &contents),
+        None,
+        Some(&blobs),
+        2 * 1024,
+      )
+      .unwrap();
+
+    let written = lines(tmp.path().join("trace.jsonl").as_path());
+    assert!(!written[0].contains("hunter2passphrase"), "not in the line");
+    let entry: TraceEntry = serde_json::from_str(&written[0]).unwrap();
+    assert!(
+      entry.redactions > 0,
+      "the line records that it was sanitized"
+    );
+
+    let stored = blobs
+      .get_relative(&entry.externalized[0].reference)
+      .unwrap();
+    let stored = String::from_utf8(stored).unwrap();
+    assert!(!stored.contains("hunter2passphrase"), "not in the blob");
+    // The marker names the class it came from, e.g. `[redacted:literal]`.
+    assert!(stored.contains("[redacted:"), "the blob is sanitized");
+  }
+
+  #[test]
+  fn an_ordinary_line_never_touches_the_blob_store() {
+    // Bounding is a cost on the write path, so it must be conditional: a line
+    // that fits may not pay for a store it does not need.
+    let tmp = TempDir::new("journal-bounded-fast-path");
+    let mut journal = journal(&tmp, RedactionPolicy::default());
+    let (session, blobs) = session_blobs(&tmp);
+    let mut envelope = huge_write_request(&session, "short");
+    envelope.meta.seq = None;
+    journal
+      .append_bounded(&envelope, None, Some(&blobs), 4 * 1024)
+      .unwrap();
+    assert_eq!(blobs.bytes().unwrap(), 0, "no store traffic");
+    let written = lines(tmp.path().join("trace.jsonl").as_path());
+    assert!(written[0].contains("short"));
+    let entry: TraceEntry = serde_json::from_str(&written[0]).unwrap();
+    assert!(entry.externalized.is_empty(), "and no record of it");
+    assert!(
+      !written[0].contains("externalized"),
+      "the field is not even named"
+    );
+  }
+
+  #[test]
+  fn a_journal_without_a_blob_store_shortens_nothing() {
+    // Bounding needs somewhere to put bytes. Without one, the honest outcome is
+    // a long line, not a quiet loss.
+    let tmp = TempDir::new("journal-bounded-no-where-to-go");
+    let mut journal = journal(&tmp, RedactionPolicy::default());
+    let (session, _blobs) = session_blobs(&tmp);
+    let contents = "y".repeat(20 * 1024);
+    journal
+      .append_bounded(&huge_write_request(&session, &contents), None, None, 64)
+      .unwrap();
+    let written = lines(tmp.path().join("trace.jsonl").as_path());
+    assert!(written[0].contains(&"y".repeat(1024)), "still inline");
+    let entry: TraceEntry = serde_json::from_str(&written[0]).unwrap();
+    assert!(entry.externalized.is_empty());
+  }
+
+  #[test]
+  fn a_bounded_line_survives_a_reopen() {
+    let tmp = TempDir::new("journal-bounded-reopen");
+    let mut journal = journal(&tmp, RedactionPolicy::default());
+    let (session, blobs) = session_blobs(&tmp);
+    journal
+      .append_bounded(
+        &huge_write_request(&session, &"z".repeat(50 * 1024)),
+        None,
+        Some(&blobs),
+        1024,
+      )
+      .unwrap();
+    let reopened = reopen(&tmp);
+    assert_eq!(reopened.last_seq(), Some(EventSeq(1)));
+    assert_eq!(
+      reopened.malformed_lines(),
+      0,
+      "a bounded line is still a line"
+    );
+    let entries = TraceJournal::read(tmp.path().join("trace.jsonl").as_path()).unwrap();
+    assert_eq!(entries.items.len(), 1);
+    assert_eq!(entries.items[0].externalized.len(), 1);
+    assert_eq!(entries.malformed, 0);
   }
 }

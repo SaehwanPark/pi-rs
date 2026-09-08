@@ -15,6 +15,11 @@
 //!   semantic state that resume needs; `sessions/<id>.trace.jsonl` holds the
 //!   canonical, high-resolution history. Neither is derived from the other at
 //!   read time, which is why resume is cheap and the trace stays complete.
+//! - **A bounded line.** A journal line is the unit every later reader pays for,
+//!   so bytes above the inline budget go to the blob store and the line keeps a
+//!   preview naming the reference, plus a machine-readable record of what moved.
+//!   Nothing is silently truncated: the bytes stay recoverable, and an elided
+//!   field is always announced.
 //!
 //! All I/O is blocking and bounded. Nothing in this crate scans a directory
 //! eagerly, parses a whole journal to answer a metadata question, or creates a
@@ -23,7 +28,7 @@
 //! ```text
 //! Store::open(root, WritePolicy)      one bounded mkdir pass
 //!   ├─ begin / resume                 -> Session (durable handle)
-//!   │     ├─ emit(&mut envelope)      -> EventSeq, stamped back into the envelope
+//!   │     ├─ emit(&mut envelope)      -> EventSeq, stamped back; line bounded
 //!   │     ├─ append_message(..)       -> session line pointing at that seq
 //!   │     └─ checkpoint(&capsule)     -> capsule file + barrier line
 //!   ├─ restore(id)                    -> latest checkpoint + records after it
@@ -39,6 +44,7 @@ mod error;
 mod journal;
 mod jsonl;
 mod layout;
+mod payload;
 mod retention;
 mod session_log;
 mod store;
