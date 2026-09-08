@@ -129,7 +129,17 @@ pub enum ContextAction {
   /// Reduce one payload at L0. Mechanism chooses which payload.
   ReducePayload { reason: ReductionReason },
   /// Compact at the given level. Only valid at a safe boundary.
-  Compact { level: ContextLevel, reason: String },
+  ///
+  /// `target_tokens` is the model-visible size the action wants reached — the
+  /// profile's recent-target threshold, not the threshold that triggered the
+  /// action. Compacting to the trigger point would recommend again on the very
+  /// next request. Thresholds stay the policy's, so the action carries the number
+  /// instead of making the mechanism read the profile back.
+  Compact {
+    level: ContextLevel,
+    reason: String,
+    target_tokens: u64,
+  },
   /// Recommend a checkpoint and reviewed reset.
   SuggestCheckpoint { reason: String },
   /// The active request cannot fit, even empty-handed. Refuse instead of
@@ -321,6 +331,7 @@ impl ContextPolicy for ProfilePolicy {
           action: ContextAction::Compact {
             level: ContextLevel::L1Ordinary,
             reason: "provider reported context overflow".into(),
+            target_tokens: thresholds.recent_target_tokens,
           },
           tokens,
           level: Some(ContextLevel::L1Ordinary),
@@ -376,6 +387,7 @@ impl ContextPolicy for ProfilePolicy {
               "context {} exceeds compact threshold {}",
               tokens, thresholds.compact_tokens
             ),
+            target_tokens: thresholds.recent_target_tokens,
           },
           tokens,
           level: Some(ContextLevel::L1Ordinary),
@@ -548,6 +560,13 @@ mod tests {
         }
       ),
       "{compact:?}"
+    );
+    let ContextAction::Compact { target_tokens, .. } = compact.action else {
+      unreachable!("matched above")
+    };
+    assert_eq!(
+      target_tokens, t.recent_target_tokens,
+      "the action carries the target so the mechanism never reads the profile"
     );
 
     let checkpoint = policy.evaluate(&state(t.checkpoint_tokens + 1));
