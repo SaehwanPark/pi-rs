@@ -292,7 +292,7 @@ Open in this area, in order:
 ### Sessions
 
 - [x] Implement Pi session import prototype.
-- [ ] Carry imported conversation messages into the session message log.
+- [x] Carry imported conversation messages into the session message log.
 - [ ] Import a whole Pi session directory, or name what a single-file import leaves out.
 - [ ] Implement Pi session export prototype.
 - [ ] Document non-round-trippable metadata.
