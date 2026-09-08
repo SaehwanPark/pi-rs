@@ -289,3 +289,47 @@ fn an_unknown_id_exits_non_zero_and_writes_no_file() {
     "a refused export puts no JSONL on stdout"
   );
 }
+
+#[test]
+fn an_ambiguous_prefix_is_refused_and_names_the_sessions_that_matched() {
+  let dir = TempDir::new().expect("temp dir");
+  let config = seeded_store(
+    dir.path(),
+    "state-ambiguous",
+    &pi_session("beef0001-0000-7000-8000-000000000001", ""),
+    "pi-beef0001-0000-7000-8000-000000000001",
+  );
+  let second = dir.path().join("fixture-second.jsonl");
+  fs::write(
+    &second,
+    pi_session("beef0002-0000-7000-8000-000000000001", ""),
+  )
+  .expect("write fixture");
+  let imported = import(&second, &config);
+  assert!(imported.status.success(), "{}", stderr(&imported));
+
+  let out = export(&config, &["pi-beef"]);
+  assert!(
+    !out.status.success(),
+    "a prefix matching two sessions is not a selection"
+  );
+  let report = stderr(&out);
+  for candidate in [
+    "pi-beef0001-0000-7000-8000-000000000001",
+    "pi-beef0002-0000-7000-8000-000000000001",
+  ] {
+    assert!(
+      report.contains(candidate),
+      "the refusal must name {candidate}: {report}"
+    );
+  }
+  assert!(
+    stdout(&out).is_empty(),
+    "an ambiguous prefix puts no JSONL on stdout"
+  );
+
+  // The same store resolves a prefix that matches exactly one session.
+  let unique = export(&config, &["pi-beef0002"]);
+  assert!(unique.status.success(), "{}", stderr(&unique));
+  assert_eq!(turns(&stdout(&unique)), expected_turns());
+}
