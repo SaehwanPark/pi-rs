@@ -368,9 +368,14 @@ fn days_from_epoch(year: i64, month: u32, day: u32) -> Option<i64> {
   };
   let era = if year >= 0 { year } else { year - 399 } / 400;
   let year_of_era = year - era * 400;
-  let day_of_year =
-    (153 * month as i64 + 2) / 5 + day as i64 - 1 + 365 * year_of_era + year_of_era / 4;
-  Some(era * 146_097 + day_of_year - 719_468)
+  // The `- year_of_era / 100` term is the century correction from `days_from_civil`: century
+  // years divisible by 100 are not leap years, and leaving it out shifts every date whose
+  // `year_of_era` reaches 100 (1701-2000, and 2101-2400) by one to three days.
+  let day_of_era = 365 * year_of_era + year_of_era / 4 - year_of_era / 100
+    + (153 * month as i64 + 2) / 5
+    + day as i64
+    - 1;
+  Some(era * 146_097 + day_of_era - 719_468)
 }
 
 impl PiContent {
@@ -1434,6 +1439,32 @@ mod tests {
     );
     assert_eq!(is_to_millis("yesterday"), None);
     assert_eq!(is_to_millis("2024-13-03T14:00:00Z"), None);
+  }
+
+  /// The century correction inside `days_from_epoch`, which the 21st-century cases above cannot
+  /// see: `year_of_era / 100` is zero for every year from 2001 through 2099.
+  #[test]
+  fn days_from_epoch_carries_the_century_correction() {
+    // The epoch itself, three days out whenever the correction is missing.
+    assert_eq!(is_to_millis("1970-01-01T00:00:00.000Z"), Some(0));
+    assert_eq!(
+      is_to_millis("1999-12-31T00:00:00.000Z"),
+      Some(946_598_400_000)
+    );
+    // Both sides of the leap century: 2000 is a leap year because 400 divides it.
+    assert_eq!(
+      is_to_millis("2000-02-29T12:00:00.000Z"),
+      Some(951_825_600_000)
+    );
+    assert_eq!(
+      is_to_millis("2000-03-01T00:00:00.000Z"),
+      Some(951_868_800_000)
+    );
+    // The control, a year where the missing term would have been zero anyway.
+    assert_eq!(
+      is_to_millis("2024-12-03T14:00:00.000Z"),
+      Some(1_733_234_400_000)
+    );
   }
 
   fn events(plan: &ImportPlan) -> Vec<&AgentEvent> {

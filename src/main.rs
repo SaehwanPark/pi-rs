@@ -1,4 +1,5 @@
 mod cli;
+mod export_pi;
 mod import_pi;
 mod interactive;
 mod prompts;
@@ -24,6 +25,7 @@ fn main() {
     cli::Command::Prompts(args) => report(prompts::list(args)),
     cli::Command::Prompt(args) => report(prompts::expand(args)),
     cli::Command::Import(args) => report(import_pi::execute(args)),
+    cli::Command::Export(args) => report(export_pi::execute(args)),
   }
 }
 
