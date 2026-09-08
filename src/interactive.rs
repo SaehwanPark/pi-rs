@@ -493,7 +493,11 @@ fn classify(line: &str) -> Vec<Run> {
     };
     let start = cursor + offset;
     let end = start + segment.text.len();
-    runs.push(Run { start, end, role: segment.role });
+    runs.push(Run {
+      start,
+      end,
+      role: segment.role,
+    });
     cursor = end;
   }
   runs
@@ -817,7 +821,11 @@ mod tests {
     surface.editor.apply(Intent::Paste(buffer.to_string()));
     let layout = surface.editor.display(PROMPT_PREFIX);
     let segmented = input_rows(&layout.rows, PROMPT_PREFIX, &surface.editor.text());
-    assert_eq!(layout.rows.len(), segmented.len(), "{buffer:?} at {columns}");
+    assert_eq!(
+      layout.rows.len(),
+      segmented.len(),
+      "{buffer:?} at {columns}"
+    );
     layout.rows.into_iter().zip(segmented).collect()
   }
 
@@ -873,7 +881,11 @@ mod tests {
         assert_eq!(line.width(), display_width(&row), "{buffer:?} at {columns}");
         // The strongest form of the same rule: strip the sequences from the coloured
         // rendering and what a terminal shows is the row, character for character.
-        assert_eq!(visible(&line.render(Palette::colored())), row, "{buffer:?} at {columns}");
+        assert_eq!(
+          visible(&line.render(Palette::colored())),
+          row,
+          "{buffer:?} at {columns}"
+        );
       }
     }
   }
@@ -884,7 +896,11 @@ mod tests {
       for (row, line) in painted(buffer, columns) {
         // Monochrome is not a degraded render, it is the reference one, and it is what
         // `NO_COLOR` and `TERM=dumb` resolve to. It emits no escape at all.
-        assert_eq!(line.render(Palette::monochrome()), row, "{buffer:?} at {columns}");
+        assert_eq!(
+          line.render(Palette::monochrome()),
+          row,
+          "{buffer:?} at {columns}"
+        );
       }
     }
   }
@@ -923,7 +939,12 @@ mod tests {
     assert_eq!(row, "> quote \"unterminated tail");
     assert_eq!(
       roles(line),
-      [Role::Prompt, Role::Operation, Role::UserText, Role::Argument]
+      [
+        Role::Prompt,
+        Role::Operation,
+        Role::UserText,
+        Role::Argument
+      ]
     );
   }
 
@@ -987,7 +1008,12 @@ mod tests {
     assert_eq!(roles(&rows[0].1), [Role::Prompt, Role::Operation]);
     assert_eq!(
       roles(&rows[1].1),
-      [Role::Prompt, Role::Operation, Role::UserText, Role::Argument]
+      [
+        Role::Prompt,
+        Role::Operation,
+        Role::UserText,
+        Role::Argument
+      ]
     );
     assert_eq!(roles(&rows[2].1), [Role::Prompt, Role::Argument]);
   }
@@ -1005,7 +1031,11 @@ mod tests {
             .collect::<String>()
         })
         .collect();
-      assert_eq!(recovered, buffer.replace('\n', ""), "{buffer:?} at {columns}");
+      assert_eq!(
+        recovered,
+        buffer.replace('\n', ""),
+        "{buffer:?} at {columns}"
+      );
     }
   }
 }
