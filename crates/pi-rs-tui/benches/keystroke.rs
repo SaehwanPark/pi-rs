@@ -41,6 +41,7 @@ use pi_rs_tui::{Editor, Intent};
 ///
 /// ```text
 /// insert_end            0.20 us/keystroke
+/// tab_completion        0.30 us/keystroke (measured 2026-09-08, 64 candidates)
 /// insert_middle         0.10 us/keystroke
 /// backspace             0.11 us/keystroke
 /// delete_word           0.34 us/keystroke
@@ -63,6 +64,7 @@ const BUDGETS: &[(&str, f64)] = &[
   ("insert_middle", 2.0),
   ("backspace", 2.0),
   ("delete_word", 4.0),
+  ("tab_completion", 3.0),
   ("word_left", 12.0),
   ("word_right", 10.0),
   ("history_recall", 8.0),
@@ -148,6 +150,7 @@ fn main() -> ExitCode {
   let long_line_head = long_line_editor(true);
   let recall = history_editor();
   let narrow = multiline_editor();
+  let completing = completing_editor();
 
   let mut measured: Vec<Case> = Vec::new();
 
@@ -203,6 +206,23 @@ fn main() -> ExitCode {
     &mut |editor| {
       for _ in 0..BURST {
         editor.apply(Intent::DeleteWordBackward);
+      }
+      editor.cursor().column
+    },
+  ));
+
+  // Tab through a command word with 64 candidates to scan per press: the cycle this
+  // feature runs on every repeated press, priced per press. The word always walks, so
+  // the caret proves the completion fired and the candidate count is the load.
+  measured.push(run_case(
+    "tab_completion",
+    "caret",
+    iterations,
+    BURST,
+    &completing,
+    &mut |editor| {
+      for _ in 0..BURST {
+        editor.apply(Intent::Complete);
       }
       editor.cursor().column
     },
@@ -435,6 +455,15 @@ fn median(values: &mut [f64]) -> f64 {
 }
 
 /// A paragraph typed as a single soft-wrapped line, caret at the end, or parked in the middle.
+/// The Tab case: the word `/c` with 64 candidates that all start with it, so every
+/// press scans the whole list and the cycle never runs out of names to walk.
+fn completing_editor() -> Editor {
+  let mut editor = Editor::with_width(80);
+  editor.apply(Intent::Paste("/c".to_string()));
+  editor.set_completions((0..64).map(|i| format!("c{i:02}andidate")));
+  editor
+}
+
 fn paragraph_editor(middle: bool) -> Editor {
   let paragraph = paragraph_text();
   let mut editor = Editor::with_width(80);

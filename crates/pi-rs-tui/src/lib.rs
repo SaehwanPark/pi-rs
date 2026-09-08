@@ -41,6 +41,7 @@
 // is a compile error here instead of a silently unstyled line.
 
 pub mod command;
+pub mod complete;
 pub mod editor;
 pub mod format;
 pub mod highlight;
@@ -55,6 +56,7 @@ pub mod transcript;
 pub mod width;
 
 pub use command::{Input, Span};
+pub use complete::Completions;
 pub use editor::{Cursor, Editor, Intent, Layout, Outcome};
 pub use keys::{intent, key_intent};
 pub use line::{NarrowDecoration, RenderLine, Segment};

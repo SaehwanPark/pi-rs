@@ -55,9 +55,8 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [ ] Add warm-start benchmark (`bench/startup.sh` reports min/mean/median/max over N warm runs).
 - [x] Add TUI render benchmark (`bench/render.sh`; cases in
       `crates/pi-rs-tui/benches/render.rs`).
-- [ ] Add slash-completion benchmark. Nothing completes a slash command yet:
-      `pi-rs-tui::command` parses. A benchmark for a completion that does not exist would be a
-      number with nothing behind it.
+- [x] Add slash-completion benchmark (`tab_completion` in `bench/keystroke.sh`: Tab cycling
+      a command word against 64 candidates, budgeted per press alongside the other keystrokes).
 - [x] Record initial latency budgets. They are the budgets in the bench source, which exits
       non-zero when a case exceeds one; the recorded baseline, its date, and the machine that
       produced it are in the same file, so the enforcement point and the number cannot drift
@@ -646,8 +645,9 @@ Do not begin until stable baselines exist.
       before the request that would overflow, continuing through `run --resume` (#32).
 - [ ] Fold retrieved external context into the turn: `ExternalContextRetrieved` is
       recorded but no message path consumes it yet.
-- [ ] Slash-completion for the interactive input line, plus its benchmark (the input
-      buffer, caret rows, and parser exist; nothing completes a command yet).
+- [x] Slash-completion for the interactive input line, plus its benchmark: `Tab` walks
+      `Completions` in `pi-rs-tui::complete`, the editor owns the cycle, and the loop answers
+      `/help`, `/quit`, and `/exit` itself.
 
 ### P1 — Follow-on
 

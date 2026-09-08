@@ -67,7 +67,7 @@ use crossterm::{
 use pi_rs_core::{CancelToken, TurnStatus};
 use pi_rs_runtime::{TurnError, TurnReport};
 use pi_rs_tui::{
-  ColorChoice, Editor, Intent, Outcome, Palette, RenderLine, display_width, highlight,
+  ColorChoice, Editor, Input, Intent, Outcome, Palette, RenderLine, display_width, highlight,
   keys::intent, statusline, style::Role, term, truncate,
 };
 
@@ -78,6 +78,39 @@ use crate::{
 
 /// What is drawn before the first row of the buffer.
 const PROMPT_PREFIX: &str = "> ";
+
+/// The slash commands this loop answers itself, and what Tab completes to.
+const COMMANDS: [&str; 3] = ["help", "quit", "exit"];
+
+/// Where a submitted line goes: the runtime, or a command this loop owns.
+///
+/// A slash-word the parser recognises never reaches the model. That is the whole
+/// point of a command — and the reason an unknown one is an error here rather
+/// than a prompt: sending `/nope` to the model would let a typo ask a question
+/// nobody meant to ask.
+enum Submitted {
+  /// Send what is typed to the model as a turn.
+  Turn,
+  /// Print this list; the session keeps running.
+  Help,
+  /// End the loop. The session still closes through its normal path.
+  Quit,
+  /// A recognised command shape with no command behind it.
+  Unknown(String),
+}
+
+/// Which of those one submitted line is. Parsing is [`pi_rs_tui::command`]'s,
+/// so `/help x` is help with an argument and `/123` is prose, exactly as the
+/// highlighter already decided while the line was being typed.
+fn route(text: &str) -> Submitted {
+  let input = Input::parse(text);
+  match input.command_name() {
+    None => Submitted::Turn,
+    Some("help") => Submitted::Help,
+    Some("quit") | Some("exit") => Submitted::Quit,
+    Some(name) => Submitted::Unknown(name.to_string()),
+  }
+}
 
 /// What the loop does with a turn that has ended.
 ///
@@ -345,6 +378,7 @@ impl Loop {
       palette: palette(),
     };
     surface.set_columns(columns);
+    surface.editor.set_completions(COMMANDS);
     surface
   }
 
@@ -394,10 +428,58 @@ impl Loop {
           // Nothing moved, so nothing moved on the screen.
           Outcome::Unchanged => {}
           Outcome::Changed | Outcome::Cancelled => self.draw().map_err(terminal_failure)?,
-          Outcome::Submit(prompt) => self.turn(session, &prompt)?,
+          Outcome::Submit(text) => {
+            if let Submitted::Quit = self.submit(session, &text)? {
+              return Ok(());
+            }
+          }
         },
       }
     }
+  }
+
+  /// Route one submitted line: commands are answered here, everything else runs.
+  fn submit(&mut self, session: &mut SessionHandle<'_>, text: &str) -> Result<Submitted, String> {
+    match route(text) {
+      Submitted::Turn => {
+        self.turn(session, text)?;
+        Ok(Submitted::Turn)
+      }
+      Submitted::Help => {
+        self.write_note(&[
+          "/help       this list".to_string(),
+          "/quit, /exit  end the session (ctrl-c on an empty draft does the same)".to_string(),
+          "tab         complete the command the caret sits on".to_string(),
+        ])?;
+        Ok(Submitted::Help)
+      }
+      Submitted::Unknown(name) => {
+        self.write_note(&[format!(
+          "/{name} is not a command here — /help lists what is"
+        )])?;
+        Ok(Submitted::Unknown(name))
+      }
+      Submitted::Quit => Ok(Submitted::Quit),
+    }
+  }
+
+  /// Write loop-owned lines above the frame without handing over the screen.
+  ///
+  /// Raw mode is dropped only for the length of the note, the way a turn's output
+  /// asks for it, because a raw-mode `\n` moves the cursor without advancing the
+  /// row. The frame is then redrawn underneath what was written.
+  fn write_note(&mut self, lines: &[String]) -> Result<(), String> {
+    terminal::disable_raw_mode().map_err(terminal_failure)?;
+    let written = (|| -> io::Result<()> {
+      let mut out = io::stdout();
+      for line in lines {
+        write_line(&mut out, line)?;
+      }
+      out.flush()
+    })();
+    terminal::enable_raw_mode().map_err(terminal_failure)?;
+    written.map_err(terminal_failure)?;
+    self.draw().map_err(terminal_failure)
   }
 
   /// One turn of the open session, with the screen handed over while it runs.
@@ -682,6 +764,25 @@ mod tests {
 
   fn ctrl_c(kind: KeyEventKind) -> Event {
     key(KeyCode::Char('c'), KeyModifiers::CONTROL, kind)
+  }
+
+  #[test]
+  fn a_submitted_line_is_a_command_or_a_prompt() {
+    assert!(matches!(route("what does src/main.rs do"), Submitted::Turn));
+    // A path is not a command: the parser already decided which words may be
+    // command names, and the loop must not second-guess it with a looser rule.
+    assert!(matches!(
+      route("/tmp/build.log is huge, read it"),
+      Submitted::Turn
+    ));
+    assert!(matches!(route("/help"), Submitted::Help));
+    assert!(matches!(route("/help me"), Submitted::Help));
+    assert!(matches!(route("/quit"), Submitted::Quit));
+    assert!(matches!(route("/exit"), Submitted::Quit));
+    match route("/nope") {
+      Submitted::Unknown(name) => assert_eq!(name, "nope"),
+      _ => panic!("a command shape with no command is an unknown, not a prompt"),
+    }
   }
 
   #[test]
