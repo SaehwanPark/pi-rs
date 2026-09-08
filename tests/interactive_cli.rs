@@ -46,8 +46,10 @@ fn top_level_help_names_the_interactive_command() {
     .output()
     .expect("run pi-rs");
   assert!(output.status.success(), "{output:?}");
+  // The top-level help lists commands in a table, so the entry is the bare command
+  // name under `Commands:`, not a `pi-rs`-prefixed usage line.
   assert!(
-    String::from_utf8_lossy(&output.stdout).contains("pi-rs interactive"),
+    String::from_utf8_lossy(&output.stdout).contains("interactive"),
     "top-level help should list the command"
   );
 }
