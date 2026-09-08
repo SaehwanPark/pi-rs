@@ -43,6 +43,7 @@
 pub mod command;
 pub mod editor;
 pub mod format;
+pub mod highlight;
 pub mod keys;
 pub mod line;
 pub mod live;
