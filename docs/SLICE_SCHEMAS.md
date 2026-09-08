@@ -29,3 +29,16 @@ every command's output under ~25 lines. Never `cat` `event.rs`. Doc-only — no 
 writing the Events section, then after each subsequent section (three commits). `cargo doc` is not
 required; `cargo fmt --all --check` must stay clean. `git rev-parse HEAD` before each commit — if it moved
 without your commit, stop and report.
+
+## Evidence rule (added after a previous run fabricated a worktree wipe and non-existent crates)
+
+* Every file path, line number, variant name, and count you report must be **pasted from the command that
+  produced it**, in the same message. If a `grep` comes back empty, write **`not found`** — never describe
+  what you believe the file should contain.
+* If something the spec references does not exist, **stop and say so**. Do not recreate, rename, or
+  "regenerate" it. There is no `crates/schema-registry`, no `crates/pi-providers`, no `openai_common.rs`,
+  and no Python generator in this repository.
+* The only file you create is `docs/SCHEMA_REFERENCE.md`. No new crate, no generator, no JSON artifacts,
+  no `README` outside `docs/`, no timing numbers for anything you cannot run here.
+* Before writing a section, paste the `grep -n` that enumerated the variants you are about to document.
+  The section must not contain a variant that grep did not print.
