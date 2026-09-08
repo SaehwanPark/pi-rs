@@ -489,7 +489,9 @@ different from each other so that a reader cannot mistake inference for emitted 
 | `Declared` | `declared` | `declared rationale` | **none found.** Consumed at `crates/pi-rs-tui/src/transcript.rs:177` → `Role::ReasoningDeclared` |
 | `Reconstructed` | `reconstructed` | `reconstructed rationale` | **none found.** `crates/pi-rs-tui/src/style.rs:87` names the style role; `crates/pi-rs-tui/src/transcript.rs:1162` builds one in a test |
 
-`is_inferred()` (line 64) separates the two variants the runtime produced itself from the two it received.
+`is_inferred()` (line 64) is true for `Reconstructed` **only**: `matches!(self, Self::Reconstructed)`. Its doc
+comment is explicit that *"Declared counts as authored output, not as inference"* — the runtime asked for
+it, so a reader holds the model accountable for it, even though nobody watched it being produced.
 
 **Why the `none found` rows stay.** The renderer, the style roles, and the stored field all handle all
 four variants, so nothing fails when three are never produced — the schema is ready and the emitters are
