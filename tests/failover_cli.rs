@@ -150,6 +150,30 @@ struct Takeover {
 
 /// Primary answers 503 twice; the standby serves `answers`.
 fn takeover(answers: Vec<String>) -> Takeover {
+  takeover_with(answers, |_| {})
+}
+
+/// As [`takeover`], with the standby's declared capabilities narrowed.
+///
+/// The capability gate compares claims, so a test about that gate is a test about two
+/// endpoint entries. The primary's own claims stay as the session's requirement.
+fn takeover_with_narrow_backup(
+  answers: Vec<String>,
+  narrow: impl FnOnce(&mut ModelCapabilities),
+) -> Takeover {
+  takeover_with(answers, |config| {
+    let standby = config
+      .endpoints
+      .iter_mut()
+      .find(|entry| entry.model == "standby")
+      .expect("the standby endpoint");
+    narrow(&mut standby.capabilities);
+  })
+}
+
+/// Primary answers 503 twice; the standby serves `answers`; `tune` edits the config
+/// before it is written.
+fn takeover_with(answers: Vec<String>, tune: impl FnOnce(&mut RuntimeConfig)) -> Takeover {
   let primary = FakeServer::answer(vec![unavailable(), unavailable()]);
   let standby = FakeServer::answer(answers);
   let url = standby.base_url();
@@ -158,6 +182,7 @@ fn takeover(answers: Vec<String>) -> Takeover {
     primary,
     standby,
     Backup::Served(url),
+    tune,
   )
 }
 
@@ -170,6 +195,7 @@ fn takeover_into_unbuildable() -> Takeover {
     primary,
     standby,
     Backup::Unbuildable,
+    |_| {},
   )
 }
 
@@ -178,11 +204,14 @@ fn takeover_at(
   primary: FakeServer,
   standby: FakeServer,
   backup: Backup,
+  tune: impl FnOnce(&mut RuntimeConfig),
 ) -> Takeover {
   let root = temp.path().to_path_buf();
   let workspace = root.join("workspace");
   fs::create_dir_all(&workspace).expect("workspace");
-  let config = write_config(&root, &primary.base_url(), backup);
+  let mut config = config_at(&root, &primary.base_url(), backup);
+  tune(&mut config);
+  let config = write_config_from(&root, &config);
   Takeover {
     _temp: temp,
     config,
@@ -464,4 +493,100 @@ fn a_committed_tool_result_crosses_the_failover_boundary() {
     .find(|event| event.kind == "turn_completed")
     .expect("turn completed");
   assert_eq!(turn.model.as_deref(), Some("fake/standby"));
+}
+
+#[test]
+fn a_backup_without_tool_calling_is_refused_by_name_and_never_asked() {
+  // The capability gate: a backup that cannot do the work in flight is not a rescue,
+  // and failing over into it would trade one failure for a quieter second one.
+  // Two things must be true of the refusal. Nothing may be asked of that backup, and
+  // the reason must be said: an abstention that looks like "no backup was configured"
+  // leaves the operator with a backup they set up and never used, for reasons they
+  // cannot see.
+  // An empty script is the assertion's other half: the shared harness reports a scripted
+  // answer nobody asked for, so nothing here pretends the standby had something to say.
+  let scene = takeover_with_narrow_backup(Vec::new(), |caps| {
+    caps.tools = false;
+  });
+  let output = run(&scene.config, &scene.workspace, "go");
+  let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+  let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+  assert!(
+    !output.status.success(),
+    "nothing served this turn: {stderr}"
+  );
+  assert_eq!(stdout, "", "a refusal does not produce an answer: {stdout}");
+  assert!(
+    stderr.contains("fake/standby") && stderr.contains("tool calling"),
+    "the refusal names the backup and the missing capability: {stderr}"
+  );
+  assert!(
+    !stderr.contains("[failover]"),
+    "a refusal is not a takeover and must not be rendered as one: {stderr}"
+  );
+  // The primary spent its attempt budget, and the standby was never addressed: the
+  // refusal happens in the policy, so the deferred adapter is never even built.
+  assert_eq!(scene.primary.requests().len(), 2);
+  assert!(
+    scene.standby.requests().is_empty(),
+    "a refused backup must not be asked, nor built, nor paid for"
+  );
+  let events = trace(&scene.state);
+  assert_eq!(
+    events
+      .iter()
+      .filter(|event| event.kind == "model_failover")
+      .count(),
+    0,
+    "no takeover may be recorded: {stderr}"
+  );
+  assert_eq!(
+    events
+      .iter()
+      .filter(|event| event.kind == "model_epoch_started")
+      .count(),
+    1,
+    "only the epoch that was already active"
+  );
+}
+
+#[test]
+fn a_smaller_backup_takes_over_and_names_the_window_it_lost() {
+  // A narrower window is a cost, not a disqualification: compaction can close it. The
+  // switch therefore happens, and the transcript says what it cost.
+  let scene =
+    takeover_with_narrow_backup(vec![text_response("served by the small standby")], |caps| {
+      caps.context_window = 1_024;
+    });
+  let output = run(&scene.config, &scene.workspace, "go");
+  let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+  let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+  assert!(output.status.success(), "{stderr}");
+  assert_eq!(stdout, "served by the small standby\n");
+  assert!(stderr.contains("[failover]"), "{stderr}");
+  assert!(
+    stderr.contains("context window 1024 < required 32768"),
+    "the cost of the switch is on the line: {stderr}"
+  );
+  // And only what actually happened is claimed. One turn was in flight, so there was
+  // no older history to shorten: a `[failover] ... context rebudgeted` here would be
+  // a recorded reduction that never took place.
+  assert!(
+    !stderr.contains("context rebudgeted"),
+    "nothing was dropped, so nothing may claim it was: {stderr}"
+  );
+  let events = trace(&scene.state);
+  let failovers: Vec<&Recorded> = events
+    .iter()
+    .filter(|event| event.kind == "model_failover")
+    .collect();
+  assert_eq!(failovers.len(), 1);
+  assert_eq!(
+    events
+      .iter()
+      .filter(|event| event.kind == "context_reduced")
+      .count(),
+    0,
+    "a takeover that dropped nothing records no reduction"
+  );
 }
