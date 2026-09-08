@@ -63,8 +63,9 @@ use crossterm::{
   terminal::{self, Clear, ClearType},
 };
 
-use pi_rs_core::CancelToken;
-use pi_rs_tui::{Editor, Intent, Outcome, display_width, keys::intent, term, truncate};
+use pi_rs_core::{CancelToken, TurnStatus};
+use pi_rs_runtime::{TurnError, TurnReport};
+use pi_rs_tui::{Editor, Intent, Outcome, display_width, keys::intent, statusline, term, truncate};
 
 use crate::{
   cli::{InteractiveArgs, SurfaceArgs},
@@ -73,6 +74,39 @@ use crate::{
 
 /// What is drawn before the first row of the buffer.
 const PROMPT_PREFIX: &str = "> ";
+
+/// What the loop does with a turn that has ended.
+///
+/// A cancellation is something the user did on purpose, so it is not a reason to
+/// lose the session: the loop says so in the transcript, where there is room to say
+/// what happened, and takes the buffer back. Only a failure the loop cannot see a
+/// way past ends it.
+enum AfterTurn {
+  /// The turn ran to the end; it counts.
+  Done,
+  /// What the loop prints about the user's own cancellation.
+  Cancelled(&'static str),
+  /// The failure that ends the session.
+  Failed(run::SessionError),
+}
+
+/// Sort one turn's result into those three cases.
+///
+/// The status line is not what reports a cancellation. It cannot see why a turn
+/// stopped, so a line that tried to say more than `waiting` would be guessing; it
+/// goes back to waiting and the loop owns the explanation.
+fn after_turn(result: Result<TurnReport, TurnError>) -> AfterTurn {
+  match result {
+    // A stopped turn is a report, not a fault: the status is the only place that
+    // distinguishes it, and the loop owns the one line that says so.
+    Ok(report) if report.status == TurnStatus::Cancelled => {
+      AfterTurn::Cancelled("turn cancelled")
+    }
+    Ok(_) => AfterTurn::Done,
+    Err(TurnError::Aborted(TurnStatus::Cancelled)) => AfterTurn::Cancelled("turn cancelled"),
+    Err(error) => AfterTurn::Failed(run::SessionError::Turn(error)),
+  }
+}
 
 /// Columns to assume when the terminal will not say how wide it is.
 ///
@@ -173,18 +207,45 @@ fn is_ctrl_c(event: &Event) -> bool {
     && matches!(key.code, KeyCode::Char('c' | 'C'))
 }
 
+/// What the waiting line offers the user.
+const WAITING_HINT: &str = "enter submits, ctrl-c quits";
+
 /// The one status line: which model answers, and what the session is doing.
 ///
-/// Cut to `columns` because a status line that wraps leaves the frame holding more
-/// lines than the loop counted, and every later redraw would land on the wrong row.
-/// The model is named in both states rather than only in one: knowing which model
-/// answered is what makes a surprising answer interpretable afterwards.
-fn status_line(model: &str, state: TurnState, columns: usize) -> String {
-  let line = match state {
-    TurnState::Idle => format!("{model} · idle · enter submits, ctrl-c quits"),
-    TurnState::Working => format!("{model} · turn running"),
-  };
-  truncate(&line, columns)
+/// The wording belongs to [`statusline`]: it is a projection that can be tested
+/// without a terminal, and the loop only says what it honestly knows. The model is
+/// named in both states rather than only in one: knowing which model answered is
+/// what makes a surprising answer interpretable afterwards.
+///
+/// `columns` is the width the editor is laid out at, because two width notions in
+/// one frame is a bug. A status line that wraps leaves the frame holding more lines
+/// than the loop counted, and every later redraw would land on the wrong row; the
+/// projection cuts to that budget by dropping whole segments rather than wrapping.
+fn status_line(model: &str, state: TurnState, turns: usize, columns: usize) -> String {
+  let waiting = matches!(state, TurnState::Idle);
+  let line = statusline::line(&statusline::Status {
+    model,
+    activity: if waiting {
+      statusline::Activity::Waiting
+    } else {
+      statusline::Activity::Running
+    },
+    turns,
+    columns,
+    // The hint is what the loop accepts right now. While a turn runs, enter does not
+    // submit, so it goes away rather than offering a key that does nothing.
+    hint: waiting.then_some(WAITING_HINT),
+  });
+  // The projection's floor is one word, so it always says something; the loop's
+  // budget is the harder rule, because a line of `columns + 1` is a redraw on the
+  // wrong row. Where the projection could not drop its way into budget, the tail is
+  // cut here, and with no columns at all that leaves nothing to draw.
+  let plain = line.plain();
+  if line.width() > columns {
+    truncate(&plain, columns)
+  } else {
+    plain
+  }
 }
 
 /// Rows of the frame for a buffer of `rows` display rows plus the status line.
@@ -242,6 +303,8 @@ struct Loop {
   /// What the status line names as the model.
   model: String,
   state: TurnState,
+  /// Turns that have finished. The status line counts them; `0` says nothing yet.
+  turns: usize,
   /// Columns available to this surface, as the terminal last reported them.
   columns: usize,
   /// The cancellation this loop's in-flight turn answers to.
@@ -266,6 +329,7 @@ impl Loop {
       editor: Editor::new(),
       model,
       state: TurnState::Idle,
+      turns: 0,
       columns: 1,
       cancel: CancelToken::new(),
       above: 0,
@@ -281,6 +345,14 @@ impl Loop {
     // buffer cannot also spend on text.
     let text = self.columns.saturating_sub(display_width(PROMPT_PREFIX));
     self.editor.set_width(text.max(1));
+  }
+
+  /// The status line this surface would draw right now.
+  ///
+  /// Cut to [`Loop::columns`] — the same width the editor is laid out at — and
+  /// never more than one line, which is what the frame counted.
+  fn status(&self) -> String {
+    status_line(&self.model, self.state, self.turns, self.columns)
   }
 
   /// Read events until the user leaves.
@@ -338,8 +410,20 @@ impl Loop {
     // rather than keep saying what the config said when the session opened.
     self.model = session.model().to_string();
     take_line().map_err(terminal_failure)?;
+    let outcome = after_turn(result);
+    // The loop's own line about a cancellation, written while the terminal still
+    // translates it into a row of its own.
+    if let AfterTurn::Cancelled(note) = &outcome {
+      write_line(&mut io::stdout(), note).map_err(terminal_failure)?;
+    }
     terminal::enable_raw_mode().map_err(terminal_failure)?;
-    result.map_err(|error| run::session_error(run::SessionError::Turn(error)))?;
+    match outcome {
+      AfterTurn::Done => self.turns += 1,
+      // The note above is the report; the frame below it goes back to saying
+      // `waiting`, which is all the projection is allowed to claim.
+      AfterTurn::Cancelled(_) => {}
+      AfterTurn::Failed(error) => return Err(run::session_error(error)),
+    }
     self.state = TurnState::Idle;
     self.draw().map_err(terminal_failure)
   }
@@ -353,10 +437,7 @@ impl Loop {
     let mut out = io::stdout();
     self.erase(&mut out)?;
     self.state = TurnState::Working;
-    write_line(
-      &mut out,
-      &status_line(&self.model, self.state, self.columns),
-    )?;
+    write_line(&mut out, &self.status())?;
     out.flush()
   }
 
@@ -368,10 +449,7 @@ impl Loop {
     for row in &layout.rows {
       write_line(&mut out, row)?;
     }
-    write_line(
-      &mut out,
-      &status_line(&self.model, self.state, self.columns),
-    )?;
+    write_line(&mut out, &self.status())?;
     let up = caret_lines_up(layout.rows.len(), layout.cursor.line);
     if up > 0 {
       queue!(out, MoveToPreviousLine(terminal_lines(up)))?;
@@ -608,10 +686,10 @@ mod tests {
 
   #[test]
   fn the_status_line_names_the_model_and_the_turn() {
-    let idle = status_line("local/vulcan", TurnState::Idle, 80);
+    let idle = status_line("local/vulcan", TurnState::Idle, 0, 80);
     assert!(idle.starts_with("local/vulcan"));
     assert!(idle.contains("idle"));
-    let working = status_line("local/vulcan", TurnState::Working, 80);
+    let working = status_line("local/vulcan", TurnState::Working, 1, 80);
     assert!(working.starts_with("local/vulcan"));
     assert!(working.contains("turn"));
     assert!(!working.contains("ctrl-c"));
@@ -625,10 +703,48 @@ mod tests {
     let wide = status_line(
       "a/very-long-model-name-that-does-not-fit",
       TurnState::Idle,
+      3,
       20,
     );
     assert!(display_width(&wide) <= 20, "{wide}");
-    assert_eq!(status_line("a/b", TurnState::Idle, 0), "");
+    // No budget at all: the projection would still say `idle`, but nothing fits in
+    // zero columns, and a drawn word there is the spill the frame cannot survive.
+    assert_eq!(status_line("a/b", TurnState::Idle, 0, 0), "");
+  }
+
+  /// The line the loop draws is the projection's output, separators and all, so the
+  /// wording cannot fork back into the loop the moment the projection changes.
+  #[test]
+  fn the_status_line_is_the_projection_word_for_word() {
+    // `turns` is nonzero on purpose: a line that dropped the turn segment would
+    // still match a hand-written `model · idle · hint`, so it proves nothing.
+    let waiting = status_line("local/vulcan", TurnState::Idle, 2, 120);
+    assert_eq!(
+      waiting,
+      statusline::line(&statusline::Status {
+        model: "local/vulcan",
+        activity: statusline::Activity::Waiting,
+        turns: 2,
+        columns: 120,
+        hint: Some(WAITING_HINT),
+      })
+      .plain()
+    );
+    // The running line is the same projection with the other activity word and no
+    // hint, because enter does not submit while a turn is in flight.
+    let running = status_line("local/vulcan", TurnState::Working, 2, 120);
+    assert_eq!(
+      running,
+      statusline::line(&statusline::Status {
+        model: "local/vulcan",
+        activity: statusline::Activity::Running,
+        turns: 2,
+        columns: 120,
+        hint: None,
+      })
+      .plain()
+    );
+    assert!(!running.contains(WAITING_HINT));
   }
 
   #[test]

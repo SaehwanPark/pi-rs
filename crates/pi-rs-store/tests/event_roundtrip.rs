@@ -647,8 +647,8 @@ fn context_reduced_round_trips() {
     reason: ReductionReason::OversizedToolOutput { limit_bytes: 8_192 },
     original_bytes: 40_960,
     visible_bytes: 7_900,
-    blob: blob.clone(),
-    recovery_ref: "blobs/3f9a1c7e2b04".into(),
+    blob: Some(blob.clone()),
+    recovery_ref: Some("blobs/3f9a1c7e2b04".into()),
     tool_call_id: Some(tool_call_id()),
   });
   let entry = round_trip(original.clone());
@@ -665,9 +665,10 @@ fn context_reduced_round_trips() {
   );
   assert_eq!(body.original_bytes, 40_960);
   assert_eq!(body.visible_bytes, 7_900);
-  assert_eq!(body.blob, blob);
+  assert_eq!(body.blob, Some(blob));
   assert_eq!(
-    body.recovery_ref, "blobs/3f9a1c7e2b04",
+    body.recovery_ref,
+    Some("blobs/3f9a1c7e2b04".into()),
     "recovery must be possible from this string alone"
   );
   assert_eq!(body.tool_call_id, Some(tool_call_id()));
@@ -1009,8 +1010,8 @@ fn all_variants() -> Vec<AgentEvent> {
       },
       original_bytes: 9_000,
       visible_bytes: 3_000,
-      blob: BlobRef::for_bytes(b"reduced payload".as_slice(), None),
-      recovery_ref: "blobs/000000000000".into(),
+      blob: Some(BlobRef::for_bytes(b"reduced payload".as_slice(), None)),
+      recovery_ref: Some("blobs/000000000000".into()),
       tool_call_id: None,
     }),
     AgentEvent::ContextCompactionStarted(ContextCompactionStarted {
