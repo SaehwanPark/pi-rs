@@ -927,6 +927,56 @@ mod tests {
     );
   }
 
+  /// Inputs the paint path has to hand back unchanged: a bare operation, an
+  /// operation and a flag, a double-quoted argument carrying a space, an
+  /// unterminated quote, a CJK argument, an emoji argument, and leading whitespace
+  /// the classifier never emits a run for.
+  const PAINT_LINES: [&str; 7] = [
+    "status",
+    "status --all",
+    "commit -m \"fix the wiring\"",
+    "\"unterminated",
+    "read 가나다.txt",
+    "build \u{1f41a}",
+    "   status --all",
+  ];
+
+  /// A whole line painted at once, as the row of a buffer that fits its width.
+  fn paint(line: &str) -> RenderLine {
+    segment_row("", line, 0..line.len(), &classify(line))
+  }
+
+  #[test]
+  fn a_painted_line_holds_the_characters_it_was_given_and_costs_their_width() {
+    for line in PAINT_LINES {
+      let styled = paint(line);
+      // The characters are the input, byte for byte. `tokens` reports runs and no
+      // separators, so a wiring that rebuilds the line from run texts drops the
+      // spaces, the indent, and the closing quote.
+      assert_eq!(styled.plain(), line, "{line:?}");
+      // Colour costs no columns: the row is still what the editor measured.
+      assert_eq!(styled.width(), display_width(line), "{line:?}");
+      // The strongest form of both: strip the escapes from the coloured render and a
+      // terminal still shows exactly the input.
+      let coloured = styled.render(Palette::colored());
+      assert_eq!(visible(&coloured), line, "{line:?}");
+    }
+  }
+
+  #[test]
+  fn the_no_colour_path_yields_the_same_characters_as_the_plain_path() {
+    for line in PAINT_LINES {
+      let styled = paint(line);
+      // Monochrome is what `NO_COLOR` and `TERM=dumb` resolve to. It is not a
+      // degraded render of something else: it writes the plain path's characters and
+      // no escape at all.
+      let rendered = styled.render(Palette::monochrome());
+      assert_eq!(rendered, styled.plain(), "{line:?}");
+      assert!(!rendered.contains('\x1b'), "{line:?}");
+      assert_eq!(visible(&rendered), line, "{line:?}");
+    }
+  }
+
   #[test]
   fn a_run_that_wraps_keeps_its_role_on_the_row_it_continues_on() {
     // Six columns of buffer: the operation is split across the first two rows, and the
