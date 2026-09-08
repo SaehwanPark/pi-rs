@@ -80,7 +80,9 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [ ] Implement minimal terminal editor.
 - [x] Implement streamed assistant rendering for the one-shot command.
 - [ ] Implement cancel/interrupt.
-- [ ] Implement compact status line.
+- [ ] Implement compact status line (the projection exists in `pi-rs-tui::statusline`:
+      a snapshot in, a `RenderLine` out, whole segments dropped as the width narrows;
+      nothing draws it yet).
 - [x] Render the streamed transcript through a semantic layer (`pi-rs-tui`: roles,
       provenance-labelled reasoning, spelled-out tool state, calm-by-default diagnostics)
       and wire it into `pi-rs run` behind `--color/--no-color`, `--width`, `--no-reasoning`,
