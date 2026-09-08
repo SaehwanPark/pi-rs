@@ -31,13 +31,14 @@ use pi_rs_core::{
   context::{ContextLevel, ReductionReason},
   event::{
     AgentEvent, AssistantDelta, CheckpointCreated, ContextCompactionCompleted,
-    ContextCompactionStarted, ContextReduced, EventEnvelope, EventMeta, ExternalContextRetrieved,
-    ModelEpochStarted, ModelFailover, ModelRequestCompleted, ModelRequestStarted, ModelRetry,
-    ReasoningDelta, SessionStarted, ToolCompleted, ToolFailed, ToolRequested, ToolStarted,
-    ToolUnknown, TurnCompleted, TurnStatus, UserMessage,
+    ContextCompactionStarted, ContextReduced, Diagnostic, DiagnosticLevel, EventEnvelope,
+    EventMeta, ExternalContextRetrieved, ModelEpochStarted, ModelFailover, ModelRequestCompleted,
+    ModelRequestStarted, ModelRetry, ReasoningDelta, SessionEndReason, SessionEnded,
+    SessionStarted, ToolCompleted, ToolFailed, ToolRequested, ToolStarted, ToolUnknown,
+    TurnCompleted, TurnStatus, UserMessage,
   },
   failure::ModelFailureKind,
-  ids::{CheckpointId, EventId, SessionId, ToolCallId, TraceId, TurnId},
+  ids::{CheckpointId, EventId, EventSeq, SessionId, ToolCallId, TraceId, TurnId},
   provenance::ReasoningProvenance,
   session::{SESSION_SCHEMA_VERSION, SessionHeader},
   tool::ToolExecutionState,
@@ -97,6 +98,18 @@ fn meta(session: &SessionId) -> EventMeta {
   }
 }
 
+/// The shared metadata, with the per-emission identity fields replaced.
+///
+/// Multi-event tests need distinct identities or they cannot tell one line from
+/// the next; the fixed values in `meta` stay, so timestamps and attribution are
+/// still not what a comparison depends on.
+fn meta_at(session: &SessionId, index: usize) -> EventMeta {
+  let mut meta = meta(session);
+  meta.event_id = EventId::from_string(format!("event-{index:04}"));
+  meta.span_id = pi_rs_core::ids::SpanId::from_string(format!("span-{index:04}"));
+  meta
+}
+
 /// The discriminant name, taken from the value rather than from a hand-written
 /// string that can drift away from the variant it labels.
 fn variant(event: &AgentEvent) -> String {
@@ -123,7 +136,7 @@ fn round_trip(event: AgentEvent) -> TraceEntry {
   let mut session = store
     .begin(header(&session_id))
     .expect("begin a durable session");
-  let mut envelope = EventEnvelope::new(meta(&session_id), event);
+  let mut envelope = EventEnvelope::new(meta_at(&session_id, 0), event);
   let seq = session
     .emit(&mut envelope)
     .unwrap_or_else(|error| panic!("{name}: emit must be accepted, got {error}"));
@@ -747,4 +760,285 @@ fn turn_completed_round_trips() {
   };
   assert_eq!(body.status, TurnStatus::Completed);
   assert_eq!(body.duration_ms, 1_890);
+}
+
+#[test]
+fn diagnostic_round_trips() {
+  let original = AgentEvent::Diagnostic(Diagnostic {
+    level: DiagnosticLevel::Warn,
+    message: "the retry budget was spent before a usable answer".into(),
+  });
+  let entry = round_trip(original.clone());
+  let restored = &entry.envelope.event;
+
+  assert_same_variant(restored, &original);
+  let AgentEvent::Diagnostic(body) = restored else {
+    unreachable!("assert_same_variant already proved the discriminant");
+  };
+  assert_eq!(body.level, DiagnosticLevel::Warn);
+  assert_eq!(
+    body.message, "the retry budget was spent before a usable answer",
+    "a diagnostic is the only record of a rare event once the status line moved on"
+  );
+}
+
+#[test]
+fn session_ended_round_trips() {
+  let original = AgentEvent::SessionEnded(SessionEnded {
+    reason: SessionEndReason::UserExit,
+  });
+  let entry = round_trip(original.clone());
+  let restored = &entry.envelope.event;
+
+  assert_same_variant(restored, &original);
+  let AgentEvent::SessionEnded(body) = restored else {
+    unreachable!("assert_same_variant already proved the discriminant");
+  };
+  assert_eq!(body.reason, SessionEndReason::UserExit);
+}
+
+#[test]
+fn every_variant_round_trips_in_one_session_in_order() {
+  let events = all_variants();
+  let dir = TempDir::new("event-roundtrip-all");
+  let session_id = SessionId::new();
+
+  let store = Store::open(dir.path(), WritePolicy::default()).expect("open the store");
+  let mut session = store
+    .begin(header(&session_id))
+    .expect("begin a durable session");
+  let mut emitted = Vec::new();
+  for (index, event) in events.iter().enumerate() {
+    let mut envelope = EventEnvelope::new(meta_at(&session_id, index), event.clone());
+    session
+      .emit(&mut envelope)
+      .unwrap_or_else(|error| panic!("emit variant {index}, got {error}"));
+    assert_eq!(
+      envelope.meta.seq,
+      Some(EventSeq((index + 1) as u64)),
+      "variant {index} must be assigned the next sequence number"
+    );
+    emitted.push(envelope);
+  }
+  let trace = session.trace_path().to_path_buf();
+  drop(session);
+  drop(store);
+
+  let reopened =
+    Store::open(dir.path(), WritePolicy::default()).expect("reopen the store after the writers");
+  let report = TraceJournal::read(&trace).expect("read the trace back");
+  assert_eq!(
+    report.malformed, 0,
+    "no line of a mixed journal may be unreadable"
+  );
+  assert_eq!(
+    report.items.len(),
+    events.len(),
+    "every variant must contribute exactly one line"
+  );
+  for (index, entry) in report.items.iter().enumerate() {
+    assert_eq!(
+      entry.envelope,
+      emitted[index],
+      "line {} must come back unchanged",
+      index + 1
+    );
+    assert_eq!(
+      entry.envelope.meta.seq,
+      Some(EventSeq((index + 1) as u64)),
+      "line {} must keep the position the journal assigned it",
+      index + 1
+    );
+    assert_eq!(
+      std::mem::discriminant(&entry.envelope.event),
+      std::mem::discriminant(&events[index]),
+      "line {} must keep its variant, got {:?}",
+      index + 1,
+      entry.envelope.event
+    );
+  }
+
+  let restored = reopened
+    .restore(&session_id)
+    .expect("restore the mixed session");
+  assert_eq!(
+    restored.last_seq,
+    Some(EventSeq(events.len() as u64)),
+    "restore must land on the last line of a journal that mixes every variant"
+  );
+}
+
+#[test]
+fn generated_variant_list_has_a_case_for_every_variant() {
+  let list = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    .join("../../docs/EVENT_VARIANTS.txt")
+    .canonicalize()
+    .expect("docs/EVENT_VARIANTS.txt is the list this suite is written against");
+  let documented: Vec<String> = std::fs::read_to_string(list)
+    .expect("read the generated variant list")
+    .lines()
+    .map(str::trim)
+    .filter(|line| !line.is_empty())
+    .map(str::to_string)
+    .collect();
+  let covered: Vec<String> = all_variants().iter().map(|event| variant(event)).collect();
+
+  assert_eq!(
+    covered, documented,
+    "the suite must cover the generated list exactly: missing or extra variants"
+  );
+  assert_eq!(
+    covered.len(),
+    covered
+      .as_slice()
+      .iter()
+      .collect::<std::collections::HashSet<_>>()
+      .len(),
+    "a variant must not be counted twice under two different spellings"
+  );
+}
+
+/// One value per `AgentEvent` variant, in the order the generated list names
+/// them. This is the enumeration the in-order journal test replays and the
+/// list test compares against, so a new variant cannot be added to the enum
+/// without this file noticing.
+fn all_variants() -> Vec<AgentEvent> {
+  vec![
+    AgentEvent::SessionStarted(SessionStarted {
+      working_dir: "/repo".into(),
+      model: model(),
+      capabilities: capabilities(),
+      resumed: true,
+    }),
+    AgentEvent::UserMessage(UserMessage {
+      text: "list the durable events".into(),
+      attachments: 1,
+    }),
+    AgentEvent::ModelRequestStarted(ModelRequestStarted {
+      epoch: 0,
+      model: model(),
+      message_count: 2,
+      context_tokens_est: 512,
+      tools_exposed: 4,
+    }),
+    AgentEvent::ReasoningDelta(ReasoningDelta {
+      text: "checking the ordering rule".into(),
+      provenance: ReasoningProvenance::Native,
+      chunk_index: 0,
+    }),
+    AgentEvent::AssistantDelta(AssistantDelta {
+      text: "here is the answer".into(),
+      chunk_index: 0,
+    }),
+    AgentEvent::ModelRequestCompleted(ModelRequestCompleted {
+      epoch: 0,
+      model: model(),
+      finish_reason: Some("stop".into()),
+      input_tokens: Some(10),
+      output_tokens: Some(4),
+      duration_ms: 25,
+      tool_calls: 0,
+      reasoning_provenance: Some(ReasoningProvenance::Native),
+    }),
+    AgentEvent::ModelRetry(ModelRetry {
+      attempt: 1,
+      max_attempts: 3,
+      kind: ModelFailureKind::Transport,
+      retry_after_ms: None,
+      will_failover: false,
+    }),
+    AgentEvent::ModelFailover(ModelFailover {
+      from: ModelRef::new("openai-codex", "gpt-5.6-luna"),
+      to: model(),
+      kind: ModelFailureKind::Timeout,
+      gaps: vec![CapabilityGap::Tools],
+      compacted: false,
+    }),
+    AgentEvent::ModelEpochStarted(ModelEpochStarted {
+      epoch: 1,
+      model: model(),
+      reason: EpochReason::ManualSwitch,
+      capabilities: capabilities(),
+    }),
+    AgentEvent::ToolRequested(ToolRequested {
+      call_id: tool_call_id(),
+      name: "read".into(),
+      arguments: serde_json::json!({ "path": "docs/SLICE_RT.md" }),
+      read_only: true,
+    }),
+    AgentEvent::ToolStarted(ToolStarted {
+      call_id: tool_call_id(),
+      name: "read".into(),
+    }),
+    AgentEvent::ToolCompleted(ToolCompleted {
+      call_id: tool_call_id(),
+      name: "read".into(),
+      state: ToolExecutionState::Succeeded,
+      duration_ms: 3,
+      status: Some(0),
+      reduced: false,
+      blob: None,
+      visible_bytes: 64,
+    }),
+    AgentEvent::ToolFailed(ToolFailed {
+      call_id: tool_call_id(),
+      name: "read".into(),
+      message: "no such file".into(),
+      duration_ms: 1,
+      status: None,
+    }),
+    AgentEvent::ToolUnknown(ToolUnknown {
+      call_id: tool_call_id(),
+      name: "write".into(),
+      why: "completion was never observed".into(),
+      mutating: true,
+    }),
+    AgentEvent::ExternalContextRetrieved(ExternalContextRetrieved {
+      source: ExternalContextSource {
+        provider: "web".into(),
+        resource_id: "example/doc".into(),
+        provenance: "web".into(),
+      },
+      citation: None,
+      bytes: 512,
+      inline: true,
+    }),
+    AgentEvent::ContextReduced(ContextReduced {
+      reason: ReductionReason::RecentTargetExceeded {
+        target_tokens: 4_000,
+      },
+      original_bytes: 9_000,
+      visible_bytes: 3_000,
+      blob: BlobRef::for_bytes(b"reduced payload".as_slice(), None),
+      recovery_ref: "blobs/000000000000".into(),
+      tool_call_id: None,
+    }),
+    AgentEvent::ContextCompactionStarted(ContextCompactionStarted {
+      level: ContextLevel::L0Payload,
+      reason: "one oversized tool output".into(),
+    }),
+    AgentEvent::ContextCompactionCompleted(ContextCompactionCompleted {
+      level: ContextLevel::L1Ordinary,
+      removed_messages: 3,
+      retained_messages: 9,
+      context_epoch: 1,
+    }),
+    AgentEvent::CheckpointCreated(CheckpointCreated {
+      checkpoint_id: CheckpointId::from_string("66666666-6666-4666-8666-666666666666"),
+      capsule_version: 1,
+      summarized_events: 8,
+      path: "checkpoints/66666666-6666-4666-8666-666666666666.json".into(),
+    }),
+    AgentEvent::TurnCompleted(TurnCompleted {
+      status: TurnStatus::Cancelled,
+      duration_ms: 700,
+    }),
+    AgentEvent::Diagnostic(Diagnostic {
+      level: DiagnosticLevel::Error,
+      message: "the provider closed the stream early".into(),
+    }),
+    AgentEvent::SessionEnded(SessionEnded {
+      reason: SessionEndReason::Restart,
+    }),
+  ]
 }
