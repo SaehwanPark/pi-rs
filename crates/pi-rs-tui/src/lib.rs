@@ -17,7 +17,8 @@
 //! * [`transcript`] — [`render_event`], the deterministic event-to-lines mapping
 //!   shared by the live transcript, `pi-rs trace`, and any later export.
 //!
-//! Plus [`editor`] for the buffer a user types into, [`live`] for streaming,
+//! Plus [`editor`] for the buffer a user types into, [`keys`] for the terminal
+//! events that become editing intents, [`live`] for streaming,
 //! [`command`] for input classification, [`mod@format`] for the repeated scalar
 //! renderings, [`statusline`] for the one-line snapshot of what the loop is doing,
 //! and [`term`] for the two environment probes a surface needs before it can decide
@@ -43,6 +44,7 @@ pub mod command;
 pub mod editor;
 pub mod format;
 pub mod highlight;
+pub mod keys;
 pub mod line;
 pub mod live;
 pub mod statusline;
@@ -54,6 +56,7 @@ pub mod width;
 
 pub use command::{Input, Span};
 pub use editor::{Cursor, Editor, Intent, Layout, Outcome};
+pub use keys::{intent, key_intent};
 pub use line::{NarrowDecoration, RenderLine, Segment};
 pub use live::{Surface, is_streamed, routine_stream};
 // `line` is deliberately not re-exported at the crate root: `statusline::line` would sit next to
