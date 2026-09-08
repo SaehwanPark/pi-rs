@@ -250,3 +250,42 @@ fn a_provider_reasoning_summary_is_named_on_stderr_and_the_export_still_succeeds
     "the export is still the whole conversation"
   );
 }
+
+#[test]
+fn an_unknown_id_exits_non_zero_and_writes_no_file() {
+  let dir = TempDir::new().expect("temp dir");
+  let config = seeded_store(
+    dir.path(),
+    "state-unknown",
+    &pi_session("a1b2c3d4-0000-7000-8000-000000000001", ""),
+    SESSION_ID,
+  );
+  let out_path = dir.path().join("refused/nested/export.jsonl");
+
+  let out = export(
+    &config,
+    &["pi-deadbeef", "--out", out_path.to_str().unwrap()],
+  );
+  assert!(
+    !out.status.success(),
+    "an unknown id must not look like an export"
+  );
+  assert!(
+    stderr(&out).contains("pi-deadbeef"),
+    "the refusal must name the id it could not resolve: {}",
+    stderr(&out)
+  );
+  assert!(
+    !out_path.exists(),
+    "a refused export writes nothing: {}",
+    out_path.display()
+  );
+  assert!(
+    !out_path.parent().unwrap().exists(),
+    "a refused export does not create the parent directory either"
+  );
+  assert!(
+    stdout(&out).is_empty(),
+    "a refused export puts no JSONL on stdout"
+  );
+}
