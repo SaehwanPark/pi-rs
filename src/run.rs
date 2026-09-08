@@ -9,7 +9,7 @@ use pi_rs_core::{
   RuntimeConfig, SessionEndReason, SessionHeader, SessionId, SinkError, TraceId, now_millis,
 };
 use pi_rs_provider::{Deferred, OpenAiCompat, ProviderConfig};
-use pi_rs_runtime::{StoreTrace, Trace, TurnError, TurnLoop, TurnProgress};
+use pi_rs_runtime::{StoreTrace, Trace, TurnError, TurnLoop, TurnProgress, TurnReport};
 use pi_rs_store::{Store, WritePolicy};
 use pi_rs_tools::{Executed, ToolRegistry, Workspace};
 use pi_rs_tui::{Palette, Surface, TranscriptOptions, is_streamed, render_event, term};
@@ -174,10 +174,6 @@ pub struct SessionHandle<'a> {
 // crate makes for `TurnError`.
 #[allow(clippy::result_large_err)]
 impl SessionHandle<'_> {
-  /// Run one user turn.
-  ///
-  /// The cancellation token is created here, per turn, exactly as a one-shot run
-  /// creates one: a turn carries its own cancellation, and nothing shares it.
   /// Which model will answer the next request.
   ///
   /// Asked of the runtime rather than read from the config once: a failover changes
@@ -187,11 +183,24 @@ impl SessionHandle<'_> {
     self.runtime.active_model()
   }
 
+  /// Run one user turn that nothing outside this call can cancel.
   pub fn turn(&mut self, prompt: &str) -> Result<(), TurnError> {
-    self
-      .runtime
-      .run_turn(prompt, &CancelToken::new(), &mut self.progress)
-      .map(|_| ())
+    self.turn_with(prompt, &CancelToken::new()).map(|_| ())
+  }
+
+  /// Run one user turn under a cancellation token the caller holds.
+  ///
+  /// A turn carries its own cancellation, and a token is one-shot — nothing ever
+  /// clears it — so a caller that can interrupt more than one turn supplies a fresh
+  /// token each turn rather than reusing the one it interrupted.
+  ///
+  /// A canceled turn is a report, not an error: the user asked for the turn to stop,
+  /// which is a terminal state rather than a fault, and the runtime has already
+  /// recorded it as one. `status` is therefore the only place a caller can tell
+  /// `Cancelled` from `Completed`, and it never has to infer either from whether
+  /// output happened to arrive.
+  pub fn turn_with(&mut self, prompt: &str, cancel: &CancelToken) -> Result<TurnReport, TurnError> {
+    self.runtime.run_turn(prompt, cancel, &mut self.progress)
   }
 
   /// Flush the transcript, end the session as a user exit, and report what the
