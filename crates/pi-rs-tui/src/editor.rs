@@ -745,22 +745,79 @@ fn indent_width(line: &str) -> usize {
 /// character cannot be made to agree with rows that break between words. What is
 /// left in common is the measurement, so a wide glyph moves the break exactly as
 /// far as it moves the text.
+/// A break is taken between clusters, never inside one ([[`continues_cluster`]]):
+/// the cluster a row would have broken on is spent whole on the row it started on,
+/// so a joined emoji, a marked letter, a keycap, or a flag pair is never left with
+/// half of itself on each side of a row end. Rows are never merged and every row
+/// stays non-empty, so the one-segment-per-row assumption under the cursor walk and
+/// the erase count holds. A cluster wider than the row cannot be cut, so that row
+/// goes over — the same concession a double-width glyph already makes at width 1.
 fn line_rows(line: &str, width: usize) -> Vec<(usize, usize)> {
   let width = width.max(1);
+  let chars: Vec<char> = line.chars().collect();
   let mut rows = Vec::new();
   let mut start = 0usize;
   let mut column = 0usize;
-  for (index, c) in line.chars().enumerate() {
-    let w = char_width(c);
-    if column + w > width && index > start {
+  let mut index = 0usize;
+  while index < chars.len() {
+    // The cluster is the widest span from `index` whose scalars may not be
+    // separated, so the only boundaries this loop can break at are the ones a
+    // cluster allows.
+    let mut end = index + 1;
+    while end < chars.len() && continues_cluster(Some(chars[end - 1]), chars[end]) {
+      end += 1;
+    }
+    let columns: usize = chars[index..end].iter().copied().map(char_width).sum();
+    if column + columns > width && index > start {
       rows.push((start, index));
       start = index;
       column = 0;
     }
-    column += w;
+    column += columns;
+    index = end;
   }
-  rows.push((start, char_count(line)));
+  rows.push((start, chars.len()));
   rows
+}
+
+/// `true` when `next` is a cluster tail: it belongs to the cluster `previous`
+/// opens, so a row may not begin there.
+///
+/// The rule is deliberately narrow. `unicode-segmentation` is not a dependency and
+/// must not become one for this, and hand-writing UAX #29 clustering inside a wrap
+/// would be more code than the wrap it fixes. What is covered, and all this
+/// claims: a joiner U+200D and the scalar it joins, on both sides of the joiner;
+/// the non-joiner U+200C; the variation selectors U+FE0E and U+FE0F; the combining
+/// enclosing keycap U+20E3; combining diacritical marks U+0300..=U+036F; and the
+/// second regional indicator of a flag pair, two scalars a terminal draws as one
+/// glyph. That is emoji sequences, combining marks and keycaps.
+///
+/// What is not: this is not Unicode grapheme parity. Indic vowel signs, Thai
+/// combining marks, and Hangul jamo sequences can still be broken apart. A missed
+/// cluster at least measures columns, so the width checks still see it; a missed
+/// joiner measures nothing, which is why the joiner is on the list.
+fn continues_cluster(previous: Option<char>, next: char) -> bool {
+  // A joiner never ends a row and what it joins never starts one.
+  let follows_a_joiner = matches!(previous, Some('\u{200d}'));
+  // Only the halves of a flag are attached to each other: what follows a lone
+  // regional indicator, when that is not another indicator, opens a new cluster.
+  let joins_a_flag_pair = match previous {
+    Some(previous) if is_regional_indicator(previous) => is_regional_indicator(next),
+    _ => false,
+  };
+  follows_a_joiner
+    || joins_a_flag_pair
+    || matches!(
+      next,
+      // Non-joiner, joiner, enclosing keycap, text and emoji variation selectors.
+      '\u{200c}' | '\u{200d}' | '\u{20e3}' | '\u{fe0e}' | '\u{fe0f}'
+    )
+    || matches!(next as u32, 0x0300..=0x036f)
+}
+
+/// `true` for a regional indicator, the half of a flag pair: U+1F1E6..=U+1F1FF.
+fn is_regional_indicator(c: char) -> bool {
+  matches!(c as u32, 0x1f1e6..=0x1f1ff)
 }
 
 /// Which display row the caret sits on, and how far into it.
