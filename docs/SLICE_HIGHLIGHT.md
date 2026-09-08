@@ -47,3 +47,11 @@ end, `cargo test -p pi-rs-tui` in between. **Commit before running any cargo com
 assertion. Do not wire it into the editor or live surface. Leave ROADMAP unchecked.
 No merges, rebases, pushes, PRs; stay in this worktree. `git rev-parse HEAD` before each commit — if it
 moved without your commit, stop and report.
+
+## Clarification of item 6 (take this, it supersedes the muddled paragraph)
+
+Separators are **not** emitted as segments. `tokens` returns only operation and argument segments, in
+order, with their original inner text (quotes kept, backslashes literal). The reconstruction test is:
+the segment texts, in order, equal the expected token list for each input in a table. Exact input
+reproduction is **not** a goal of this function and must not be claimed — say that in the doc comment so
+the wiring slice does not expect it.
