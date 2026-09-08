@@ -55,9 +55,8 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [ ] Add warm-start benchmark (`bench/startup.sh` reports min/mean/median/max over N warm runs).
 - [x] Add TUI render benchmark (`bench/render.sh`; cases in
       `crates/pi-rs-tui/benches/render.rs`).
-- [ ] Add slash-completion benchmark. Nothing completes a slash command yet:
-      `pi-rs-tui::command` parses. A benchmark for a completion that does not exist would be a
-      number with nothing behind it.
+- [x] Add slash-completion benchmark (`tab_completion` in `bench/keystroke.sh`: Tab cycling
+      a command word against 64 candidates, budgeted per press alongside the other keystrokes).
 - [x] Record initial latency budgets. They are the budgets in the bench source, which exits
       non-zero when a case exceeds one; the recorded baseline, its date, and the machine that
       produced it are in the same file, so the enforcement point and the number cannot drift
@@ -629,6 +628,44 @@ Do not begin until stable baselines exist.
 
 - [ ] Experimental optimization demonstrates measurable benefit without degrading predictability.
 - [ ] Static/default behavior remains available and stable.
+
+---
+
+## Current priorities — plan of record
+
+> Reconstructed 2026-09-08 after the full merge of the open PR series into `main`
+> (492 to 806 tests). The prose list that lived here was never committed and did not
+> survive the merge; this section rebuilds it from the merged state, phase by phase.
+
+### P0 — Next
+
+- [ ] Pre-emptive compaction producer: the request-size heuristic that fires
+      `ContextCompactionStarted`/`ContextCompactionCompleted` (shapes pinned by the
+      event work; still zero producers) and opens the durable compaction epoch (#35)
+      before the request that would overflow, continuing through `run --resume` (#32).
+- [ ] Fold retrieved external context into the turn: `ExternalContextRetrieved` is
+      recorded but no message path consumes it yet.
+- [x] Slash-completion for the interactive input line, plus its benchmark: `Tab` walks
+      `Completions` in `pi-rs-tui::complete`, the editor owns the cycle, and the loop answers
+      `/help`, `/quit`, and `/exit` itself.
+
+### P1 — Follow-on
+
+- [ ] Load `SKILL.md` bodies and honour `disable-model-invocation`; present skills to
+      the model as a skill-control prompt (Phase 8 remainder; loader and listing done).
+- [ ] Invoke a prompt template from inside a session (`/name`), and split one typed
+      string into template arguments the way Pi's editor does.
+- [ ] Checkpoint creation driven by the runtime under context pressure, not only the
+      explicit path; document what a checkpoint does to compaction policy.
+- [ ] Import a whole Pi session directory, or name what a single-file import leaves out.
+
+### P2 — Later / deliberately deferred
+
+- [ ] Windows CI matrix (macOS and Linux are gated).
+- [ ] Telemetry, metrics, and analytics surfaces: deferred; privacy and scope decision.
+- [ ] GitHub Pages site.
+- [ ] MCP server/worker mode, TypeScript extension host (Phases 9/8): untouched; keep
+      behind their adapter boundaries when started.
 
 ---
 

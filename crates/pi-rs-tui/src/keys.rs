@@ -24,6 +24,7 @@
 //! | `Ctrl-K`, `Ctrl-U` | delete to line end, or to line start |
 //! | `Ctrl-W` | delete word backward |
 //! | `Ctrl-J`, `Ctrl-M` | insert a newline |
+//! | `Tab` | `Complete`, inert until the buffer is given candidates |
 //! | bracketed paste | `Paste` |
 //!
 //! Motion bindings are the readline set, because that is the set muscle memory
@@ -38,10 +39,14 @@
 //! and only the loop knows whether a turn is running. The buffer's `Cancel` stays
 //! reachable on `Esc`, and the loop keeps `Ctrl-C` for itself.
 //!
-//! `Tab` (completion), `Ctrl-L` (repaint), the function keys, and `Alt` on
-//! terminals that deliver it as `Esc` plus a character are the same story: they
-//! belong to a surface, or to a later keymap, and a mapping that silently ate them
-//! would look like a dead key.
+//! **`Tab` is bound**, because a completion that fires on nothing typed is worse
+//! than none — but it is the one key whose meaning a surface can switch off: a
+//! buffer with no registered candidates leaves every `Tab` a [`Intent::Noop`].
+//!
+//! `Ctrl-L` (repaint), the function keys, and `Alt` on terminals that deliver it
+//! as `Esc` plus a character are the remaining story: they belong to a surface, or
+//! to a later keymap, and a mapping that silently ate them would look like a dead
+//! key.
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -73,6 +78,10 @@ pub fn key_intent(key: &KeyEvent) -> Intent {
       KeyCode::Delete => Intent::DeleteForward,
       KeyCode::Enter => Intent::Submit,
       KeyCode::Esc => Intent::Cancel,
+      // Bound, but inert on its own: a buffer with no registered candidates
+      // answers it exactly like a dead key, so wiring it here costs a surface
+      // nothing until it says what it can complete to.
+      KeyCode::Tab => Intent::Complete,
       KeyCode::Up => Intent::MoveUp,
       KeyCode::Down => Intent::MoveDown,
       KeyCode::Left => Intent::MoveLeft,
@@ -245,7 +254,10 @@ mod tests {
     assert_eq!(intent(&ctrl('c')), Intent::Noop);
     assert_eq!(intent(&ctrl('l')), Intent::Noop);
     assert_eq!(intent(&ctrl('z')), Intent::Noop);
-    assert_eq!(intent(&key(KeyCode::Tab, KeyModifiers::NONE)), Intent::Noop);
+    assert_eq!(
+      intent(&key(KeyCode::BackTab, KeyModifiers::NONE)),
+      Intent::Noop
+    );
   }
 
   #[test]

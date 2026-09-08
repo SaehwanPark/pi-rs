@@ -32,6 +32,7 @@
 //! * no line contains a newline;
 //! * `width >= 1`.
 
+use crate::complete::Completions;
 use crate::width::{char_width, display_width};
 
 /// A caret position: which line, and how many characters into it.
@@ -88,6 +89,9 @@ pub enum Intent {
   MoveBufferEnd,
   /// Send what is typed, if anything sendable is.
   Submit,
+  /// Offer the next completion of the slash-word under the caret. A buffer with no
+  /// registered candidates treats it exactly like [`Intent::Noop`].
+  Complete,
   /// Give up the current input without sending it.
   Cancel,
   /// A key this buffer has no binding for.
@@ -125,6 +129,11 @@ pub struct Editor {
   recall: Option<usize>,
   /// What was in the buffer when recall started.
   draft: Option<String>,
+  /// The names Tab completes to; empty until a surface says what it knows.
+  completions: Completions,
+  /// What Tab is cycling through: the word it started from, and how many presses
+  /// that word has had. Any other edit ends the cycle.
+  completion: Option<(String, usize)>,
 }
 
 impl Default for Editor {
@@ -153,6 +162,8 @@ impl Editor {
       history: Vec::new(),
       recall: None,
       draft: None,
+      completions: Completions::default(),
+      completion: None,
     }
   }
 
@@ -186,9 +197,89 @@ impl Editor {
   pub fn history(&self) -> &[String] {
     &self.history
   }
+
+  /// Say what the surface can complete to, replacing any earlier list. Names may
+  /// be given with or without the leading `/`.
+  pub fn set_completions<T: AsRef<str>, I: IntoIterator<Item = T>>(&mut self, words: I) {
+    self.completions = Completions::new(words);
+    self.completion = None;
+  }
+
+  /// The cycle Tab follows over the command word, when the caret sits at the end
+  /// of one. Pure arithmetic lives in [`Completions`]; this owns only the press
+  /// counter and the splice.
+  fn complete(&mut self) -> Outcome {
+    if self.completions.is_empty() {
+      return Outcome::Unchanged;
+    }
+    // Only line zero, only the first word: that is where a slash command can be,
+    // and completing anywhere else would rewrite a prompt the user is writing.
+    if self.cursor.line != 0 {
+      self.completion = None;
+      return Outcome::Unchanged;
+    }
+    let chars: Vec<char> = self.lines[0].chars().collect();
+    let word_end = chars
+      .iter()
+      .position(|c| c.is_whitespace())
+      .unwrap_or(chars.len());
+    if self.cursor.column != word_end {
+      self.completion = None;
+      return Outcome::Unchanged;
+    }
+    let word: String = chars[..word_end].iter().collect();
+    if !word.starts_with('/') {
+      self.completion = None;
+      return Outcome::Unchanged;
+    }
+    // Continue an open cycle when the caret's word is the one it started from,
+    // grew from, or is among the names it has been offering — and keep stepping
+    // from that base, because the caret's word *is* one of the candidates and
+    // completing it again would narrow the list to itself.
+    let (base, press) = match &self.completion {
+      Some((b, presses)) if self.cycle_still_open(b, &word) => (b.clone(), *presses + 1),
+      _ => (word.clone(), 0),
+    };
+    let Some(replacement) = self.completions.step(&base, press) else {
+      self.completion = None;
+      return Outcome::Unchanged;
+    };
+    self.completion = Some((base, press));
+    if replacement == word {
+      // Nothing to extend (yet); the press still counted, so the next Tab walks.
+      return Outcome::Unchanged;
+    }
+    let rest: String = chars[word_end..].iter().collect();
+    self.lines[0] = replacement.clone() + &rest;
+    self.cursor.column = replacement.chars().count();
+    self.desired = None;
+    Outcome::Changed
+  }
+
+  /// `true` when `word` continues the cycle that started at `base`: it is the
+  /// base itself, or a single cycled candidate of it (space excluded — a unique
+  /// match closes its word with a space, and the next Tab lands on an empty word).
+  fn cycle_still_open(&self, base: &str, word: &str) -> bool {
+    // The stem Tab itself grew is still the cycle's own word — the walk picks up
+    // right after an extension, with no press spent standing still.
+    if word.starts_with(base) {
+      return true;
+    }
+    self
+      .completions
+      .matching(base.trim_start_matches('/'))
+      .into_iter()
+      .any(|candidate| candidate == word.trim_start_matches('/'))
+  }
   /// Apply one intent.
   pub fn apply(&mut self, intent: Intent) -> Outcome {
+    if intent != Intent::Complete {
+      // Anything else the user does ends a completion cycle: what is under the
+      // caret now is not what Tab was asked about.
+      self.completion = None;
+    }
     match intent {
+      Intent::Complete => self.complete(),
       Intent::Insert(c) => {
         self.recall_reset_on_edit();
         self.insert_str(&c.to_string());
@@ -870,6 +961,88 @@ mod tests {
 
   fn text(editor: &Editor) -> String {
     editor.text()
+  }
+
+  #[test]
+  fn tab_walks_a_unique_match_to_the_end_of_its_word() {
+    let mut editor = typed("/e");
+    editor.set_completions(["help", "quit", "exit"]);
+    assert_eq!(editor.apply(Intent::Complete), Outcome::Changed);
+    assert_eq!(text(&editor), "/exit ");
+    assert_eq!(editor.cursor().column, 6);
+    // The caret sits past the word now, so the next Tab has nothing to complete.
+    assert_eq!(editor.apply(Intent::Complete), Outcome::Unchanged);
+  }
+
+  #[test]
+  fn tab_shares_the_stem_then_walks_the_candidates() {
+    let mut editor = typed("/c");
+    editor.set_completions(["compact", "compare", "quit"]);
+    editor.apply(Intent::Complete);
+    assert_eq!(text(&editor), "/compa");
+    editor.apply(Intent::Complete);
+    assert_eq!(text(&editor), "/compact");
+    editor.apply(Intent::Complete);
+    assert_eq!(text(&editor), "/compare");
+    editor.apply(Intent::Complete);
+    assert_eq!(text(&editor), "/compact");
+    // Only the word moves; what followed it stays behind the caret.
+    let mut editor = typed("/c ompact");
+    editor.set_completions(["compact", "compare", "quit"]);
+    for _ in 0..7 {
+      editor.apply(Intent::MoveLeft);
+    }
+    assert_eq!(editor.apply(Intent::Complete), Outcome::Changed);
+    assert_eq!(text(&editor), "/compa ompact");
+    assert_eq!(editor.cursor().column, 6);
+  }
+
+  #[test]
+  fn a_word_that_cannot_grow_yet_still_counts_the_press() {
+    let mut editor = typed("/");
+    editor.set_completions(["help", "quit"]);
+    // Nothing is shared by every candidate, so the first Tab draws nothing — but
+    // it did ask, and the next one starts walking the list.
+    assert_eq!(editor.apply(Intent::Complete), Outcome::Unchanged);
+    editor.apply(Intent::Complete);
+    assert_eq!(text(&editor), "/help");
+  }
+
+  #[test]
+  fn prose_and_misplaced_carets_are_left_alone() {
+    let mut editor = typed("hello");
+    editor.set_completions(["help"]);
+    assert_eq!(editor.apply(Intent::Complete), Outcome::Unchanged);
+    assert_eq!(text(&editor), "hello");
+    // Mid-word: replacing the prefix would strand the tail of the word.
+    let mut editor = typed("/help");
+    editor.set_completions(["help", "hero"]);
+    editor.apply(Intent::MoveLeft);
+    assert_eq!(editor.apply(Intent::Complete), Outcome::Unchanged);
+    assert_eq!(text(&editor), "/help");
+    // Past the command word: arguments are the surface's business, not Tab's.
+    let mut editor = typed("/help me");
+    editor.set_completions(["help", "hero"]);
+    assert_eq!(editor.apply(Intent::Complete), Outcome::Unchanged);
+    assert_eq!(text(&editor), "/help me");
+  }
+
+  #[test]
+  fn an_unregistered_buffer_ignores_tab_entirely() {
+    let mut editor = typed("/he");
+    assert_eq!(editor.apply(Intent::Complete), Outcome::Unchanged);
+    assert_eq!(text(&editor), "/he");
+  }
+
+  #[test]
+  fn any_edit_ends_the_cycle() {
+    let mut editor = typed("/");
+    editor.set_completions(["help", "quit"]);
+    editor.apply(Intent::Complete);
+    // Typing into the word restarts the cycle, which now sees a unique match.
+    editor.apply(Intent::Insert('q'));
+    assert_eq!(editor.apply(Intent::Complete), Outcome::Changed);
+    assert_eq!(text(&editor), "/quit ");
   }
 
   #[test]
