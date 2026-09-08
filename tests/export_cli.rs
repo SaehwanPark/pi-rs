@@ -214,3 +214,39 @@ fn an_export_reimports_into_a_fresh_store_with_the_same_turns_in_the_same_order(
     "the re-imported session holds the same user and assistant content, in order"
   );
 }
+
+#[test]
+fn a_provider_reasoning_summary_is_named_on_stderr_and_the_export_still_succeeds() {
+  let dir = TempDir::new().expect("temp dir");
+  let config = seeded_store(
+    dir.path(),
+    "state-reasoning",
+    &pi_session(
+      "a1b2c3d4-0000-7000-8000-000000000001",
+      "list the tree first",
+    ),
+    SESSION_ID,
+  );
+
+  let out = export(&config, &[SESSION_ID]);
+  assert!(
+    out.status.success(),
+    "a summary that Pi's shape cannot carry is a loss to report, not a failure: {}",
+    stderr(&out)
+  );
+  let report = stderr(&out);
+  let naming = report
+    .lines()
+    .find(|line| line.starts_with("dropped:") && line.contains("reasoning"))
+    .unwrap_or_else(|| panic!("stderr must carry a dropped: line naming the reasoning: {report}"));
+  assert!(
+    naming.to_lowercase().contains("summary"),
+    "the dropped line must say which kind of reasoning is lost: {naming}"
+  );
+  // Reporting the loss must not cost the user the conversation.
+  assert_eq!(
+    turns(&stdout(&out)),
+    expected_turns(),
+    "the export is still the whole conversation"
+  );
+}
