@@ -52,11 +52,11 @@ pub use context::{
 };
 pub use event::{
   AgentEvent, AssistantDelta, AttributedMessage, CheckpointCreated, ContextCompactionCompleted,
-  ContextCompactionStarted, ContextReduced, Diagnostic, DiagnosticLevel, EventEnvelope, EventMeta,
-  ExternalContextRetrieved, ModelEpochStarted, ModelFailover, ModelRequestCompleted,
-  ModelRequestStarted, ModelRetry, ReasoningDelta, SessionEndReason, SessionEnded, SessionStarted,
-  ToolCompleted, ToolFailed, ToolRequested, ToolStarted, ToolUnknown, TurnCompleted, TurnStatus,
-  UserMessage,
+  ContextCompactionEpoch, ContextCompactionStarted, ContextReduced, Diagnostic, DiagnosticLevel,
+  EventEnvelope, EventMeta, ExternalContextRetrieved, FIRST_COMPACTION_EPOCH, ModelEpochStarted,
+  ModelFailover, ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta,
+  SessionEndReason, SessionEnded, SessionStarted, ToolCompleted, ToolFailed, ToolRequested,
+  ToolStarted, ToolUnknown, TurnCompleted, TurnStatus, UserMessage, next_context_epoch,
 };
 pub use failure::{CompletionCertainty, FailurePhase, ModelFailure, ModelFailureKind};
 pub use ids::{
