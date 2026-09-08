@@ -1,6 +1,7 @@
 mod cli;
 mod interactive;
 mod run;
+mod skills;
 mod trace;
 
 fn main() {
@@ -17,6 +18,7 @@ fn main() {
     cli::Command::Run(args) => report(run::execute(args)),
     cli::Command::Interactive(args) => report(interactive::execute(args)),
     cli::Command::Trace(args) => report(trace::execute(args)),
+    cli::Command::Skills(args) => report(skills::execute(args)),
   }
 }
 

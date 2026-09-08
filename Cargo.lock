@@ -488,6 +488,7 @@ name = "pi-rs"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "pi-rs-compat",
  "pi-rs-core",
  "pi-rs-provider",
  "pi-rs-runtime",
@@ -495,6 +496,13 @@ dependencies = [
  "pi-rs-tools",
  "pi-rs-tui",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "pi-rs-compat"
+version = "0.1.0"
+dependencies = [
  "tempfile",
 ]
 

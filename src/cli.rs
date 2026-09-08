@@ -6,8 +6,15 @@ use std::{
 use pi_rs_tui::{ColorChoice, DiagnosticFilter, TraceSelection};
 
 pub const TOP_HELP: &str = concat!(
-  "Usage: pi-rs run --config <file> --cwd <workspace> --prompt <text>\n",
-  "       pi-rs interactive --config <file> --cwd <workspace>\n",
+  "Usage: pi-rs <command> [options]\n",
+  "\n",
+  "Commands:\n",
+  "  run          Run one durable coding-agent turn\n",
+  "  interactive  Hold one session across many turns in this process\n",
+  "  trace        Read a session's transcript back out of the store\n",
+  "  skills       List the skills that would be offered to a model\n",
+  "\n",
+  "Run `pi-rs <command> --help` for that command's flags.\n",
 );
 pub const RUN_HELP: &str = concat!(
   "Usage: pi-rs run --config <file> --cwd <workspace> --prompt <text> [surface flags]\n",
@@ -96,12 +103,39 @@ pub const TRACE_HELP: &str = concat!(
   "  --help                   Show this help.\n",
 );
 
+pub const SKILLS_HELP: &str = concat!(
+  "Usage: pi-rs skills [--project]\n",
+  "\n",
+  "Lists the skills that would be offered to a model, one per pair of lines: source\n",
+  "and name, then the description the model sees. The listing goes to stdout; every\n",
+  "file that was skipped, and why, goes to stderr, so `pi-rs skills | fzf` gets names\n",
+  "and nothing else.\n",
+  "\n",
+  "Reads $HOME/.pi/agent/skills, $HOME/.agents/skills, and --project's\n",
+  "<ancestor>/.pi/skills and <ancestor>/.agents/skills up to the git root. A skill is\n",
+  "instructions for the model, so project locations are read only when told they may\n",
+  "be:\n",
+  "\n",
+  "  --project                Read the project's own skill locations\n",
+  "  --help                   Show this help.\n",
+);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
   Help(&'static str),
   Run(RunArgs),
   Interactive(InteractiveArgs),
   Trace(TraceArgs),
+  Skills(SkillsArgs),
+}
+
+/// `pi-rs skills`: what a model would be offered, and what was declined.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SkillsArgs {
+  /// Whether the project's own locations may be read. Off by default because a skill
+  /// is instructions for the model, and a checkout should not be able to hand the
+  /// model instructions that nobody in this session agreed to.
+  pub project: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,12 +231,33 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
   if command == "trace" {
     return parse_trace(&remaining);
   }
+  if command == "skills" {
+    return parse_skills(&remaining);
+  }
   // A bare argument is not a command. Guessing which command the user meant is worse
   // than naming the ones that exist.
   Err(format!(
     "unknown command '{}'\n{TOP_HELP}",
     command.to_string_lossy()
   ))
+}
+
+/// `pi-rs skills`: what a model would be offered, and what was declined.
+fn parse_skills(remaining: &[OsString]) -> Result<Command, String> {
+  let mut project = false;
+  for arg in remaining {
+    let flag = arg
+      .to_str()
+      .ok_or_else(|| format!("skills argument is not valid UTF-8\n{SKILLS_HELP}"))?;
+    match flag {
+      "--project" => project = true,
+      "--help" | "-h" => return Ok(Command::Help(SKILLS_HELP)),
+      other => {
+        return Err(format!("unknown skills argument '{other}'\n{SKILLS_HELP}"));
+      }
+    };
+  }
+  Ok(Command::Skills(SkillsArgs { project }))
 }
 
 /// `pi-rs run`: the answer goes to stdout, the transcript goes to stderr.
@@ -762,5 +817,36 @@ mod tests {
       Err(message) => message,
       Ok(_) => panic!("expected an error"),
     }
+  }
+
+  #[test]
+  fn skills_reads_nothing_from_the_project_unless_told_to() {
+    // The default is the conservative one, so it has to be the parsed default too.
+    assert_eq!(
+      parse(strings(&["skills"])).unwrap(),
+      Command::Skills(SkillsArgs { project: false })
+    );
+    assert_eq!(
+      parse(strings(&["skills", "--project"])).unwrap(),
+      Command::Skills(SkillsArgs { project: true })
+    );
+  }
+
+  #[test]
+  fn a_skills_flag_that_does_not_exist_is_named() {
+    // Skills are instructions for the model, so a mistyped trust flag must not be
+    // quietly ignored in favour of reading whatever is on disk.
+    let error = match parse(strings(&["skills", "--trust"])) {
+      Err(message) => message,
+      Ok(command) => panic!("expected an error, got {command:?}"),
+    };
+    assert!(
+      error.contains("unknown skills argument '--trust'"),
+      "{error}"
+    );
+    assert!(
+      error.contains("--project"),
+      "the error should say what exists: {error}"
+    );
   }
 }

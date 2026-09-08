@@ -146,6 +146,14 @@ Before a backup takes over, its declared capabilities are compared with what the
 
 Compatibility should be explicit and tested.
 
+Implemented so far: `pi-rs skills [--project]` reads the skill locations Pi reads —
+`$HOME/.pi/agent/skills`, `$HOME/.agents/skills`, and the project's `.pi/skills` and
+`.agents/skills` up to the git root — and lists what a model would be offered, one skill
+per pair of lines, on stdout. Every file it skipped, and the reason, goes to stderr, so a
+pipe gets names and nothing else. Project locations are read only with `--project`: a
+skill is instructions for the model, and a checkout should not be able to supply them
+unasked.
+
 Priority targets:
 
 1. skills;

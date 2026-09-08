@@ -445,7 +445,16 @@ fn help_argument_errors_and_bare_invocation_exit_without_configuration() {
   let binary = env!("CARGO_BIN_EXE_pi-rs");
   let bare = Command::new(binary).output().unwrap();
   assert!(bare.status.success());
-  assert!(String::from_utf8_lossy(&bare.stdout).contains("Usage: pi-rs run"));
+  // A bare invocation names the commands rather than guessing one, so it has to list
+  // all of them.
+  let top_help = String::from_utf8_lossy(&bare.stdout);
+  assert!(top_help.contains("Usage: pi-rs <command>"), "{top_help}");
+  for command in ["run", "interactive", "trace", "skills"] {
+    assert!(
+      top_help.contains(command),
+      "{command} missing from: {top_help}"
+    );
+  }
 
   let help = Command::new(binary)
     .args(["run", "--help"])
