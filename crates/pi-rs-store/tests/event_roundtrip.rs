@@ -29,15 +29,17 @@ use std::path::PathBuf;
 use pi_rs_core::{
   capability::{CapabilityGap, EpochReason, ModelCapabilities, ModelRef, ReasoningExposure},
   event::{
-    AgentEvent, AssistantDelta, EventEnvelope, EventMeta, ModelEpochStarted, ModelFailover,
-    ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta, SessionStarted,
-    ToolRequested, UserMessage,
+    AgentEvent, AssistantDelta, EventEnvelope, EventMeta, ExternalContextRetrieved,
+    ModelEpochStarted, ModelFailover, ModelRequestCompleted, ModelRequestStarted, ModelRetry,
+    ReasoningDelta, SessionStarted, ToolCompleted, ToolFailed, ToolRequested, ToolStarted,
+    ToolUnknown, UserMessage,
   },
   failure::ModelFailureKind,
   ids::{EventId, SessionId, ToolCallId, TraceId, TurnId},
   provenance::ReasoningProvenance,
   session::{SESSION_SCHEMA_VERSION, SessionHeader},
-  trace::TraceEntry,
+  tool::ToolExecutionState,
+  trace::{BlobRef, ExternalContextSource, TraceEntry},
 };
 use pi_rs_store::{Store, TraceJournal, WritePolicy, tmp::TempDir};
 
@@ -54,6 +56,12 @@ fn capabilities() -> ModelCapabilities {
     context_window: 32_768,
     max_output_tokens: Some(4_096),
   }
+}
+
+/// The tool call id every tool-lifecycle variant shares, spelled once so a
+/// test cannot quietly compare a start against a different call than it ended.
+fn tool_call_id() -> ToolCallId {
+  ToolCallId::from_string("55555555-5555-4555-8555-555555555555")
 }
 
 fn header(session: &SessionId) -> SessionHeader {
@@ -454,7 +462,7 @@ fn tool_requested_round_trips() {
     "nested": { "follow_symlinks": false },
   });
   let original = AgentEvent::ToolRequested(ToolRequested {
-    call_id: ToolCallId::from_string("55555555-5555-4555-8555-555555555555"),
+    call_id: tool_call_id(),
     name: "read".into(),
     arguments: arguments.clone(),
     read_only: true,
@@ -466,10 +474,7 @@ fn tool_requested_round_trips() {
   let AgentEvent::ToolRequested(body) = restored else {
     unreachable!("assert_same_variant already proved the discriminant");
   };
-  assert_eq!(
-    body.call_id,
-    ToolCallId::from_string("55555555-5555-4555-8555-555555555555")
-  );
+  assert_eq!(body.call_id, tool_call_id());
   assert_eq!(body.name, "read");
   assert_eq!(
     body.arguments, arguments,
@@ -478,5 +483,144 @@ fn tool_requested_round_trips() {
   assert!(
     body.read_only,
     "the mutation flag is what keeps replay safe"
+  );
+}
+
+#[test]
+fn tool_started_round_trips() {
+  let original = AgentEvent::ToolStarted(ToolStarted {
+    call_id: tool_call_id(),
+    name: "bash".into(),
+  });
+  let entry = round_trip(original.clone());
+  let restored = &entry.envelope.event;
+
+  assert_same_variant(restored, &original);
+  let AgentEvent::ToolStarted(body) = restored else {
+    unreachable!("assert_same_variant already proved the discriminant");
+  };
+  assert_eq!(
+    body.call_id,
+    tool_call_id(),
+    "the call id is the only thing joining a start to its completion"
+  );
+  assert_eq!(body.name, "bash");
+}
+
+#[test]
+fn tool_completed_round_trips() {
+  let blob = BlobRef::for_bytes(b"whole tool output bytes".as_slice(), Some("text/plain"));
+  let original = AgentEvent::ToolCompleted(ToolCompleted {
+    call_id: tool_call_id(),
+    name: "read".into(),
+    state: ToolExecutionState::Succeeded,
+    duration_ms: 41,
+    status: Some(0),
+    reduced: true,
+    blob: Some(blob.clone()),
+    visible_bytes: 1_024,
+  });
+  let entry = round_trip(original.clone());
+  let restored = &entry.envelope.event;
+
+  assert_same_variant(restored, &original);
+  let AgentEvent::ToolCompleted(body) = restored else {
+    unreachable!("assert_same_variant already proved the discriminant");
+  };
+  assert_eq!(body.call_id, tool_call_id());
+  assert_eq!(body.name, "read");
+  assert_eq!(body.state, ToolExecutionState::Succeeded);
+  assert_eq!(body.duration_ms, 41);
+  assert_eq!(
+    body.status,
+    Some(0),
+    "an exit status of zero is a fact, not an absence"
+  );
+  assert!(body.reduced);
+  assert_eq!(
+    body.blob.as_ref(),
+    Some(&blob),
+    "the pointer back to the full payload must survive, recovery depends on it"
+  );
+  assert_eq!(body.visible_bytes, 1_024);
+}
+
+#[test]
+fn tool_failed_round_trips() {
+  let original = AgentEvent::ToolFailed(ToolFailed {
+    call_id: tool_call_id(),
+    name: "bash".into(),
+    message: "command exited with a non-zero status".into(),
+    duration_ms: 613,
+    status: Some(127),
+  });
+  let entry = round_trip(original.clone());
+  let restored = &entry.envelope.event;
+
+  assert_same_variant(restored, &original);
+  let AgentEvent::ToolFailed(body) = restored else {
+    unreachable!("assert_same_variant already proved the discriminant");
+  };
+  assert_eq!(body.call_id, tool_call_id());
+  assert_eq!(body.name, "bash");
+  assert_eq!(body.message, "command exited with a non-zero status");
+  assert_eq!(body.duration_ms, 613);
+  assert_eq!(body.status, Some(127));
+}
+
+#[test]
+fn tool_unknown_round_trips() {
+  let original = AgentEvent::ToolUnknown(ToolUnknown {
+    call_id: tool_call_id(),
+    name: "write".into(),
+    why: "the process exited before completion was observed".into(),
+    mutating: true,
+  });
+  let entry = round_trip(original.clone());
+  let restored = &entry.envelope.event;
+
+  assert_same_variant(restored, &original);
+  let AgentEvent::ToolUnknown(body) = restored else {
+    unreachable!("assert_same_variant already proved the discriminant");
+  };
+  assert_eq!(body.call_id, tool_call_id());
+  assert_eq!(body.name, "write");
+  assert_eq!(
+    body.why, "the process exited before completion was observed",
+    "the unobserved boundary has to be readable later, not just countable"
+  );
+  assert!(
+    body.mutating,
+    "unknown must never be coerced into success or failure, especially when mutating"
+  );
+}
+
+#[test]
+fn external_context_retrieved_round_trips() {
+  let original = AgentEvent::ExternalContextRetrieved(ExternalContextRetrieved {
+    source: ExternalContextSource {
+      provider: "rkb-rs".into(),
+      resource_id: "doc/canonical-context".into(),
+      provenance: "rkb-rs/citation".into(),
+    },
+    citation: Some("section 4.2".into()),
+    bytes: 8_192,
+    inline: false,
+  });
+  let entry = round_trip(original.clone());
+  let restored = &entry.envelope.event;
+
+  assert_same_variant(restored, &original);
+  let AgentEvent::ExternalContextRetrieved(body) = restored else {
+    unreachable!("assert_same_variant already proved the discriminant");
+  };
+  assert_eq!(body.source.provider, "rkb-rs");
+  assert_eq!(body.source.resource_id, "doc/canonical-context");
+  assert_eq!(body.source.provenance, "rkb-rs/citation");
+  assert_eq!(body.citation.as_deref(), Some("section 4.2"));
+  assert_eq!(body.bytes, 8_192);
+  assert!(
+    !body.inline,
+    "inline versus referenced changes what replay can recover"
   );
 }
