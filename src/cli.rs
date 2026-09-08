@@ -483,8 +483,15 @@ fn inline_value(arg: &std::ffi::OsStr) -> Option<(&str, &std::ffi::OsStr)> {
   let (flag, value) = arg.to_str()?.split_once('=')?;
   matches!(
     flag,
-    "--config" | "--cwd" | "--prompt" | "--color" | "--width" | "--session" | "--epoch"
-      | "--store" | "--out"
+    "--config"
+      | "--cwd"
+      | "--prompt"
+      | "--color"
+      | "--width"
+      | "--session"
+      | "--epoch"
+      | "--store"
+      | "--out"
   )
   .then_some((flag, OsStr::new(value)))
 }
@@ -588,7 +595,11 @@ fn parse_export(remaining: &[OsString]) -> Result<Command, String> {
           return Err(format!("{flag} requires a value\n{EXPORT_HELP}"));
         }
         index += 1;
-        let slot = if flag == "--config" { &mut config } else { &mut out };
+        let slot = if flag == "--config" {
+          &mut config
+        } else {
+          &mut out
+        };
         if slot.replace(PathBuf::from(value)).is_some() {
           return Err(format!("{flag} may be supplied only once\n{EXPORT_HELP}"));
         }
@@ -604,9 +615,8 @@ fn parse_export(remaining: &[OsString]) -> Result<Command, String> {
       other => return Err(format!("unknown export argument '{other}'\n{EXPORT_HELP}")),
     }
   }
-  let session = session.ok_or_else(|| {
-    format!("a session id is required: pi-rs export <session-id>\n{EXPORT_HELP}")
-  })?;
+  let session = session
+    .ok_or_else(|| format!("a session id is required: pi-rs export <session-id>\n{EXPORT_HELP}"))?;
   // An empty prefix matches every session, so accepting it would turn a typo into an
   // ambiguity error that does not mention what was actually wrong.
   if session.is_empty() {

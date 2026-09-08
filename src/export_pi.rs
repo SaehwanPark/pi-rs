@@ -319,14 +319,19 @@ fn write_output(out: Option<&Path>, bytes: &[u8]) -> Result<(), String> {
       // A closed pipe is how `pi-rs export s | head` ends. It is not an export failure.
       Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
       Err(error) => Err(format!("cannot write stdout: {error}")),
-      Ok(()) => stdout.flush().map_err(|error| format!("cannot write stdout: {error}")),
+      Ok(()) => stdout
+        .flush()
+        .map_err(|error| format!("cannot write stdout: {error}")),
     };
   };
   match fs::symlink_metadata(out) {
     // A link at the destination points somewhere the caller never typed; following it would
     // let an export write outside the path that was named.
     Ok(meta) if meta.file_type().is_symlink() => {
-      return Err(format!("'{}' is a symlink; write to a plain path", out.display()));
+      return Err(format!(
+        "'{}' is a symlink; write to a plain path",
+        out.display()
+      ));
     }
     Ok(meta) if meta.is_dir() => return Err(format!("'{}' is a directory", out.display())),
     Ok(_) => {}
@@ -335,12 +340,8 @@ fn write_output(out: Option<&Path>, bytes: &[u8]) -> Result<(), String> {
   }
   // Only the directories this path needs are created, and only for a path the caller gave.
   if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-    fs::create_dir_all(parent).map_err(|error| {
-      format!(
-        "cannot create '{}': {error}",
-        parent.display()
-      )
-    })?;
+    fs::create_dir_all(parent)
+      .map_err(|error| format!("cannot create '{}': {error}", parent.display()))?;
   }
   fs::write(out, bytes).map_err(|error| format!("cannot write '{}': {error}", out.display()))
 }
@@ -361,7 +362,10 @@ mod tests {
   }
 
   fn event(event: AgentEvent, timestamp_ms: u64) -> TraceEntry {
-    let mut meta = EventMeta::new(SessionId::from_string("session-under-export"), TraceId::new());
+    let mut meta = EventMeta::new(
+      SessionId::from_string("session-under-export"),
+      TraceId::new(),
+    );
     meta.timestamp_ms = timestamp_ms;
     TraceEntry {
       envelope: EventEnvelope::new(meta, event),
@@ -461,7 +465,12 @@ mod tests {
   #[test]
   fn a_streamed_reply_becomes_one_assistant_entry_in_trace_order() {
     let mut items = vec![session_started("/home/dev/app")];
-    items.extend(turn("which files changed?", "Checking the ", "working tree.", 2_000));
+    items.extend(turn(
+      "which files changed?",
+      "Checking the ",
+      "working tree.",
+      2_000,
+    ));
     items.extend(turn("and this error?", "It compiles.", "", 9_000));
     let session = SessionId::from_string("session-under-export");
     let Exported { text, dropped } = render(&session, &items);
@@ -470,7 +479,11 @@ mod tests {
       .lines()
       .map(|line| serde_json::from_str(line).expect("each line is one JSON object"))
       .collect();
-    assert_eq!(lines.len(), 5, "header plus two turns, one entry each: {text}");
+    assert_eq!(
+      lines.len(),
+      5,
+      "header plus two turns, one entry each: {text}"
+    );
     assert_eq!(lines[0]["type"], "session");
     assert_eq!(lines[0]["cwd"], "/home/dev/app");
     let roles: Vec<&str> = lines[1..]
@@ -478,16 +491,25 @@ mod tests {
       .map(|line| line["message"]["role"].as_str().unwrap())
       .collect();
     assert_eq!(roles, ["user", "assistant", "user", "assistant"]);
-    assert_eq!(lines[2]["message"]["content"][0]["text"], "Checking the working tree.");
+    assert_eq!(
+      lines[2]["message"]["content"][0]["text"],
+      "Checking the working tree."
+    );
     assert_eq!(lines[2]["message"]["model"], "claude-opus-4-8");
     // Each entry is a child of the one before it: the export is one line of history.
-    let ids: Vec<&str> = lines[1..].iter().map(|line| line["id"].as_str().unwrap()).collect();
+    let ids: Vec<&str> = lines[1..]
+      .iter()
+      .map(|line| line["id"].as_str().unwrap())
+      .collect();
     let parents: Vec<&str> = lines[2..]
       .iter()
       .map(|line| line["parentId"].as_str().unwrap())
       .collect();
     assert_eq!(parents, [ids[0], ids[1], ids[2]]);
-    assert!(dropped.is_empty(), "a plain conversation loses nothing: {dropped:?}");
+    assert!(
+      dropped.is_empty(),
+      "a plain conversation loses nothing: {dropped:?}"
+    );
   }
 
   #[test]
