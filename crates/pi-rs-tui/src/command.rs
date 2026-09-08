@@ -185,7 +185,10 @@ fn push_token(spans: &mut Vec<Span>, input: &str, at: usize, token: &str) {
 /// its own produces a plausible wrong role: `"my` is not a path, `dir/file.rs"` is.
 /// An unterminated quote simply runs to the end of the input, which is the honest
 /// reading of half-typed input.
-fn token_end(text: &str, from: usize) -> usize {
+///
+/// Shared with [`crate::highlight`] so the command classifier and the highlight
+/// classifier can never disagree about where a run ends.
+pub(crate) fn token_end(text: &str, from: usize) -> usize {
   let mut quote: Option<char> = None;
   for (index, c) in text[from..].char_indices() {
     match quote {
