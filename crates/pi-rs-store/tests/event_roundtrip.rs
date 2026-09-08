@@ -27,12 +27,14 @@
 use std::path::PathBuf;
 
 use pi_rs_core::{
-  capability::{ModelCapabilities, ModelRef, ReasoningExposure},
+  capability::{CapabilityGap, EpochReason, ModelCapabilities, ModelRef, ReasoningExposure},
   event::{
-    AgentEvent, AssistantDelta, EventEnvelope, EventMeta, ModelRequestStarted, ReasoningDelta,
-    SessionStarted, UserMessage,
+    AgentEvent, AssistantDelta, EventEnvelope, EventMeta, ModelEpochStarted, ModelFailover,
+    ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta, SessionStarted,
+    ToolRequested, UserMessage,
   },
-  ids::{EventId, SessionId, TraceId, TurnId},
+  failure::ModelFailureKind,
+  ids::{EventId, SessionId, ToolCallId, TraceId, TurnId},
   provenance::ReasoningProvenance,
   session::{SESSION_SCHEMA_VERSION, SessionHeader},
   trace::TraceEntry,
@@ -318,4 +320,163 @@ fn assistant_delta_round_trips() {
   };
   assert_eq!(body.text, "the store appends one compact json line");
   assert_eq!(body.chunk_index, 42);
+}
+
+#[test]
+fn model_request_completed_round_trips() {
+  let original = AgentEvent::ModelRequestCompleted(ModelRequestCompleted {
+    epoch: 1,
+    model: model(),
+    finish_reason: Some("tool_calls".into()),
+    input_tokens: Some(8_123),
+    output_tokens: Some(4_567),
+    duration_ms: 9_012,
+    tool_calls: 2,
+    reasoning_provenance: Some(ReasoningProvenance::Native),
+  });
+  let entry = round_trip(original.clone());
+  let restored = &entry.envelope.event;
+
+  assert_same_variant(restored, &original);
+  let AgentEvent::ModelRequestCompleted(body) = restored else {
+    unreachable!("assert_same_variant already proved the discriminant");
+  };
+  assert_eq!(body.epoch, 1);
+  assert_eq!(body.model, model());
+  assert_eq!(body.finish_reason.as_deref(), Some("tool_calls"));
+  assert_eq!(body.input_tokens, Some(8_123));
+  assert_eq!(body.output_tokens, Some(4_567));
+  assert_eq!(body.duration_ms, 9_012);
+  assert_eq!(body.tool_calls, 2);
+  assert_eq!(
+    body.reasoning_provenance,
+    Some(ReasoningProvenance::Native),
+    "provenance must survive even when the reasoning deltas themselves were reduced"
+  );
+}
+
+#[test]
+fn model_retry_round_trips() {
+  let original = AgentEvent::ModelRetry(ModelRetry {
+    attempt: 2,
+    max_attempts: 4,
+    kind: ModelFailureKind::RateLimited,
+    retry_after_ms: Some(750),
+    will_failover: true,
+  });
+  let entry = round_trip(original.clone());
+  let restored = &entry.envelope.event;
+
+  assert_same_variant(restored, &original);
+  let AgentEvent::ModelRetry(body) = restored else {
+    unreachable!("assert_same_variant already proved the discriminant");
+  };
+  assert_eq!(body.attempt, 2);
+  assert_eq!(body.max_attempts, 4);
+  assert_eq!(body.kind, ModelFailureKind::RateLimited);
+  assert_eq!(body.retry_after_ms, Some(750));
+  assert!(
+    body.will_failover,
+    "an intent to take over next must not default back to false"
+  );
+}
+
+#[test]
+fn model_failover_round_trips() {
+  let original = AgentEvent::ModelFailover(ModelFailover {
+    from: ModelRef::new("openai-codex", "gpt-5.6-luna"),
+    to: ModelRef::new("local-vulcan", "qwen3.8-flash"),
+    kind: ModelFailureKind::ProviderUnavailable,
+    gaps: vec![
+      CapabilityGap::Images,
+      CapabilityGap::ContextWindow {
+        required: 131_072,
+        available: 32_768,
+      },
+    ],
+    compacted: true,
+  });
+  let entry = round_trip(original.clone());
+  let restored = &entry.envelope.event;
+
+  assert_same_variant(restored, &original);
+  let AgentEvent::ModelFailover(body) = restored else {
+    unreachable!("assert_same_variant already proved the discriminant");
+  };
+  assert_eq!(body.from, ModelRef::new("openai-codex", "gpt-5.6-luna"));
+  assert_eq!(body.to, ModelRef::new("local-vulcan", "qwen3.8-flash"));
+  assert_eq!(body.kind, ModelFailureKind::ProviderUnavailable);
+  assert_eq!(
+    body.gaps,
+    vec![
+      CapabilityGap::Images,
+      CapabilityGap::ContextWindow {
+        required: 131_072,
+        available: 32_768
+      }
+    ],
+    "a tolerated capability gap is an auditable takeover decision, not decoration"
+  );
+  assert!(body.compacted, "the rebudget flag must survive");
+}
+
+#[test]
+fn model_epoch_started_round_trips() {
+  let original = AgentEvent::ModelEpochStarted(ModelEpochStarted {
+    epoch: 2,
+    model: ModelRef::new("antigravity", "gemini-3.8-fresh"),
+    reason: EpochReason::AutomaticFailover,
+    capabilities: capabilities(),
+  });
+  let entry = round_trip(original.clone());
+  let restored = &entry.envelope.event;
+
+  assert_same_variant(restored, &original);
+  let AgentEvent::ModelEpochStarted(body) = restored else {
+    unreachable!("assert_same_variant already proved the discriminant");
+  };
+  assert_eq!(body.epoch, 2);
+  assert_eq!(body.model, ModelRef::new("antigravity", "gemini-3.8-fresh"));
+  assert_eq!(
+    body.reason,
+    EpochReason::AutomaticFailover,
+    "why an epoch began is the difference between failover and a manual switch"
+  );
+  assert_eq!(body.capabilities, capabilities());
+}
+
+#[test]
+fn tool_requested_round_trips() {
+  let arguments = serde_json::json!({
+    "path": "crates/pi-rs-store/src/journal.rs",
+    "offset": 91,
+    "limit": 20,
+    "nested": { "follow_symlinks": false },
+  });
+  let original = AgentEvent::ToolRequested(ToolRequested {
+    call_id: ToolCallId::from_string("55555555-5555-4555-8555-555555555555"),
+    name: "read".into(),
+    arguments: arguments.clone(),
+    read_only: true,
+  });
+  let entry = round_trip(original.clone());
+  let restored = &entry.envelope.event;
+
+  assert_same_variant(restored, &original);
+  let AgentEvent::ToolRequested(body) = restored else {
+    unreachable!("assert_same_variant already proved the discriminant");
+  };
+  assert_eq!(
+    body.call_id,
+    ToolCallId::from_string("55555555-5555-4555-8555-555555555555")
+  );
+  assert_eq!(body.name, "read");
+  assert_eq!(
+    body.arguments, arguments,
+    "tool arguments are the replayable request, they must not be summarised"
+  );
+  assert!(
+    body.read_only,
+    "the mutation flag is what keeps replay safe"
+  );
 }
