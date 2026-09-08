@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Design and scope rules
+    url: https://github.com/SaehwanPark/pi-rs/blob/main/AGENTS.md
+    about: What belongs in core, and what belongs in an extension, skill, or MCP service
+  - name: Compatibility contract
+    url: https://github.com/SaehwanPark/pi-rs/blob/main/COMPATIBILITY.md
+    about: How Pi parity is defined, and what silence in a report means
