@@ -6,7 +6,7 @@ this document records **what exists, what is proven, and what is deliberately no
 Verification for everything marked *done* below:
 
 ```
-cargo test --workspace      # 341 tests
+cargo test --workspace      # 806 tests (2026-09-08, after the full PR-series merge)
 cargo clippy --workspace --all-targets --all-features   # 0 warnings
 cargo fmt --all -- --check
 cargo doc --workspace --no-deps      # 0 warnings
@@ -16,13 +16,33 @@ cargo doc --workspace --no-deps      # 0 warnings
 
 | Layer | Crate | State | Tests |
 | --- | --- | --- | --- |
-| Contracts | `pi-rs-core` | done | 76 |
-| Durability | `pi-rs-store` | done | 66 |
-| Model I/O | `pi-rs-provider` | done, verified against a real endpoint | 70 |
-| Native tools | `pi-rs-tools` | done | 88 |
-| Turn loop + recovery | `pi-rs-runtime` | done | 29 |
-| Surface | `pi-rs-tui` | not started | – |
-| Composition root | `pi-rs` binary | one-shot command done | 12 |
+| Contracts | `pi-rs-core` | done | 81 |
+| Durability | `pi-rs-store` | done, incl. payload bounding, externalized fields, retention | 136 |
+| Model I/O | `pi-rs-provider` | done, verified against a real endpoint | 78 |
+| Native tools | `pi-rs-tools` | done, lifecycle + failure/unknown outcomes | 88 |
+| Turn loop + recovery | `pi-rs-runtime` | done, incl. failover epochs, cancel tokens, multi-turn handles | 41 |
+| Surface | `pi-rs-tui` | done for the interactive surface: raw terminal, buffer/caret, status line, highlighting, wrap | 165 |
+| Pi compatibility readers | `pi-rs-compat` | skills + prompt-template readers with fixture suites | 48 |
+| Composition root | `pi-rs` binary | run, interactive, trace, skills, prompts, prompt, import-pi, export-pi, run --resume | 169 |
+
+## What the merge series added on top of the one-shot command
+
+* `pi-rs interactive` — one process, many turns: raw-mode terminal, editable buffer
+  with wide-character-safe wrap, projected status line, semantic highlighting
+  (operation vs arguments), Ctrl-C split between in-flight turn and idle draft.
+* `pi-rs run --resume <id|prefix>` — continues a recorded session; id resolution is
+  shared with `pi-rs trace` so two commands cannot disagree about one session id.
+* `pi-rs import-pi` / `pi-rs export-pi` — Pi session files in and out, with a
+  round-trip fixture and an explicit report of what could not be carried.
+* Failover made readable: model epochs, takeover reasons, and the epoch that served
+  the answer are durable events, not prose.
+* Trace payload bounding: one journal line stays inside its inline budget; spilled
+  fields are typed `externalized` records with recovery pointers.
+* Benchmarks: cold start, warm start (continuing a stored session), render, and
+  keystroke budgets, each with a script under `bench/`.
+
+The compaction events are pinned in shape but still have **no producer**; pre-emptive
+compaction is the current P0 (see `ROADMAP.md`, “Current priorities”).
 
 ## What the one-shot command added
 
@@ -114,10 +134,12 @@ generate retries forever.
 ## Benchmarks
 
 `bench/startup.sh` measures process startup of the release binary: one cold exec, then warm
-min/mean/median/max. `bench/render.sh` measures the renderer and the command parser per event
-and per line -- width 80 monochrome, width 80 colour, width 20 colour (the wrap-dominated case),
-and `Input::parse` over representative command lines -- and exits non-zero when a case exceeds
-its budget.
+min/mean/median/max. `bench/cold_start.sh`, `bench/warm_start.sh`, and `bench/keystroke.sh`
+cover the cold exec, the cost of relaunching a process that continues a stored session,
+and keystroke-plus-redraw latency against pinned budgets. `bench/render.sh` measures the
+renderer and the command parser per event and per line -- width 80 monochrome, width 80
+colour, width 20 colour (the wrap-dominated case), and `Input::parse` over representative
+command lines -- and exits non-zero when a case exceeds its budget.
 
 Budgets are deliberately not run in CI. Each is about five times a baseline recorded on one
 machine, which is generous locally and meaningless on a shared runner, where identical code
