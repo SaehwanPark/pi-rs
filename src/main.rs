@@ -1,5 +1,6 @@
 mod cli;
 mod interactive;
+mod prompts;
 mod run;
 mod skills;
 mod trace;
@@ -19,6 +20,8 @@ fn main() {
     cli::Command::Interactive(args) => report(interactive::execute(args)),
     cli::Command::Trace(args) => report(trace::execute(args)),
     cli::Command::Skills(args) => report(skills::execute(args)),
+    cli::Command::Prompts(args) => report(prompts::list(args)),
+    cli::Command::Prompt(args) => report(prompts::expand(args)),
   }
 }
 

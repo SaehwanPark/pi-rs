@@ -76,8 +76,10 @@ in the shared `.agents` family, where only files inside a grouping directory cou
 frontmatter subset read is `name` (required), `description` (required — a skill that
 cannot say what it does is never offered), `license`, `compatibility`, `allowed-tools`,
 `disable-model-invocation`, including quoted scalars and `|`/`>` block scalars. Project
-locations are read only with `--project`; walks are depth-bounded and do not follow
-symlinks.
+locations are read only with `--project`. Walks are depth-bounded, and symlinks are
+followed — linking in a skill kept elsewhere is the normal way to share one, and trust was
+already decided about the directory holding the link — with the depth bound stopping a
+link that walks a scan back on itself and saying so.
 
 Not yet: package-local skills, the `skills` array in settings, `--skill` paths,
 skill-body activation, and the model-facing prompt listing.
@@ -92,6 +94,32 @@ Prompt templates should preserve:
 - expected variable behavior where documented.
 
 Prompt compatibility should remain independent from the runtime provider implementation.
+
+### 6.1 Implemented
+
+`pi-rs prompts [--project]` scans, in order, `$HOME/.pi/agent/prompts/*.md` then
+`<ancestor>/.pi/prompts/*.md` from the working directory up to the git root — the
+locations Pi documents, in the order it reads them, so first-found-wins naming is
+reproducible. Discovery is non-recursive and matches `*.md`, which is why a
+subdirectory, a `.txt`, and a dotfile are skipped without a word: Pi documents those
+rules and skips them silently, so a warning on every run would only train the user to
+ignore warnings. A template's name is its filename without the extension; Pi imposes no
+spelling rule on one, so neither does this. Frontmatter is optional in full: the
+`description` is read when declared, otherwise Pi takes the first non-empty body line and
+this says so in the listing rather than presenting an unauthored line as a summary. The
+body is kept with only its surrounding blank lines removed — line breaks inside a template
+are part of the prompt.
+
+`pi-rs prompt [--project] <name> [arguments…]` performs Pi's substitution and writes the
+prompt to stdout and nothing else: `$1`…`$n`, `$@` and `$ARGUMENTS`, `${1:-default}`,
+`${@:-default}`, `${ARGUMENTS:-default}`, `${@:N}`, `${@:N:L}`. Since `$1` is a
+placeholder, so is every digit after a `$`; a placeholder that matches none of the grammar
+is left in the output exactly as written rather than deleted or rejected. Options are read
+before the name, so `pi-rs prompt lint --strict` passes `--strict` to the template.
+
+Not yet: invoking `/name` inside a running session, splitting one typed string into
+arguments the way the editor does, package `prompts/` directories, `pi.prompts` entries,
+the `prompts` array in settings, `--prompt-template` paths, and `--no-prompt-templates`.
 
 ## 7. Packages
 

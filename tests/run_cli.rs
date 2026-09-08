@@ -449,7 +449,14 @@ fn help_argument_errors_and_bare_invocation_exit_without_configuration() {
   // all of them.
   let top_help = String::from_utf8_lossy(&bare.stdout);
   assert!(top_help.contains("Usage: pi-rs <command>"), "{top_help}");
-  for command in ["run", "interactive", "trace", "skills"] {
+  for command in [
+    "run",
+    "interactive",
+    "trace",
+    "skills",
+    "prompts",
+    "prompt",
+  ] {
     assert!(
       top_help.contains(command),
       "{command} missing from: {top_help}"

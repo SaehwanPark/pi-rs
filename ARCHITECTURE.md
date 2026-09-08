@@ -506,8 +506,12 @@ External context should support:
 
 Compatibility logic should remain isolated from the Rust-native runtime.
 
-That boundary is a crate. `pi-rs-compat` reads files Pi already understands — skills
-first — and returns typed state plus the list of things it did not understand. It does
+That boundary is a crate. `pi-rs-compat` reads files Pi already understands — skills and
+prompt templates today — and returns typed state plus the list of things it did not
+understand. Where two formats come from the same places, the *where* is stated once:
+`scan` holds `Trust`, `Source`, and `Discovery`, because a trust decision that exists
+twice is one that can disagree with itself. Expanding a template is pure text
+transformation in `substitute`, with no file, process, or model in sight. It does
 not import the runtime, the store, or a provider, and nothing it returns becomes runtime
 state, an event, or a capability until the runtime deliberately adopts it. A field in
 somebody else's file is evidence about that file, not a fact about this runtime.
@@ -515,8 +519,9 @@ somebody else's file is evidence about that file, not a fact about this runtime.
 Two rules govern the reading. Silence is reserved for what Pi itself skips without a
 word; every other decision produces a warning naming the path and the reason, so an
 empty result that means "we refused to look" cannot be mistaken for one that means
-"there was nothing there". And a skill is instructions for the model, so project-local
-skill locations are read only when the caller says the project is trusted — `Trust` is
+"there was nothing there". And a skill is instructions for the model — as is a prompt
+template — so project-local locations are read only when the caller says the project is
+trusted: `Trust` is
 an input rather than a filesystem lookup because this runtime has no trust decision to
 consult yet, and inventing one inside a file reader would be the worst place to hide it.
 

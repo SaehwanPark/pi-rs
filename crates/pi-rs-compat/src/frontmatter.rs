@@ -87,6 +87,32 @@ pub enum Extract {
   Malformed(Malformed),
 }
 
+/// Everything after the closing `---`, or `text` itself when there is no well-formed
+/// block to remove.
+///
+/// A block that never closed is not removed: without a closing line there is no fact
+/// about where the metadata ends, and guessing one would silently swallow part of a
+/// document. Callers that care distinguish that case through [`extract`], which reports
+/// it, and this function is only ever called on text that passed that check.
+pub fn strip(text: &str) -> &str {
+  let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+  let mut lines = text.split_inclusive('\n');
+  let Some(open) = lines.next() else {
+    return text;
+  };
+  if open.trim_end().trim() != "---" {
+    return text;
+  }
+  let mut offset = open.len();
+  for line in lines {
+    if line.trim_end().trim() == "---" {
+      return text[offset + line.len()..].trim_start_matches(['\r', '\n']);
+    }
+    offset += line.len();
+  }
+  text
+}
+
 /// Read the frontmatter block of `text`.
 pub fn extract(text: &str) -> Extract {
   let text = text.strip_prefix('\u{feff}').unwrap_or(text);
@@ -368,5 +394,38 @@ mod tests {
   #[test]
   fn an_empty_block_is_a_block() {
     assert_eq!(fields("---\n---").keys().count(), 0);
+  }
+
+  #[test]
+  fn strip_removes_the_block_and_keeps_the_body() {
+    assert_eq!(
+      strip("---\nname: x\n---\nReview the diff.\n"),
+      "Review the diff.\n"
+    );
+    // A closing line with no newline after it is still a closing line.
+    assert_eq!(strip("---\nname: x\n---"), "");
+    assert_eq!(strip("---\r\nname: x\r\n---\r\nbody\n"), "body\n");
+    assert_eq!(strip("\u{feff}---\nname: x\n---\nbody"), "body");
+  }
+
+  #[test]
+  fn strip_leaves_what_is_not_a_block_alone() {
+    // Ordinary prose: there was never a block to take off.
+    assert_eq!(strip("# Notes\n\nProse."), "# Notes\n\nProse.");
+    // A block that never closed has no known end, so nothing can be honestly removed.
+    assert_eq!(strip("---\nname: x\nbody"), "---\nname: x\nbody");
+    // A `---` later in the document is a horizontal rule, not a header block.
+    assert_eq!(
+      strip("intro\n---\nname: x\n---\n"),
+      "intro\n---\nname: x\n---\n"
+    );
+  }
+
+  #[test]
+  fn strip_does_not_swallow_a_horizontal_rule_in_the_body() {
+    assert_eq!(
+      strip("---\nname: x\n---\nbefore\n---\nafter\n"),
+      "before\n---\nafter\n"
+    );
   }
 }

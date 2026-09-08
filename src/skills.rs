@@ -7,7 +7,10 @@
 
 use std::path::Path;
 
-use pi_rs_compat::skill::{self, Discovery, SkillWarning, Trust};
+use pi_rs_compat::{
+  scan::{Discovery, Trust},
+  skill::{self, SkillWarning},
+};
 
 use crate::cli::SkillsArgs;
 
