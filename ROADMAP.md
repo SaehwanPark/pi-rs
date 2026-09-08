@@ -639,10 +639,15 @@ Do not begin until stable baselines exist.
 
 ### P0 — Next
 
-- [ ] Pre-emptive compaction producer: the request-size heuristic that fires
+- [x] Pre-emptive reduction producer: a `Compact` policy recommendation at a safe
+      boundary now evicts the oldest model-visible turns to the profile's recent
+      target, recorded as `ContextReduced` with the target it reached (the durable
+      epoch it does not open stays in the trace untouched).
+- [ ] Summarizing compaction producer: the request-size heuristic that fires
       `ContextCompactionStarted`/`ContextCompactionCompleted` (shapes pinned by the
       event work; still zero producers) and opens the durable compaction epoch (#35)
       before the request that would overflow, continuing through `run --resume` (#32).
+      The eviction tier above it is what runs when no summary is being written.
 - [ ] Fold retrieved external context into the turn: `ExternalContextRetrieved` is
       recorded but no message path consumes it yet.
 - [x] Slash-completion for the interactive input line, plus its benchmark: `Tab` walks

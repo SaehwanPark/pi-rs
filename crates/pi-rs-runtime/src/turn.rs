@@ -256,6 +256,10 @@ pub struct TurnLoop<'a> {
   requests: AtomicUsize,
   session_started: bool,
   context_epoch: u32,
+  /// When this loop last shed model-visible history, for the policy's compaction
+  /// cooldown. `None` until the first eviction; a loop that has never compacted
+  /// has waited longer than any cooldown.
+  last_compaction: Option<Instant>,
   /// Last provider-reported input tokens, preferred over any estimate.
   measured_input_tokens: Option<u64>,
 }
@@ -295,6 +299,7 @@ impl<'a> TurnLoop<'a> {
       requests: AtomicUsize::new(0),
       session_started: false,
       context_epoch: 0,
+      last_compaction: None,
       measured_input_tokens: None,
     }
   }
@@ -630,7 +635,7 @@ impl<'a> TurnLoop<'a> {
         attempts_on_model = 0;
       }
       attempts_on_model += 1;
-      let request = self.build_request().map_err(TurnFailure::from)?;
+      let request = self.build_request(&turn_id).map_err(TurnFailure::from)?;
       // The turn's request budget is spent here, at the point the request exists.
       self.requests.fetch_add(1, Ordering::SeqCst);
       let epoch = self.epoch_index();
@@ -925,18 +930,30 @@ impl<'a> TurnLoop<'a> {
       .as_ref()
       .map(|caps| caps.context_window.saturating_sub(1_024))
       .unwrap_or(4_096);
+    self.evict_oldest(target, &turn_id)
+  }
+
+  /// Drop the oldest model-visible turns until the estimate reaches `target`, and
+  /// record the fact with a recovery reference.
+  ///
+  /// This is the runtime's own compaction tier: no model, no summary, nothing
+  /// outside the model-visible vector. The canonical trace is untouched — it holds
+  /// every dropped turn — and the event says what left the window and where the
+  /// proof lives. The newest turn is never dropped: without it there is nothing to
+  /// continue.
+  fn evict_oldest(&mut self, target: u64, turn_id: &TurnId) -> Result<u32, TurnError> {
     let before = estimate_messages(&self.messages);
     let mut dropped = 0u32;
-    // The newest turn is never dropped: without it there is nothing to continue.
     while estimate_messages(&self.messages) > target && self.messages.len() > 1 {
       self.messages.remove(0);
       dropped += 1;
     }
     if dropped > 0 {
       self.context_epoch += 1;
-      let blob = self
-        .trace
-        .put_payload(format!("dropped {dropped} oldest turns for rebudget").as_bytes())?;
+      self.last_compaction = Some(Instant::now());
+      let blob = self.trace.put_payload(
+        format!("dropped {dropped} oldest turns to reach {target} tokens").as_bytes(),
+      )?;
       let recovery_ref = blob.as_ref().map(BlobRef::recovery_ref);
       self.emit(
         Some(turn_id.clone()),
@@ -956,7 +973,7 @@ impl<'a> TurnLoop<'a> {
   }
 
   /// Build the model request, consulting the context policy first.
-  fn build_request(&mut self) -> Result<ModelRequest, TurnError> {
+  fn build_request(&mut self, turn_id: &TurnId) -> Result<ModelRequest, TurnError> {
     let capabilities = self.provider().capabilities();
     let state = {
       let mut state = ContextState::zero(capabilities.context_window);
@@ -964,6 +981,9 @@ impl<'a> TurnLoop<'a> {
       state.measured_tokens = self.measured_input_tokens;
       state.estimated_tokens = estimate_messages(&self.messages);
       state.working_messages = self.messages.len() as u32;
+      // A loop that has never compacted has waited longer than any cooldown:
+      // u64::MAX states that without inventing a timestamp.
+      state.since_last_compaction_ms = self.last_compaction.map_or(u64::MAX, elapsed_ms);
       // Nothing is in flight and no call is pending at this point, which is what
       // makes it the safe boundary.
       state.at_safe_boundary = true;
@@ -983,15 +1003,25 @@ impl<'a> TurnLoop<'a> {
           kind: ModelFailureKind::ContextOverflow,
         }));
       }
-      // Compaction needs both a model and a user decision about what to keep;
-      // doing it here would put a second model inside a turn that did not ask for
-      // one. The surface owns that, so this records the recommendation instead.
-      ContextAction::Compact { level, reason } => {
-        self.diagnostic(
-          None,
-          DiagnosticLevel::Warn,
-          format!("context suggests {} compaction: {reason}", level.as_str()),
-        )?;
+      // The runtime cannot summarize: that needs a model and a user decision about
+      // what to keep, and the surface owns both. It can do the tier below
+      // summarization by itself: drop the oldest model-visible turns at this safe
+      // boundary, where the fact and a recovery reference are recorded and the
+      // canonical history remains in the trace untouched.
+      ContextAction::Compact {
+        level,
+        reason,
+        target_tokens,
+      } => {
+        if self.evict_oldest(target_tokens, turn_id)? == 0 {
+          // Nothing could be dropped: the newest turn alone is over the target.
+          // The recommendation is the surface's again, so it stays visible.
+          self.diagnostic(
+            None,
+            DiagnosticLevel::Warn,
+            format!("context suggests {} compaction: {reason}", level.as_str()),
+          )?;
+        }
       }
       ContextAction::Warn { .. }
       | ContextAction::Keep
@@ -3067,5 +3097,138 @@ mod tests {
           .unwrap_or_default()
           .contains("without a final answer")
     }));
+  }
+
+  /// A 20 000-token window on the balanced profile: compact at 15 000, checkpoint
+  /// at 19 096, recent target (the eviction floor) at 5 000.
+  const PRESSURED_WINDOW: u64 = 20_000;
+
+  /// `turns` messages of exactly 1 000 estimated tokens each, first letter
+  /// identifying them after an eviction.
+  fn heavy_turns(turns: u32) -> Vec<Message> {
+    (0..turns)
+      .map(|turn| {
+        let tag = (b'a' + turn as u8) as char;
+        Message::user(format!("{tag}{}", "x".repeat(3_999)))
+      })
+      .collect()
+  }
+
+  #[test]
+  fn a_compact_recommendation_evicts_oldest_turns_before_the_request() {
+    let mut provider = Scripted::new("pressured", vec![text("ok")]);
+    provider.capabilities.context_window = PRESSURED_WINDOW;
+    let tools = registry_with(Vec::new());
+    let policy =
+      pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, PRESSURED_WINDOW);
+    let mut trace = Recorder::default();
+
+    TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(heavy_turns(16))
+    .run_turn("go", &CancelToken::new(), &mut SilentProgress)
+    .expect("turn completes");
+
+    // 16 000 estimated tokens over a 5 000-token target drops the 11 oldest of
+    // the 17 messages: the five newest old turns and the live prompt remain.
+    let request = &provider.requests()[0];
+    assert_eq!(request.messages.len(), 6, "evicted to the recent target");
+    assert!(request.messages[0].text().starts_with('l'));
+    assert_eq!(request.messages[5].text(), "go");
+
+    let kinds = trace.kinds();
+    let reduced = kinds
+      .iter()
+      .position(|kind| kind == "context_reduced")
+      .expect("the eviction is recorded");
+    let started = kinds
+      .iter()
+      .position(|kind| kind == "model_request_started")
+      .expect("the request still ran");
+    assert!(
+      reduced < started,
+      "reduction precedes the request it serves"
+    );
+    let payload = trace.find("context_reduced").unwrap();
+    assert_eq!(
+      payload["reason"]["recent_target_exceeded"]["target_tokens"],
+      5_000
+    );
+    assert!(
+      payload["recovery_ref"].is_null(),
+      "the recorder holds no blob store"
+    );
+  }
+
+  #[test]
+  fn a_second_eviction_inside_the_cooldown_warns_by_staying_put() {
+    let mut provider = Scripted::new("pressured", vec![text("ok")]);
+    provider.capabilities.context_window = PRESSURED_WINDOW;
+    let tools = registry_with(Vec::new());
+    let policy =
+      pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, PRESSURED_WINDOW);
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(heavy_turns(16));
+    // The policy's own cooldown, fed by the loop's last eviction: pressure again
+    // right after compacting damps into a warning instead of a second eviction.
+    runtime.last_compaction = Some(Instant::now());
+
+    runtime
+      .run_turn("go", &CancelToken::new(), &mut SilentProgress)
+      .expect("turn completes");
+
+    assert_eq!(provider.requests()[0].messages.len(), 17);
+    assert_eq!(trace.count("context_reduced"), 0);
+  }
+
+  #[test]
+  fn the_live_turn_is_never_evicted_and_the_recommendation_stays_visible() {
+    let mut provider = Scripted::new("pressured", vec![text("ok")]);
+    provider.capabilities.context_window = PRESSURED_WINDOW;
+    let tools = registry_with(Vec::new());
+    let policy =
+      pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, PRESSURED_WINDOW);
+    let mut trace = Recorder::default();
+
+    // One prompt of 15 001 estimated tokens: over the compact threshold, and the
+    // newest turn is the only turn. Nothing may be dropped, so the compaction
+    // recommendation must surface as a warning rather than vanish.
+    TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn(
+      &"y".repeat(60_004),
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .expect("an oversized turn is sent, not silently truncated");
+
+    assert_eq!(provider.requests()[0].messages.len(), 1);
+    assert_eq!(trace.count("context_reduced"), 0);
+    assert!(
+      trace
+        .diagnostics()
+        .iter()
+        .any(|message| message.contains("compaction"))
+    );
   }
 }
