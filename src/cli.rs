@@ -34,6 +34,12 @@ pub const RUN_HELP: &str = concat!(
   "  --cwd <workspace>        Workspace root\n",
   "  --prompt <text>          One-shot prompt\n",
   "\n",
+  "Session:\n",
+  "  --resume <id>            Continue a recorded session rather than starting a\n",
+  "                           new one, so the next turn is appended to the session\n",
+  "                           named. An id or a unique prefix names it, exactly as\n",
+  "                           in `pi-rs trace`.\n",
+  "\n",
   "Surface:\n",
   "  --color <auto|always|never>\n",
   "                           Colour the transcript (default: auto, which means\n",
@@ -249,6 +255,10 @@ pub struct RunArgs {
   pub config: PathBuf,
   pub cwd: PathBuf,
   pub prompt: String,
+  /// Session to continue, as written on the command line. Resolution against what the
+  /// store actually holds happens in the run command, not here: parsing must not open
+  /// the network or scan the store.
+  pub resume: Option<String>,
   pub surface: SurfaceArgs,
 }
 
@@ -488,6 +498,7 @@ fn parse_run(remaining: &[OsString]) -> Result<Command, String> {
   let mut config: Option<PathBuf> = None;
   let mut cwd: Option<PathBuf> = None;
   let mut prompt: Option<String> = None;
+  let mut resume: Option<String> = None;
   // Held as options so two flags that decide the same thing can be reported as a
   // conflict instead of silently resolved by whichever came last.
   let mut color: Option<ColorChoice> = None;
@@ -541,6 +552,25 @@ fn parse_run(remaining: &[OsString]) -> Result<Command, String> {
           _ => unreachable!("matched above"),
         }
       }
+      "--resume" => {
+        let value = remaining
+          .get(index)
+          .ok_or_else(|| format!("--resume requires a value\n{RUN_HELP}"))?
+          .clone();
+        index += 1;
+        let value = value
+          .into_string()
+          .map_err(|_| format!("--resume must be valid UTF-8\n{RUN_HELP}"))?;
+        // A value that looks like a flag name is a flag the user meant to write, not
+        // a session: swallowing it would silently drop a surface choice, or name a
+        // session that no store can hold.
+        if value.starts_with('-') || value.trim().is_empty() {
+          return Err(format!(
+            "--resume needs a session id, not '{value}'\n{RUN_HELP}"
+          ));
+        }
+        set_once(&mut resume, value, flag)?;
+      }
       "--no-color" => set_choice(&mut color, ColorChoice::Never, flag)?,
       "--no-reasoning" => reasoning = false,
       "--verbose" => set_choice(&mut diagnostics, DiagnosticFilter::All, flag)?,
@@ -562,6 +592,7 @@ fn parse_run(remaining: &[OsString]) -> Result<Command, String> {
     config,
     cwd,
     prompt,
+    resume,
     surface: SurfaceArgs {
       // The CLI default is the calm one, which is not the renderer's own default:
       // the renderer's job is to be able to render everything, the command's job is
@@ -749,6 +780,7 @@ fn inline_value(arg: &std::ffi::OsStr) -> Option<(&str, &std::ffi::OsStr)> {
     "--config"
       | "--cwd"
       | "--prompt"
+      | "--resume"
       | "--color"
       | "--width"
       | "--session"
@@ -1235,6 +1267,57 @@ mod tests {
       Ok(_) => panic!("two files must fail"),
     };
     assert!(error.contains("would be a second"), "{error}");
+  }
+
+  #[test]
+  fn resume_is_optional_and_keeps_the_value_as_written() {
+    let bare = match parse(strings(&[
+      "run", "--config", "c", "--cwd", "w", "--prompt", "p",
+    ])) {
+      Ok(Command::Run(args)) => args,
+      other => panic!("expected run, got {other:?}"),
+    };
+    assert_eq!(bare.resume, None);
+    // Both the spaced and the inline form name the session; a prefix stays a prefix
+    // because resolution is the run command's job, not the parser's.
+    assert_eq!(
+      run_args(&["--resume", "01abc"]).resume.as_deref(),
+      Some("01abc")
+    );
+    assert_eq!(
+      run_args(&["--resume=01abc"]).resume.as_deref(),
+      Some("01abc")
+    );
+  }
+
+  #[test]
+  fn resume_does_not_swallow_a_later_flag() {
+    // `--resume --quiet` is a missing session id expressed as the next flag name, not
+    // a session called `--quiet`: consuming it would run a turn with the transcript
+    // the user asked to be quiet, and against a session nobody named.
+    let error = run_err(&["--resume", "--quiet"]);
+    assert!(error.contains("--resume needs a session id"), "{error}");
+    let error = run_err(&["--resume=-x"]);
+    assert!(error.contains("--resume needs a session id"), "{error}");
+    assert!(run_err(&["--resume"]).contains("--resume requires a value"));
+  }
+
+  #[test]
+  fn resume_rejects_a_blank_name_and_a_second_name() {
+    assert!(run_err(&["--resume", ""]).contains("--resume needs a session id"));
+    assert!(run_err(&["--resume", "  "]).contains("--resume needs a session id"));
+    assert!(
+      run_err(&["--resume", "a", "--resume", "b"]).contains("--resume may be supplied only once")
+    );
+  }
+
+  fn run_args(values: &[&str]) -> RunArgs {
+    let mut args = vec!["run", "--config", "c", "--cwd", "w", "--prompt", "p"];
+    args.extend_from_slice(values);
+    match parse(strings(&args)) {
+      Ok(Command::Run(args)) => args,
+      other => panic!("expected run, got {other:?}"),
+    }
   }
 
   fn run_err(values: &[&str]) -> String {

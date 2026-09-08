@@ -657,7 +657,12 @@ pub fn execute(args: InteractiveArgs) -> Result<(), String> {
   // The surface is not configurable here. Colour and width come from the terminal
   // the transcript is written to, which this command already requires.
   let surface = SurfaceArgs::default();
-  run::open_session(&args.config, &args.cwd, &surface, |session| {
+  run::open_session(
+    &args.config,
+    &args.cwd,
+    &surface,
+    None,
+    |session| {
     // Raw mode is entered only once the session is open, so a bad config stays what
     // it was: a line printed on a terminal nothing has rearranged. From here on the
     // guard is what restores it, including when `run` returns an error.

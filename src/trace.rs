@@ -57,8 +57,11 @@ pub fn execute(args: TraceArgs) -> Result<(), String> {
 /// A prefix is accepted because session ids are long and a reader copying one from a
 /// footer rarely keeps the whole thing. An ambiguous prefix is an error, never a guess.
 ///
-/// Shared by every command that reads one session out of a store, so that `trace` and
-/// `export` can never disagree about which session an id names.
+/// Shared by every command that reads one session out of a store, so that `trace`,
+/// `export`, and `run --resume` can never disagree about which session an id names.
+/// `--resume` names a session the same way and must not reach a different verdict
+/// than the reader would; the `None` default is the trace command's only, which is
+/// why it speaks the trace prefix.
 pub(crate) fn resolve_session(store: &Store, wanted: Option<&str>) -> Result<SessionId, String> {
   let ids = store
     .layout()
