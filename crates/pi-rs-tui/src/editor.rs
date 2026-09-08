@@ -1282,6 +1282,107 @@ mod tests {
     }
   }
 
+  /// A flag pair: two regional indicators, U+1F1F0 U+1F1F7, one glyph, two cells.
+  const FLAG: &str = "\u{1f1f0}\u{1f1f7}";
+
+  /// The rows a line breaks into, as text, for the cluster checks below.
+  fn row_texts(line: &str, width: usize) -> Vec<String> {
+    line_rows(line, width)
+      .iter()
+      .map(|(start, end)| line.chars().skip(*start).take(end - start).collect())
+      .collect()
+  }
+
+  #[test]
+  fn a_flag_pair_is_never_split_across_a_wrapped_row() {
+    // A flag pair is the only two-scalar, one-glyph pair the wrap rule claims to
+    // keep together. Every width from 1 to 4 either fits the pair or has to let
+    // the row holding it go over; none may put one indicator on each side.
+    let cases = vec![
+      FLAG.to_string(),
+      format!("{FLAG} ship it"),
+      format!("flag {FLAG} now"),
+    ];
+    for case in &cases {
+      let text: &str = case;
+      for width in [1usize, 2, 3, 4] {
+        let rows = row_texts(text, width);
+        assert_eq!(
+          rows.iter().map(String::as_str).collect::<String>(),
+          text,
+          "width {width} lost text in {text:?}"
+        );
+        for row in &rows {
+          let indicators = row.chars().filter(|c| is_regional_indicator(*c)).count();
+          assert_eq!(
+            indicators % 2,
+            0,
+            "width {width} split the flag pair of {text:?}: rows {rows:?}, row {row:?}"
+          );
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn a_combining_mark_is_never_split_from_its_base() {
+    // "é" as `e` U+0301: the mark advances no cell of its own, so a row that
+    // opens on it means the base was left on the row before.
+    for text in ["e\u{0301}", "e\u{0301} d", "ab e\u{0301} cd"] {
+      for width in [1usize, 2, 3, 4] {
+        let rows = row_texts(text, width);
+        assert_eq!(
+          rows.iter().map(String::as_str).collect::<String>(),
+          text,
+          "width {width} lost text in {text:?}"
+        );
+        for row in &rows {
+          assert!(
+            !row.starts_with('\u{0301}'),
+            "width {width} opened a row on the mark: {row:?} from {text:?}"
+          );
+          // `e` is the base and occurs once per input, so a row holds base and
+          // mark together or holds neither of them.
+          assert_eq!(
+            row.contains('e'),
+            row.contains('\u{0301}'),
+            "width {width} split the base from the mark in {text:?}: rows {rows:?}"
+          );
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn plain_ascii_wrapping_produces_the_pinned_rows() {
+    // The cluster rule sits under the cursor walk and the erase count, which
+    // assume one segment per drawn row. Plain ASCII is pinned row for row: same
+    // inputs, same rows, row count included, and every row still a chunk of the
+    // line at most `width` columns wide.
+    let table: [(&str, usize, &[&str]); 9] = [
+      ("", 1, &[""]),
+      ("x", 4, &["x"]),
+      ("abc", 1, &["a", "b", "c"]),
+      ("abc", 2, &["ab", "c"]),
+      ("abc", 3, &["abc"]),
+      ("a b c", 2, &["a ", "b ", "c"]),
+      ("abcdefghij", 3, &["abc", "def", "ghi", "j"]),
+      ("hello world", 5, &["hello", " worl", "d"]),
+      (
+        "four score and seven years ago",
+        7,
+        &["four sc", "ore and", " seven ", "years a", "go"],
+      ),
+    ];
+    for (text, width, expected) in table {
+      assert_eq!(
+        row_texts(text, width),
+        expected.to_vec(),
+        "width {width} wrapped {text:?} differently"
+      );
+    }
+  }
+
   #[test]
   fn an_import_style_buffer_survives_a_whole_editing_pass() {
     // Pasted, edited across lines, recalled, and submitted: the sequence a real
