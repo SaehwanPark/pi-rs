@@ -260,6 +260,16 @@ pub enum AgentEvent {
   /// Producer: none found at 2026-09-07, test fixtures only
   /// (docs/COMPACT_EVENT_AUDIT.md).
   ContextCompactionCompleted(ContextCompactionCompleted),
+  /// Why: a compaction moved the model-visible context to a new epoch, and this is
+  /// the durable record of which canonical range it replaced and what stands in
+  /// for that range.
+  /// Ordering: never before the records it summarises. It is appended after the
+  /// whole replaced range, and the log assigns `seq` monotonically at append time.
+  /// Persistence: always. Replay: advances the context epoch and substitutes the
+  /// summary for the replaced range in model-visible context only; canonical
+  /// history is replayed unchanged.
+  /// UI: rare, and it must read as "context changed", never as "history changed".
+  ContextCompactionEpoch(ContextCompactionEpoch),
   /// Why: an episode checkpoint capsule was written.
   /// Ordering: after the events summarized by the capsule.
   /// Persistence: always. Replay: records the checkpoint pointer.
@@ -472,6 +482,60 @@ pub struct ContextCompactionCompleted {
   pub context_epoch: u32,
 }
 
+/// The first compaction epoch. Epoch `0` is the uncompacted context, where every
+/// canonical record is also in the model-visible context, so the first record of
+/// a compaction claims `1`.
+pub const FIRST_COMPACTION_EPOCH: u32 = 1;
+
+/// The durable record of one context compaction epoch.
+///
+/// This is a record that a compaction happened, not compaction itself: it carries
+/// no summary body and rewrites nothing.
+///
+/// Canonical history is **never** rewritten. The record is appended, and every
+/// record inside `replaces_from..=replaces_through` stays readable through
+/// `pi-rs trace`; only the model-visible context swaps that range for `summary`.
+/// Holding an opaque [`BlobRef`] instead of the summary text is what keeps a
+/// reduced context from being mistaken for the canonical trace.
+///
+/// The session is named by [`EventMeta::session_id`], as in every other record,
+/// so this struct carries only what a compaction adds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCompactionEpoch {
+  /// Monotonic epoch ordinal starting at [`FIRST_COMPACTION_EPOCH`]. Claim it with
+  /// [`next_context_epoch`] rather than from an in-memory counter, so a resume
+  /// numbers epochs exactly as the writer did. Spelled as in
+  /// [`ContextCompactionCompleted`], because a bare `epoch` reads as the model epoch.
+  pub context_epoch: u32,
+  /// First canonical sequence number the summary replaces in model-visible context.
+  /// Inclusive, and the same coordinate [`EventMeta::seq`] uses — no second
+  /// addressing system exists.
+  pub replaces_from: EventSeq,
+  /// Last canonical sequence number the summary replaces. Inclusive, and never
+  /// below `replaces_from`: a summary always stands in for at least one record.
+  pub replaces_through: EventSeq,
+  /// Reference to the stored summary, never the summary itself.
+  pub summary: BlobRef,
+}
+
+/// The epoch ordinal the next [`ContextCompactionEpoch`] record must claim.
+///
+/// Derived from the records themselves, never from an in-memory counter: a process
+/// that resumes a session reads its trace and must compute the same numbering as
+/// the process that wrote it. Ordinals are dense, so the next one is one past the
+/// highest recorded, and a trace with no compaction is still at the first.
+pub fn next_context_epoch<'events>(events: impl IntoIterator<Item = &'events AgentEvent>) -> u32 {
+  let highest = events
+    .into_iter()
+    .fold(None::<u32>, |highest, event| match event {
+      AgentEvent::ContextCompactionEpoch(record) => {
+        Some(highest.map_or(record.context_epoch, |high| high.max(record.context_epoch)))
+      }
+      _ => highest,
+    });
+  highest.map_or(FIRST_COMPACTION_EPOCH, |epoch| epoch + 1)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointCreated {
   pub checkpoint_id: CheckpointId,
@@ -608,6 +672,57 @@ mod tests {
     let encoded = serde_json::to_string(&event).unwrap();
     assert!(encoded.contains("\"type\":\"tool_unknown\""), "{encoded}");
     assert!(encoded.contains("\"mutating\":true"), "{encoded}");
+  }
+
+  fn epoch_record(epoch: u32, from: u64, through: u64) -> ContextCompactionEpoch {
+    ContextCompactionEpoch {
+      context_epoch: epoch,
+      replaces_from: EventSeq(from),
+      replaces_through: EventSeq(through),
+      summary: BlobRef::for_bytes(b"summary text", Some("text/plain")),
+    }
+  }
+
+  #[test]
+  fn compaction_epoch_round_trips_through_event_serialization() {
+    let event = AgentEvent::ContextCompactionEpoch(epoch_record(1, 4, 12));
+    let encoded = serde_json::to_string(&event).unwrap();
+    assert!(
+      encoded.contains("\"type\":\"context_compaction_epoch\""),
+      "{encoded}"
+    );
+    // The range is the existing sequence coordinate, and the summary is a
+    // reference: the summary body must never be serialized into the record.
+    assert!(encoded.contains("\"replaces_from\":4"), "{encoded}");
+    assert!(encoded.contains("\"replaces_through\":12"), "{encoded}");
+    assert!(!encoded.contains("summary text"), "{encoded}");
+    let decoded: AgentEvent = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, event);
+  }
+
+  #[test]
+  fn compaction_epoch_ordinals_are_derived_from_the_records() {
+    // No compaction yet: the context is still at the first epoch ordinal.
+    assert_eq!(next_context_epoch([]), FIRST_COMPACTION_EPOCH);
+    let records: Vec<AgentEvent> = (FIRST_COMPACTION_EPOCH..=3)
+      .map(|epoch| {
+        AgentEvent::ContextCompactionEpoch(epoch_record(epoch, epoch as u64, epoch as u64 + 1))
+      })
+      .collect();
+    let mut events: Vec<AgentEvent> = records
+      .iter()
+      .map(|_| {
+        AgentEvent::UserMessage(UserMessage {
+          text: "noise".into(),
+          attachments: 0,
+        })
+      })
+      .chain(records.clone())
+      .collect();
+    assert_eq!(next_context_epoch(events.iter()), 4);
+    // Derivation reads the ordinals, not the order the records arrived in.
+    events.reverse();
+    assert_eq!(next_context_epoch(events.iter()), 4);
   }
 
   #[test]

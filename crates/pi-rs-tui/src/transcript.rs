@@ -160,6 +160,7 @@ impl DiagnosticFilter {
             | E::ModelFailover(_)
             | E::ModelEpochStarted(_)
             | E::ContextCompactionCompleted(_)
+            | E::ContextCompactionEpoch(_)
         ),
       },
     }
@@ -440,6 +441,30 @@ pub fn render_event(event: &AgentEvent, options: &TranscriptOptions) -> Vec<Rend
         Role::Meta,
         &format!("context epoch {}", e.context_epoch),
       );
+      vec![line]
+    }
+    E::ContextCompactionEpoch(e) => {
+      let mut line = label("compact");
+      fact(
+        &mut line,
+        Role::Meta,
+        &format!("context epoch {}", e.context_epoch),
+      );
+      fact(
+        &mut line,
+        Role::Meta,
+        &format!("replaced {}..{}", e.replaces_from.0, e.replaces_through.0),
+      );
+      fact(
+        &mut line,
+        Role::Path,
+        &format!("summary {}", e.summary.recovery_ref()),
+      );
+      // The one thing a reader must not have to guess: a new compaction epoch is a
+      // change to the model-visible context, not a rewrite of the trace. Saying it
+      // here is what stops this line from reading like the records it replaced were
+      // removed.
+      fact(&mut line, Role::Muted, "canonical trace intact");
       vec![line]
     }
     E::CheckpointCreated(e) => {
