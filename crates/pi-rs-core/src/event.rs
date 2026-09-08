@@ -250,11 +250,15 @@ pub enum AgentEvent {
   /// Ordering: at a turn or phase boundary, never mid-request.
   /// Persistence: always. Replay: applies the compaction marker.
   /// UI: rare, shows the level and reason.
+  /// Producer: none found at 2026-09-07, test fixtures only
+  /// (docs/COMPACT_EVENT_AUDIT.md).
   ContextCompactionStarted(ContextCompactionStarted),
   /// Why: compaction finished and what it retained.
   /// Ordering: closes a matching compaction start.
   /// Persistence: always. Replay: marks the context epoch advanced.
   /// UI: shows retained/removed counts.
+  /// Producer: none found at 2026-09-07, test fixtures only
+  /// (docs/COMPACT_EVENT_AUDIT.md).
   ContextCompactionCompleted(ContextCompactionCompleted),
   /// Why: an episode checkpoint capsule was written.
   /// Ordering: after the events summarized by the capsule.
@@ -614,6 +618,44 @@ mod tests {
     });
     let encoded = serde_json::to_string(&event).unwrap();
     assert!(encoded.contains("l1_ordinary"), "{encoded}");
+    let decoded: AgentEvent = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, event);
+  }
+
+  /// Why: neither compaction variant has a production producer (see
+  /// docs/COMPACT_EVENT_AUDIT.md), so the serialized shape is the only
+  /// contract that keeps it compatible. Pin the `type` tag and every field
+  /// name exactly, so a rename or a dropped field fails here.
+  #[test]
+  fn compaction_started_wire_shape_is_pinned() {
+    let event = AgentEvent::ContextCompactionStarted(ContextCompactionStarted {
+      level: ContextLevel::L1Ordinary,
+      reason: "recent-context target exceeded".into(),
+    });
+    let encoded = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+      encoded,
+      "{\"type\":\"context_compaction_started\",\"level\":\"l1_ordinary\",\"reason\":\"recent-context target exceeded\"}"
+    );
+    let decoded: AgentEvent = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, event);
+  }
+
+  /// Why: as for the start variant. Also pins that the counts and
+  /// `context_epoch` stay numbers on the wire, never strings.
+  #[test]
+  fn compaction_completed_wire_shape_is_pinned() {
+    let event = AgentEvent::ContextCompactionCompleted(ContextCompactionCompleted {
+      level: ContextLevel::L2Phase,
+      removed_messages: 12,
+      retained_messages: 30,
+      context_epoch: 2,
+    });
+    let encoded = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+      encoded,
+      "{\"type\":\"context_compaction_completed\",\"level\":\"l2_phase\",\"removed_messages\":12,\"retained_messages\":30,\"context_epoch\":2}"
+    );
     let decoded: AgentEvent = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, event);
   }
