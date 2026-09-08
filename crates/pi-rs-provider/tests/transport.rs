@@ -15,7 +15,7 @@ use std::{
 use pi_rs_core::{
   CancelToken, Collector, CompletionCertainty, CompletionUsage, FailurePhase, Message,
   ModelCapabilities, ModelFailure, ModelFailureKind, ModelProvider, ModelRef, ModelRequest,
-  ProviderEvent, ReasoningExposure,
+  ProviderEvent, ReasoningExposure, ReasoningProvenance,
 };
 use pi_rs_provider::{MaxTokensField, OpenAiCompat, ProviderConfig, ThinkingInput};
 
@@ -119,13 +119,25 @@ fn status(code: u16, reason: &str, body: &str, extra: &str) -> String {
 }
 
 fn adapter(base_url: &str, api_key: Option<&str>) -> OpenAiCompat {
+  adapter_declaring(base_url, api_key, ReasoningExposure::Native)
+}
+
+/// An endpoint that declares a specific reasoning exposure.
+///
+/// The declaration is the only evidence available about thinking text, so a test
+/// about provenance has to state it.
+fn adapter_declaring(
+  base_url: &str,
+  api_key: Option<&str>,
+  exposure: ReasoningExposure,
+) -> OpenAiCompat {
   let config = ProviderConfig {
     api_key: api_key.map(str::to_string),
     max_tokens_field: MaxTokensField::MaxCompletionTokens,
     thinking_input: ThinkingInput::ChatTemplateThinking,
     capabilities: ModelCapabilities {
       context_window: 8_192,
-      exposed_reasoning: ReasoningExposure::Native,
+      exposed_reasoning: exposure,
       tools: true,
       ..ModelCapabilities::text_only(1)
     },
@@ -238,6 +250,39 @@ fn reasoning_and_text_arrive_as_separate_typed_events() {
     })
     .collect();
   assert_eq!(text, "answer");
+}
+
+/// The same thinking field, three different claims.
+///
+/// A hosted endpoint that exposes only a summary of hidden reasoning sends that
+/// summary in `reasoning_content`, the field a local server uses for the model's own
+/// thinking. Deciding by field name would record provider prose as recovered chain of
+/// thought, so the endpoint's declaration decides, and the claim survives the wire.
+#[test]
+fn thinking_text_is_claimed_as_the_declaration_says() {
+  let thinking = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"in short\"}}]}\n\n";
+  for (exposure, expected) in [
+    (ReasoningExposure::Native, ReasoningProvenance::Native),
+    (
+      ReasoningExposure::ProviderSummary,
+      ReasoningProvenance::ProviderSummary,
+    ),
+    (ReasoningExposure::Declared, ReasoningProvenance::Declared),
+  ] {
+    let server = FakeServer::answer(complete_sse(thinking));
+    let adapter = adapter_declaring(&server.base_url(), None, exposure);
+    let (result, collector) = stream(&adapter, &request("why"));
+    result.expect("completion");
+    let events = collector.events();
+    assert!(
+      matches!(
+        &events[0],
+        ProviderEvent::ReasoningDelta { text, provenance }
+          if text == "in short" && *provenance == expected
+      ),
+      "{exposure:?} => {events:?}"
+    );
+  }
 }
 
 #[test]

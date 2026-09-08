@@ -11,7 +11,7 @@ use std::io;
 
 use pi_rs_core::{
   CancelToken, CompletionCertainty, FailurePhase, ProviderEvent, ProviderEventSink,
-  ReasoningProvenance, ToolCallBlock, ToolCallId, provider::CompletionUsage,
+  ReasoningExposure, ReasoningProvenance, ToolCallBlock, ToolCallId, provider::CompletionUsage,
 };
 use serde_json::Value;
 
@@ -30,8 +30,10 @@ pub enum StreamEnd {
 }
 
 /// Accumulates chunks and preserves the ordering the harness contract requires.
-#[derive(Default)]
 pub struct Decoder {
+  /// What the endpoint declared about its reasoning output, which is what decides
+  /// the provenance claim of any thinking text decoded from it.
+  exposure: ReasoningExposure,
   tools: std::collections::BTreeMap<u64, ToolBuilder>,
   finish_reason: Option<String>,
   input_tokens: Option<u64>,
@@ -48,6 +50,38 @@ struct ToolBuilder {
 }
 
 impl Decoder {
+  /// A decoder for one endpoint.
+  ///
+  /// The declared exposure is required rather than defaulted: reasoning text
+  /// without a claim about where it came from is the one thing this project may
+  /// not record, and a default would silently supply `Native`.
+  pub fn new(exposure: ReasoningExposure) -> Self {
+    Self {
+      exposure,
+      tools: std::collections::BTreeMap::new(),
+      finish_reason: None,
+      input_tokens: None,
+      output_tokens: None,
+      emitted_output: false,
+    }
+  }
+
+  /// Provenance for thinking text arriving now.
+  ///
+  /// The claim comes from what the endpoint *declared*, not from the field the
+  /// text arrived in. `reasoning_content` holds the model's own thinking on a
+  /// llama.cpp or vLLM server and a provider-written summary of hidden reasoning
+  /// on a hosted one; deciding by field name alone would record hidden chain of
+  /// thought as if it had been exposed. An endpoint that declares nothing leaves
+  /// the field name as the only evidence, and the fields read here are the
+  /// native-shaped ones.
+  fn reasoning_provenance(&self) -> ReasoningProvenance {
+    self
+      .exposure
+      .implied_provenance()
+      .unwrap_or(ReasoningProvenance::Native)
+  }
+
   /// Whether visible output has already reached the sink.
   pub fn emitted_output(&self) -> bool {
     self.emitted_output
@@ -94,10 +128,11 @@ impl Decoder {
       }
       if let Some(reasoning) = reasoning_text(&delta) {
         if !reasoning.is_empty() {
-          // Server-generated thinking, so the claim is Native and nothing else.
+          // Server-generated thinking: the endpoint's declaration decides
+          // whether that is the model's own reasoning or a summary of it.
           sink.emit(&ProviderEvent::ReasoningDelta {
             text: reasoning.to_string(),
-            provenance: ReasoningProvenance::Native,
+            provenance: self.reasoning_provenance(),
           });
           self.emitted_output = true;
         }
@@ -405,7 +440,7 @@ fn truncate(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-  use pi_rs_core::{Collector, ModelFailureKind};
+  use pi_rs_core::{Collector, ModelFailureKind, ReasoningExposure};
 
   use super::*;
 
@@ -416,8 +451,15 @@ mod tests {
   use serde_json::json;
 
   fn decode(chunks: &[Value]) -> (Collector, CompletionUsage) {
+    decode_as(ReasoningExposure::Native, chunks)
+  }
+
+  /// Decode under a specific declaration. The declaration, not the field name,
+  /// is what decides the provenance claim, so tests say which endpoint they are
+  /// pretending to talk to.
+  fn decode_as(exposure: ReasoningExposure, chunks: &[Value]) -> (Collector, CompletionUsage) {
     let mut collector = Collector::default();
-    let mut decoder = Decoder::default();
+    let mut decoder = Decoder::new(exposure);
     for chunk in chunks {
       decoder.chunk(chunk, &mut collector).unwrap();
     }
@@ -456,6 +498,59 @@ mod tests {
     }
   }
 
+  /// The provenance of thinking text follows the endpoint's declaration.
+  ///
+  /// A hosted endpoint that exposes only a summary of hidden reasoning sends it in
+  /// the same `reasoning_*` fields a local server uses for the model's own
+  /// thinking. Labelling that text `Native` would claim that hidden chain of
+  /// thought had been recovered, and no later layer could undo the claim.
+  #[test]
+  fn a_declared_summary_is_not_recorded_as_native_thinking() {
+    for exposure in [
+      ReasoningExposure::ProviderSummary,
+      ReasoningExposure::Declared,
+    ] {
+      let (collector, _) = decode_as(exposure, &[chunk(json!({"reasoning_content": "because"}))]);
+      let ProviderEvent::ReasoningDelta { text, provenance } = &collector.events()[0] else {
+        panic!(
+          "thinking text must still arrive as reasoning: {:?}",
+          collector.events()
+        );
+      };
+      assert_eq!(text, "because");
+      assert_eq!(
+        *provenance,
+        exposure
+          .implied_provenance()
+          .expect("a declared exposure implies a provenance"),
+        "{exposure:?}"
+      );
+    }
+  }
+
+  /// The other direction is equally a claim: an endpoint that declares native
+  /// reasoning gets `Native`, and one that declares nothing keeps the field name
+  /// as the only evidence available. Local servers -- the common case here --
+  /// send real thinking in these fields without ever declaring it.
+  #[test]
+  fn undeclared_exposure_leaves_the_field_name_as_the_evidence() {
+    let (collector, _) = decode_as(
+      ReasoningExposure::None,
+      &[chunk(json!({"reasoning": "think"}))],
+    );
+    assert!(
+      matches!(
+        &collector.events()[0],
+        ProviderEvent::ReasoningDelta {
+          provenance: ReasoningProvenance::Native,
+          ..
+        }
+      ),
+      "{:?}",
+      collector.events()
+    );
+  }
+
   #[test]
   fn content_parts_are_joined() {
     let (collector, _) = decode(&[chunk(json!({
@@ -467,7 +562,7 @@ mod tests {
   #[test]
   fn tool_call_fragments_become_one_decoded_call_after_the_stream_ends() {
     let mut collector = Collector::default();
-    let mut decoder = Decoder::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
     for fragment in [
       chunk(json!({
         "tool_calls": [{"index": 0, "id": "call_7", "function": {"name": "read", "arguments": "{\"pa"}}]
@@ -528,7 +623,7 @@ mod tests {
   #[test]
   fn malformed_tool_arguments_are_a_protocol_failure_not_a_tool_call() {
     let mut collector = Collector::default();
-    let mut decoder = Decoder::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
     decoder
       .chunk(
         &chunk(json!({"tool_calls": [{"index": 0, "id": "a", "function": {"name": "read", "arguments": "{\"path\": "}}]})),
@@ -553,7 +648,7 @@ mod tests {
   #[test]
   fn a_tool_call_fragment_without_id_is_refused() {
     let mut collector = Collector::default();
-    let mut decoder = Decoder::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
     decoder
       .chunk(
         &chunk(
@@ -575,7 +670,7 @@ mod tests {
   #[test]
   fn usage_and_finish_reason_survive() {
     let mut collector = Collector::default();
-    let mut decoder = Decoder::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
     decoder
       .chunk(
         &json!({"choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "tool_calls"}]}),
@@ -599,7 +694,7 @@ mod tests {
   #[test]
   fn emitted_output_is_reported_honestly() {
     let mut collector = Collector::default();
-    let mut decoder = Decoder::default();
+    let mut decoder = Decoder::new(ReasoningExposure::Native);
     assert!(!decoder.emitted_output());
     decoder
       .chunk(
@@ -616,7 +711,7 @@ mod tests {
   #[test]
   fn mid_stream_failure_marks_partial_output() {
     let mut collector = Collector::default();
-    let mut decoder = Decoder::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
     decoder
       .chunk(&chunk(json!({"content": "half"})), &mut collector)
       .unwrap();

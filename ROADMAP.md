@@ -180,14 +180,21 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 - [x] Render native reasoning distinctly.
 - [x] Render provider summaries distinctly.
-- [ ] Add declared-rationale representation.
+- [x] Add declared-rationale representation.
 - [ ] Add reconstructed-rationale representation.
 - [x] Prevent provenance loss during serialization.
 
-> `Declared` and `Reconstructed` already have distinct roles and labels in the
-> rendering layer, and a folded reasoning run never merges across a provenance
-> boundary. These two stay open until a runtime path actually produces them: a
-> representation with no producer is a guess about a format nobody has read yet.
+> Provenance is decided by the endpoint's declared `exposed_reasoning` rather than by
+> the response field it was decoded from, and `Declared` is therefore now produced:
+> an endpoint declaring `declared` exposure yields declared rationale end to end.
+> `crates/pi-rs-provider/tests/transport.rs` sends the same thinking field under three
+> declarations and reads back three different claims; `tests/run_cli.rs` checks the
+> claim through the journal and the rendered transcript line. A folded reasoning run
+> still never merges across a provenance boundary.
+>
+> `Reconstructed` keeps a distinct role and label in the rendering layer and no
+> producer: nothing in `pi-rs` infers reasoning after the fact, and it should not
+> acquire that ability casually.
 >
 > Serialization is pinned instead of trusted. `tests/provenance_roundtrip.rs` walks all
 > four claims through provider event, `trace.jsonl`, the session log, and the renderer,
@@ -207,8 +214,8 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 > Model attribution is now per event: the envelope names the model in charge when the
 > event was written, and a transition event keeps the epoch it *describes* separate from
 > the epoch that recorded it. `tests/failover_cli.rs` reads the journal back and checks
-> both. Provenance serialization is now pinned rather than assumed; the payload line
-> below waits for the trace-bounding work to land.
+> both. Provenance serialization is pinned rather than assumed, and the production
+> path decides a claim from the endpoint's declaration, not from the wire field.
 
 - [x] A completed session can answer which model produced each major event.
 - [x] Native reasoning remains distinguishable from all inferred/summarized forms.
@@ -223,13 +230,6 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
     long line would be an unreadable one.
   - Bounding runs after redaction, never before, so bytes that leave the line are
     already the sanitized ones.
-
-> The reasoning line is satisfied at the level the claim exists: the type has no
-> default, the writer states the claim on every line, a claimless line is refused instead
-> of being read as native, and each claim has its own label and style role. No provider
-> produces a non-native claim yet, so what is proven is that such a claim cannot be
-> flattened on the way to disk or on the way to the screen — not that one has been
-> observed end to end.
 
 ---
 
