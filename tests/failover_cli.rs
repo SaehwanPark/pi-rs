@@ -1,173 +1,23 @@
 //! Failover through the real binary: a primary that cannot serve, a backup that
 //! answers, and a durable record of which model produced what.
 //!
-//! The fake-provider harness is duplicated from `tests/run_cli.rs` rather than
-//! shared: integration tests are separate binaries, and pulling one green,
-//! CI-verified file into a shared module is a refactor this slice does not need.
+//! The fake provider lives in `tests/fake_provider`, shared with `tests/run_cli.rs`:
+//! the two copies that came before it had drifted into the same nondeterminism, so the
+//! harness is now one file with the rules written down where they can be argued about.
+
+mod fake_provider;
 
 use std::{
   fs,
-  io::{Read, Write},
-  net::{SocketAddr, TcpListener, TcpStream},
   path::{Path, PathBuf},
   process::{Command, Output},
-  thread,
-  time::{Duration, Instant},
 };
 
 use pi_rs_core::{ModelCapabilities, ModelEndpoint, ModelRef, ReasoningExposure, RuntimeConfig};
 use pi_rs_store::{StateLayout, TraceJournal};
 use tempfile::TempDir;
 
-/// One request the fake server saw. The body is the prompt the model actually
-/// received, which is how a test proves what crossed a failover boundary.
-#[derive(Clone)]
-struct Observed {
-  line: String,
-  body: String,
-}
-
-struct FakeServer {
-  addr: SocketAddr,
-  handle: thread::JoinHandle<Vec<Observed>>,
-}
-
-impl FakeServer {
-  /// Serves `responses`, one per request, and records the requests.
-  fn answer(responses: Vec<String>) -> Self {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider");
-    let addr = listener.local_addr().expect("fake provider address");
-    listener.set_nonblocking(true).unwrap();
-    let handle = thread::spawn(move || {
-      responses
-        .into_iter()
-        .map(|response| {
-          let deadline = Instant::now() + Duration::from_secs(5);
-          let mut socket = loop {
-            match listener.accept() {
-              Ok((socket, _)) => break socket,
-              Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                assert!(
-                  Instant::now() < deadline,
-                  "timed out waiting for provider request"
-                );
-                thread::sleep(Duration::from_millis(5));
-              }
-              Err(error) => panic!("accept provider request: {error}"),
-            }
-          };
-          let request = drain_request(&mut socket);
-          socket
-            .write_all(response.as_bytes())
-            .expect("write response");
-          socket.flush().expect("flush response");
-          request
-        })
-        .collect()
-    });
-    Self { addr, handle }
-  }
-
-  fn base_url(&self) -> String {
-    format!("http://{}/v1", self.addr)
-  }
-
-  fn requests(self) -> Vec<Observed> {
-    self.handle.join().expect("fake provider thread")
-  }
-}
-
-fn drain_request(socket: &mut TcpStream) -> Observed {
-  let mut bytes = Vec::new();
-  let mut buffer = [0u8; 1024];
-  let mut expected = None;
-  loop {
-    let read = socket.read(&mut buffer).unwrap_or(0);
-    if read == 0 {
-      break;
-    }
-    bytes.extend_from_slice(&buffer[..read]);
-    if expected.is_none()
-      && let Some(end) = find(&bytes, b"\r\n\r\n")
-    {
-      let body_start = end + 4;
-      let headers = String::from_utf8_lossy(&bytes[..body_start]).to_ascii_lowercase();
-      let content_length = headers
-        .split("\r\n")
-        .find_map(|line| line.strip_prefix("content-length:"))
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-      expected = Some(body_start + content_length);
-    }
-    if expected.is_some_and(|length| bytes.len() >= length) {
-      break;
-    }
-  }
-  let text = String::from_utf8_lossy(&bytes).into_owned();
-  let line = text.lines().next().unwrap_or("POST (unread)").to_string();
-  let body = match text.rfind("\r\n\r\n") {
-    Some(end) => text[end + 4..].to_string(),
-    None => String::new(),
-  };
-  Observed { line, body }
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-  haystack
-    .windows(needle.len())
-    .position(|part| part == needle)
-}
-
-fn sse(events: &[serde_json::Value]) -> String {
-  let mut body = String::new();
-  for event in events {
-    body.push_str("data: ");
-    body.push_str(&event.to_string());
-    body.push_str("\n\n");
-  }
-  body.push_str("data: [DONE]\n\n");
-  format!(
-    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
-    body.len()
-  )
-}
-
-fn text_response(text: &str) -> String {
-  sse(&[
-    serde_json::json!({"choices": [{"delta": {"content": text}}]}),
-    serde_json::json!({
-      "choices": [{"delta": {}, "finish_reason": "stop"}],
-      "usage": {"prompt_tokens": 20, "completion_tokens": 3}
-    }),
-  ])
-}
-
-/// A response that asks for a tool, then ends the stream. The adapter turns the
-/// fragments into one call when the stream ends.
-fn tool_call(id: &str, name: &str, arguments: &str) -> String {
-  sse(&[serde_json::json!({
-    "choices": [{
-      "delta": {"tool_calls": [{
-        "id": id,
-        "type": "function",
-        "function": {"name": name, "arguments": arguments}
-      }]},
-      "finish_reason": "tool_calls"
-    }],
-    "usage": {"prompt_tokens": 20, "completion_tokens": 4}
-  })])
-}
-
-fn unavailable() -> String {
-  status_response(503, "Service Unavailable", r#"{"error":"down"}"#)
-}
-
-fn status_response(code: u16, reason: &str, body: &str) -> String {
-  format!(
-    "HTTP/1.1 {code} {reason}\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
-    body.len()
-  )
-}
+use fake_provider::{FakeServer, read_written, text_response, tool_call, unavailable};
 
 /// Primary `fake/agent`, backup `fake/standby` (or a backup that cannot be built).
 fn write_config(root: &Path, primary_url: &str, backup: Backup) -> PathBuf {
@@ -245,6 +95,7 @@ fn run(config: &Path, cwd: &Path, prompt: &str) -> Output {
 /// They differ for a transition event, which the leaving epoch records.
 struct Recorded {
   kind: String,
+  call_id: Option<String>,
   epoch: Option<u32>,
   model: Option<String>,
   about_epoch: Option<u64>,
@@ -270,6 +121,10 @@ fn trace(state: &Path) -> Vec<Recorded> {
           .and_then(|value| value.as_str())
           .unwrap_or("?")
           .to_string(),
+        call_id: payload
+          .get("call_id")
+          .and_then(|value| value.as_str())
+          .map(str::to_string),
         epoch: entry.envelope.meta.model_epoch,
         model: entry.envelope.meta.model.as_ref().map(ModelRef::as_key),
         about_epoch: payload.get("epoch").and_then(|value| value.as_u64()),
@@ -494,12 +349,17 @@ fn a_committed_tool_result_crosses_the_failover_boundary() {
   //
   // The operator, not the model, grants mutation. Without this the registry refuses
   // the write, which is the correct answer to a different question.
+  // The call is served, then the primary is unavailable for the attempt that carried the
+  // result *and* for its retry: three answers for three requests, which is the runtime's
+  // attempt budget written down. The earlier fixture scripted two and got a third
+  // connection refused, which is why the count looked like two.
   let primary = FakeServer::answer(vec![
     tool_call(
       "call_write",
       "write",
       r#"{"path":"note.txt","contents":"from the primary"}"#,
     ),
+    unavailable(),
     unavailable(),
   ]);
   let standby = FakeServer::answer(vec![text_response("the note is saved")]);
@@ -518,19 +378,47 @@ fn a_committed_tool_result_crosses_the_failover_boundary() {
   assert!(output.status.success(), "{stderr}");
   assert_eq!(stdout, "the note is saved\n");
 
-  // The write happened, once.
+  // What each endpoint was asked, taken before the filesystem is consulted: a missing
+  // side effect here is almost always a shifted script, and the request bodies are what
+  // tell the two apart.
+  let primary_asks = primary.requests();
+  let standby_asks = standby.requests();
+
+  // The write happened.
   assert_eq!(
-    fs::read(workspace.join("note.txt")).expect("the written file"),
+    read_written(&workspace.join("note.txt"), &primary_asks),
     b"from the primary"
   );
+
+  // Two requests reached the primary after the tool committed: an attempt and a retry.
+  // A deterministic listener shows both, where the earlier fixture showed one: its
+  // listener was gone by the time the retry was made, so the retry was refused and never
+  // recorded. "Two requests" had been measuring a closed port, not two attempts.
   assert_eq!(
-    primary.requests().len(),
-    2,
-    "the tool call was issued once and never re-issued to the primary"
+    primary_asks.len(),
+    3,
+    "the tool-call turn, then an attempt and a retry"
   );
+  // And neither of them re-issued the call: every request after the commit carries the
+  // committed result, so a primary that came back would have continued from the write.
+  assert!(
+    !primary_asks[0].body.contains(r#""role":"tool""#),
+    "the first request had no result to carry: {}",
+    primary_asks[0].body
+  );
+  for ask in &primary_asks[1..] {
+    assert!(
+      ask.body.contains(r#""role":"tool""#),
+      "a request after the commit must carry the committed result: {}",
+      ask.body
+    );
+  }
 
   // The backup continued from the committed result rather than from a re-ask.
-  let asked = standby.requests().pop().expect("the backup was asked");
+  let asked = standby_asks
+    .into_iter()
+    .next()
+    .expect("the backup was asked");
   assert!(
     asked.line.contains("POST /v1/chat/completions"),
     "the backup is addressed through its endpoint's own path: {}",
@@ -548,6 +436,18 @@ fn a_committed_tool_result_crosses_the_failover_boundary() {
 
   // And each major event keeps the model that produced it.
   let events = trace(&root.join("state"));
+  let issued: Vec<&Recorded> = events
+    .iter()
+    .filter(|event| {
+      event.kind == "tool_requested" && event.call_id.as_deref() == Some("call_write")
+    })
+    .collect();
+  assert_eq!(
+    issued.len(),
+    1,
+    "the model issued this call once, and a replayed write of the same bytes would not \
+      have shown up anywhere else"
+  );
   let completions: Vec<&Recorded> = events
     .iter()
     .filter(|event| event.kind == "tool_completed")
