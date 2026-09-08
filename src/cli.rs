@@ -5,7 +5,10 @@ use std::{
 
 use pi_rs_tui::{ColorChoice, DiagnosticFilter, TraceSelection};
 
-pub const TOP_HELP: &str = "Usage: pi-rs run --config <file> --cwd <workspace> --prompt <text>\n";
+pub const TOP_HELP: &str = concat!(
+  "Usage: pi-rs run --config <file> --cwd <workspace> --prompt <text>\n",
+  "       pi-rs interactive --config <file> --cwd <workspace>\n",
+);
 pub const RUN_HELP: &str = concat!(
   "Usage: pi-rs run --config <file> --cwd <workspace> --prompt <text> [surface flags]\n",
   "\n",
@@ -41,6 +44,30 @@ pub const RUN_HELP: &str = concat!(
   "See also: pi-rs trace, which reads a session's transcript back out of the store.",
 );
 
+pub const INTERACTIVE_HELP: &str = concat!(
+  "Usage: pi-rs interactive --config <file> --cwd <workspace>\n",
+  "\n",
+  "Holds one durable session across many turns in this process. Type a prompt, press\n",
+  "enter, and one turn runs; what earlier turns established carries into it. The\n",
+  "answer is written to stdout and the transcript to stderr, as with `pi-rs run`.\n",
+  "\n",
+  "Keys:\n",
+  "  enter                    run one turn with what is typed\n",
+  "  esc                      discard the draft\n",
+  "  ctrl-c                   quit when nothing is typed; with something typed it\n",
+  "                           does nothing, so a draft is never discarded by a\n",
+  "                           keystroke\n",
+  "  readline motions         ctrl-a/e/b/f/h/k/u/w/d, alt-b/f, arrows, home/end,\n",
+  "                           arrows at an edge recall what was sent before\n",
+  "\n",
+  "Required:\n",
+  "  --config <file>          Provider configuration\n",
+  "  --cwd <workspace>        Workspace root\n",
+  "\n",
+  "A running turn runs to its end: interrupting a turn is not implemented yet, and\n",
+  "quitting is the only way out. For one turn from a script, use `pi-rs run`.",
+);
+
 pub const TRACE_HELP: &str = concat!(
   "Usage: pi-rs trace [session-id] [options]\n",
   "\n",
@@ -73,6 +100,7 @@ pub const TRACE_HELP: &str = concat!(
 pub enum Command {
   Help(&'static str),
   Run(RunArgs),
+  Interactive(InteractiveArgs),
   Trace(TraceArgs),
 }
 
@@ -82,6 +110,17 @@ pub struct RunArgs {
   pub cwd: PathBuf,
   pub prompt: String,
   pub surface: SurfaceArgs,
+}
+
+/// What `pi-rs interactive` needs to open a session.
+///
+/// Deliberately narrower than [`RunArgs`]: the transcript of an interactive session
+/// is drawn on the terminal it was opened from, so colour and width are what that
+/// terminal reports rather than something to argue with on the command line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractiveArgs {
+  pub config: PathBuf,
+  pub cwd: PathBuf,
 }
 
 /// How much transcript to print, and in what form.
@@ -152,11 +191,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
   if command == "run" {
     return parse_run(&remaining);
   }
+  if command == "interactive" {
+    return parse_interactive(&remaining);
+  }
   if command == "trace" {
     return parse_trace(&remaining);
   }
   // A bare argument is not a command. Guessing which command the user meant is worse
-  // than naming the two that exist.
+  // than naming the ones that exist.
   Err(format!(
     "unknown command '{}'\n{TOP_HELP}",
     command.to_string_lossy()
@@ -255,6 +297,49 @@ fn parse_run(remaining: &[OsString]) -> Result<Command, String> {
       reasoning,
       diagnostics: diagnostics.unwrap_or_else(|| SurfaceArgs::default().diagnostics),
     },
+  }))
+}
+
+/// `pi-rs interactive`: many turns, one session, one terminal.
+fn parse_interactive(remaining: &[OsString]) -> Result<Command, String> {
+  if remaining.iter().any(|arg| arg == "--help" || arg == "-h") {
+    return Ok(Command::Help(INTERACTIVE_HELP));
+  }
+  let mut config: Option<PathBuf> = None;
+  let mut cwd: Option<PathBuf> = None;
+  let remaining: &[OsString] = &expand_inline(remaining);
+  let mut index = 0;
+  while index < remaining.len() {
+    let flag = remaining[index]
+      .to_str()
+      .ok_or_else(|| format!("interactive argument name is not valid UTF-8\n{INTERACTIVE_HELP}"))?;
+    index += 1;
+    match flag {
+      "--config" | "--cwd" => {
+        let value = remaining
+          .get(index)
+          .ok_or_else(|| format!("{flag} requires a value\n{INTERACTIVE_HELP}"))?
+          .clone();
+        index += 1;
+        match flag {
+          "--config" => set_once(&mut config, PathBuf::from(value), flag)?,
+          "--cwd" => set_once(&mut cwd, PathBuf::from(value), flag)?,
+          _ => unreachable!("matched above"),
+        }
+      }
+      // A surface flag is not accepted here on purpose: an interactive session has a
+      // terminal to ask, and a flag that disagreed with it would be a second answer
+      // to the same question.
+      other => {
+        return Err(format!(
+          "unknown interactive argument '{other}'\n{INTERACTIVE_HELP}"
+        ));
+      }
+    }
+  }
+  Ok(Command::Interactive(InteractiveArgs {
+    config: config.ok_or_else(|| format!("--config is required\n{INTERACTIVE_HELP}"))?,
+    cwd: cwd.ok_or_else(|| format!("--cwd is required\n{INTERACTIVE_HELP}"))?,
   }))
 }
 
@@ -464,6 +549,81 @@ mod tests {
     assert_eq!(
       parse(strings(&["run", "--help", "--config"])).unwrap(),
       Command::Help(RUN_HELP)
+    );
+  }
+
+  fn interactive(values: &[&str]) -> InteractiveArgs {
+    let mut args = vec!["interactive"];
+    args.extend_from_slice(values);
+    match parse(strings(&args)).unwrap() {
+      Command::Interactive(args) => args,
+      other => panic!("expected interactive, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn interactive_takes_only_what_it_cannot_ask_the_terminal() {
+    let args = interactive(&["--config", "c", "--cwd", "w"]);
+    assert_eq!(args.config, PathBuf::from("c"));
+    assert_eq!(args.cwd, PathBuf::from("w"));
+    // The `--flag=value` shape a shell user reaches for first, for both flags.
+    let inline = interactive(&["--config=c", "--cwd=w"]);
+    assert_eq!(inline, args);
+  }
+
+  #[test]
+  fn interactive_help_needs_no_other_argument() {
+    assert_eq!(
+      parse(strings(&["interactive", "--help"])).unwrap(),
+      Command::Help(INTERACTIVE_HELP)
+    );
+    assert_eq!(
+      parse(strings(&["interactive", "-h", "--config"])).unwrap(),
+      Command::Help(INTERACTIVE_HELP)
+    );
+  }
+
+  #[test]
+  fn interactive_requires_both_paths() {
+    let no_config = parse(strings(&["interactive", "--cwd", "w"])).unwrap_err();
+    assert!(no_config.starts_with("--config is required"), "{no_config}");
+    let no_cwd = parse(strings(&["interactive", "--config", "c"])).unwrap_err();
+    assert!(no_cwd.starts_with("--cwd is required"), "{no_cwd}");
+    let no_value = parse(strings(&["interactive", "--config"])).unwrap_err();
+    assert!(no_value.contains("requires a value"), "{no_value}");
+    let twice = parse(strings(&["interactive", "--config", "c", "--config", "d"])).unwrap_err();
+    assert!(twice.contains("only once"), "{twice}");
+  }
+
+  #[test]
+  fn interactive_accepts_no_other_argument() {
+    // A surface flag is `pi-rs run`'s vocabulary, and accepting it here silently
+    // would be accepting a statement the terminal already answers.
+    let error = parse(strings(&[
+      "interactive",
+      "--config",
+      "c",
+      "--cwd",
+      "w",
+      "--no-color",
+    ]))
+    .unwrap_err();
+    assert!(
+      error.starts_with("unknown interactive argument '--no-color'"),
+      "{error}"
+    );
+    // A positional argument is not a workspace this command could guess at.
+    assert!(
+      parse(strings(&[
+        "interactive",
+        "--config",
+        "c",
+        "--cwd",
+        "w",
+        "extra"
+      ]))
+      .unwrap_err()
+      .starts_with("unknown interactive argument 'extra'")
     );
   }
 

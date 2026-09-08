@@ -158,3 +158,17 @@ model `qwen3.8-flash`, `reasoning_content` exposed):
 The runtime's tool loop is covered by scripted-provider unit tests and the one-shot
 command's fake OpenAI server integration test. It has not yet been exercised against a
 live model.
+
+## Interactive session
+
+`pi-rs interactive` holds one durable session in one process: raw mode, crossterm events
+mapped through `pi-rs-tui::keys::intent`, the `pi-rs-tui::editor` buffer drawn with one status
+line, and one turn per submit through `run::SessionHandle`, so the second turn carries the
+first. Ctrl-C is intercepted before the keymap (which maps it to `Intent::Noop` on purpose):
+an empty buffer quits, a non-empty buffer keeps its text.
+
+Covered by tests: the pure decision logic (`event -> LoopAction`), frame arithmetic, the CLI
+surface without a terminal. Not covered: real-terminal rendering by eye, live resize,
+multi-row wrap on a terminal, and a failover that happens mid-session. Turn interruption is a
+separate runtime slice; `Ctrl-C` while a turn runs is a plain SIGINT, which ends the process
+without the closing flush. Bracketed paste is not enabled, so a pasted newline can submit.

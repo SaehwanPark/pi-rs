@@ -77,9 +77,10 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 ### CLI and TUI
 
 - [x] Implement executable entry point (`pi-rs run` one-shot headless turn).
-- [ ] Implement minimal terminal editor (the buffer layer is complete in
-      `pi-rs-tui::editor`: caret, soft display rows, and recall of what was sent
-      before; what is missing is the terminal loop that feeds it key events).
+- [x] Implement minimal terminal editor, and the loop that feeds it (`pi-rs interactive`:
+      raw mode, key events mapped through `pi-rs-tui::keys`, `pi-rs-tui::editor` buffer,
+      one turn per submit on a single open session, so context carries across turns).
+      Turn interruption is still its own item below.
 - [x] Implement streamed assistant rendering for the one-shot command.
 - [ ] Implement cancel/interrupt.
 - [ ] Implement compact status line (the projection exists in `pi-rs-tui::statusline`:

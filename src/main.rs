@@ -1,4 +1,5 @@
 mod cli;
+mod interactive;
 mod run;
 mod trace;
 
@@ -14,6 +15,7 @@ fn main() {
   match command {
     cli::Command::Help(help) => print!("{help}"),
     cli::Command::Run(args) => report(run::execute(args)),
+    cli::Command::Interactive(args) => report(interactive::execute(args)),
     cli::Command::Trace(args) => report(trace::execute(args)),
   }
 }
