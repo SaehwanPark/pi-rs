@@ -473,3 +473,31 @@ in canonical history, and `summarized_messages` exists "for honest UI reporting"
 (`session_log.rs:277`). `Store::restore` reaches it through
 `session_log::restore(&self.layout.session_path(session))` (`store.rs:192`). Session state
 never depends on reading `*.trace.jsonl`.
+
+## 3. Provenance
+
+`ReasoningProvenance` — `crates/pi-rs-core/src/provenance.rs:25`, `#[serde(rename_all = "snake_case")]`
+at line 24, `Copy + Eq + Hash`, `Serialize + Deserialize`. `as_str()` (line 38) is the stable machine
+label used in trace, exports, and UI tags; `label()` (line 51) is the human label. The two are
+deliberately different words for the same variant, and `label()`'s doc comment says why: *"intentionally
+different from each other so that a reader cannot mistake inference for emitted reasoning."*
+
+| Variant | `as_str()` | `label()` | Producers |
+|---|---|---|---|
+| `Native` | `native` | `reasoning` | yes — `crates/pi-rs-provider/src/decode.rs:100`, on a decoded reasoning delta |
+| `ProviderSummary` | `provider_summary` | `provider summary` | **none found in production.** Constructed only in tests (`crates/pi-rs-core/src/message.rs:189`, `crates/pi-rs-tui/src/transcript.rs:846`) |
+| `Declared` | `declared` | `declared rationale` | **none found.** Consumed at `crates/pi-rs-tui/src/transcript.rs:177` → `Role::ReasoningDeclared` |
+| `Reconstructed` | `reconstructed` | `reconstructed rationale` | **none found.** `crates/pi-rs-tui/src/style.rs:87` names the style role; `crates/pi-rs-tui/src/transcript.rs:1162` builds one in a test |
+
+`is_inferred()` (line 64) separates the two variants the runtime produced itself from the two it received.
+
+**Why the `none found` rows stay.** The renderer, the style roles, and the stored field all handle all
+four variants, so nothing fails when three are never produced — the schema is ready and the emitters are
+not. That is the same shape as issue #38, which found three compaction events with zero producers, and it
+is why this section records producers per variant instead of describing the enum in the abstract. The fix
+is a separate decision (emit them, or stop advertising them); this document does not make it.
+
+The rule this table exists to enforce, quoted rather than paraphrased (`AGENTS.md:30`–`31`):
+
+> 4. Never conflate native reasoning, provider summaries, declared rationale, and reconstructed rationale.
+> 5. Never claim hidden chain-of-thought was recovered unless it was actually exposed.
