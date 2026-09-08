@@ -14,11 +14,11 @@ use std::{
 };
 
 use pi_rs_core::{
-  AgentEvent, AssistantDelta, Diagnostic, DiagnosticLevel, EpochReason, EventEnvelope, EventMeta,
-  ModelCapabilities, ModelEndpoint, ModelRef, ReasoningExposure, ReasoningProvenance,
-  RuntimeConfig, SessionEndReason, SessionEnded, SessionId, SessionStarted, ToolCallId,
-  ToolCompleted, ToolExecutionState, ToolFailed, ToolRequested, ToolStarted, TraceEntry,
-  UserMessage,
+  AgentEvent, AssistantDelta, BlobRef, ContextCompactionEpoch, Diagnostic, DiagnosticLevel,
+  EpochReason, EventEnvelope, EventMeta, EventSeq, ModelCapabilities, ModelEndpoint, ModelRef,
+  ReasoningExposure, ReasoningProvenance, RuntimeConfig, SessionEndReason, SessionEnded, SessionId,
+  SessionStarted, ToolCallId, ToolCompleted, ToolExecutionState, ToolFailed, ToolRequested,
+  ToolStarted, TraceEntry, UserMessage, next_context_epoch,
 };
 use pi_rs_store::StateLayout;
 use tempfile::TempDir;
@@ -359,6 +359,136 @@ fn sequence_numbers_address_the_line_a_reader_quotes() {
     .expect("answer line");
   // The run carries the sequence of its first chunk: that is where the run begins.
   assert!(answer.starts_with("[5] "), "{answer}");
+}
+
+/// A trace holding one compaction epoch record, where every record is its own
+/// rendered line: no folded fragment run, so "nothing was dropped" is countable.
+fn epoch_fixture(root: &Path, id: &str) -> (Vec<(u32, AgentEvent)>, Fixture, BlobRef) {
+  let summary = BlobRef::for_bytes(b"summary of the replaced range", Some("text/plain"));
+  let mut events = vec![
+    (
+      0,
+      AgentEvent::SessionStarted(SessionStarted {
+        working_dir: "/work".into(),
+        model: model("fake/agent"),
+        capabilities: caps(),
+        resumed: false,
+      }),
+    ),
+    (
+      0,
+      AgentEvent::UserMessage(UserMessage {
+        text: "measure the pump".into(),
+        attachments: 0,
+      }),
+    ),
+    (
+      0,
+      AgentEvent::ToolRequested(ToolRequested {
+        call_id: ToolCallId::from_string("call-read".to_string()),
+        name: "read".into(),
+        arguments: serde_json::json!({ "path": "src/pump.rs" }),
+        read_only: true,
+      }),
+    ),
+    (
+      0,
+      AgentEvent::ToolCompleted(ToolCompleted {
+        call_id: ToolCallId::from_string("call-read".to_string()),
+        name: "read".into(),
+        state: ToolExecutionState::Succeeded,
+        duration_ms: 5,
+        status: None,
+        reduced: false,
+        blob: None,
+        visible_bytes: 64,
+      }),
+    ),
+    (
+      0,
+      AgentEvent::UserMessage(UserMessage {
+        text: "now the valve".into(),
+        attachments: 0,
+      }),
+    ),
+    (
+      0,
+      AgentEvent::SessionEnded(SessionEnded {
+        reason: SessionEndReason::UserExit,
+      }),
+    ),
+  ];
+  // The record is appended after the range it replaces, and its ordinal comes from
+  // the records already in the trace, not from a counter in the writer.
+  let replaced_from = 2;
+  let replaced_through = 4;
+  events.push((
+    0,
+    AgentEvent::ContextCompactionEpoch(ContextCompactionEpoch {
+      epoch: next_context_epoch(events.iter().map(|(_, event)| event)),
+      replaces_from: EventSeq(replaced_from),
+      replaces_through: EventSeq(replaced_through),
+      summary: summary.clone(),
+    }),
+  ));
+  let session = fixture(root, id, &events);
+  (events, session, summary)
+}
+
+#[test]
+fn a_compaction_epoch_record_drops_no_canonical_record() {
+  let temp = TempDir::new().expect("temp root");
+  let (events, _session, summary) = epoch_fixture(
+    &temp.path().join("state"),
+    "01940000-0000-7000-8000-0000000000e1",
+  );
+  let config = config(temp.path());
+  let out = trace(&config, &["--sequence"]);
+  assert!(out.status.success(), "{}", stderr(&out));
+  let text = unstyle(&stdout(&out));
+  let report = stderr(&out);
+  // Counts: every record written was read, and every record read was shown. A
+  // dropped range would show up here as fewer shown than read.
+  assert!(
+    report.contains(&format!(" · {} entries read", events.len())),
+    "{report}"
+  );
+  assert!(
+    report.contains(&format!(" · {} shown", events.len())),
+    "{report}"
+  );
+  // The epoch line names the range it replaced, points at the summary instead of
+  // containing it, and says out loud that canonical history survived.
+  let epoch_line = text
+    .lines()
+    .find(|line| line.contains("[compact] epoch 1 ·"))
+    .expect("compaction epoch line");
+  assert!(epoch_line.contains("replaced 2..4"), "{epoch_line}");
+  assert!(epoch_line.contains(&summary.recovery_ref()), "{epoch_line}");
+  assert!(
+    !epoch_line.contains("summary of the replaced range"),
+    "{epoch_line}"
+  );
+  assert!(
+    epoch_line.contains("canonical trace intact"),
+    "{epoch_line}"
+  );
+  // Ordering: the epoch record sorts after the whole range it replaces, because the
+  // log assigned it the sequence of the line it was appended to.
+  assert!(
+    epoch_line.starts_with(&format!("[{}] ", events.len())),
+    "{epoch_line}"
+  );
+  // The replaced range is still addressable and still readable.
+  for seq in 2..=4 {
+    let prefix = format!("[{seq}] ");
+    assert!(
+      text.lines().any(|line| line.starts_with(&prefix)),
+      "replaced record {seq} is missing from the trace:\n{text}"
+    );
+  }
+  assert!(text.contains("> measure the pump"), "{text}");
+  assert!(text.contains("[tool] read"), "{text}");
 }
 
 #[test]
