@@ -55,6 +55,7 @@
 //! turn has already ended.
 
 use std::io::{self, Write};
+use std::ops::Range;
 
 use crossterm::{
   cursor::{MoveToColumn, MoveToPreviousLine},
@@ -65,7 +66,10 @@ use crossterm::{
 
 use pi_rs_core::{CancelToken, TurnStatus};
 use pi_rs_runtime::{TurnError, TurnReport};
-use pi_rs_tui::{Editor, Intent, Outcome, display_width, keys::intent, statusline, term, truncate};
+use pi_rs_tui::{
+  ColorChoice, Editor, Intent, Outcome, Palette, RenderLine, display_width, highlight,
+  keys::intent, statusline, style::Role, term, truncate,
+};
 
 use crate::{
   cli::{InteractiveArgs, SurfaceArgs},
@@ -313,6 +317,13 @@ struct Loop {
   /// token is one-shot and nothing ever un-sets it: an interrupted token stays set,
   /// and a turn started with a spent token would be born cancelled.
   cancel: CancelToken,
+  /// Whether this frame is painted in colour, resolved once when the loop is built.
+  ///
+  /// Not asked per redraw: the answer cannot change while the session is open, and a
+  /// redraw happens on every keystroke. A declining answer hands the renderer
+  /// [`Palette::monochrome`], which emits exactly the bytes this loop wrote before
+  /// the classifier was wired in.
+  palette: Palette,
   /// How many lines the cursor sits below the row the current frame starts on.
   ///
   /// Not the frame's height: a frame ends with the cursor parked on the caret, and
@@ -333,6 +344,7 @@ impl Loop {
       columns: 1,
       cancel: CancelToken::new(),
       above: 0,
+      palette: palette(),
     };
     surface.set_columns(columns);
     surface
@@ -446,8 +458,12 @@ impl Loop {
     let mut out = io::stdout();
     self.erase(&mut out)?;
     let layout = self.editor.display(PROMPT_PREFIX);
-    for row in &layout.rows {
-      write_line(&mut out, row)?;
+    // The rows the editor would print stay the source of every byte drawn; the
+    // segmented copy only says which run of a row gets which role. See
+    // [`input_rows`].
+    let buffer = self.editor.text();
+    for line in input_rows(&layout.rows, PROMPT_PREFIX, &buffer) {
+      write_line(&mut out, &line.render(self.palette))?;
     }
     write_line(&mut out, &self.status())?;
     let up = caret_lines_up(layout.rows.len(), layout.cursor.line);
@@ -498,6 +514,134 @@ fn take_line() -> io::Result<()> {
   let mut out = io::stdout();
   out.write_all(b"\n")?;
   out.flush()
+}
+
+/// Whether the frame is painted in colour.
+///
+/// The frame goes to stdout, and [`execute`] has already refused to run without a
+/// terminal there, so this is normally the `NO_COLOR` / `TERM=dumb` half of
+/// [`ColorChoice::Auto`]. Those are the only ways colour is declined while the loop
+/// is up: `InteractiveArgs` carries no `--color`, so there is no second opinion to
+/// reconcile with, and asking the environment once per session rather than once per
+/// keystroke keeps a redraw as cheap as it was.
+fn palette() -> Palette {
+  if ColorChoice::Auto.resolve(term::Stream::Stdout.is_terminal()) {
+    Palette::colored()
+  } else {
+    Palette::monochrome()
+  }
+}
+
+/// One run of a buffer line, with the byte range it was cut from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Run {
+  start: usize,
+  end: usize,
+  role: Role,
+}
+
+/// [`highlight::tokens`] plus where each run it reported actually sits.
+///
+/// `tokens` returns runs and nothing about their positions, and it deliberately does
+/// not reproduce the separators between them, so a caller that paints the original
+/// line has to put the positions back. Putting them back is exact for one reason: a
+/// run begins on a non-whitespace byte, and the only bytes between the end of one run
+/// and the start of the next are whitespace, so the first occurrence of a run at or
+/// after the end of the previous run can only be that run.
+///
+/// If a run ever cannot be found at that offset, classification stops and the line is
+/// drawn with no colour. A row drawn without the classifier is the frame this loop
+/// wrote before it existed; a row drawn at a guessed offset is a wrong colour on
+/// somebody else's word.
+fn classify(line: &str) -> Vec<Run> {
+  let mut runs = Vec::new();
+  let mut cursor = 0usize;
+  for segment in highlight::tokens(line) {
+    let Some(offset) = line[cursor..].find(segment.text.as_str()) else {
+      return Vec::new();
+    };
+    let start = cursor + offset;
+    let end = start + segment.text.len();
+    runs.push(Run {
+      start,
+      end,
+      role: segment.role,
+    });
+    cursor = end;
+  }
+  runs
+}
+
+/// The buffer rows of the frame, segmented for painting.
+///
+/// `rows` is what [`Editor::display`] prints for this buffer, and it stays the source
+/// of every byte: each row is cut at the run boundaries the classifier reported for
+/// the buffer line that row came from, and the pieces are pushed in order, so their
+/// concatenation is the row — separators, indent, and all. Nothing here is rebuilt
+/// from the classifier's segment texts, which carry no whitespace at all.
+///
+/// Rows follow their buffer line in order and never overlap, which is what lets one
+/// cursor walk the buffer alongside them. A row the current line cannot account for
+/// begins the next buffer line; a row that neither matches is handed back whole in
+/// [`Role::UserText`], which is the uncoloured frame rather than a guess.
+fn input_rows(rows: &[String], prefix: &str, buffer: &str) -> Vec<RenderLine> {
+  let pad = " ".repeat(display_width(prefix));
+  let mut lines = buffer.split('\n');
+  let mut line = lines.next().unwrap_or("");
+  let mut runs = classify(line);
+  let mut taken = 0usize;
+  let mut out = Vec::with_capacity(rows.len());
+  for (index, row) in rows.iter().enumerate() {
+    // The first row carries the prompt, the rest carry the indent that stands under
+    // it. Neither is buffer text, so neither is classified.
+    let decoration = if index == 0 { prefix } else { pad.as_str() };
+    let content = row.strip_prefix(decoration).unwrap_or(row);
+    if !line[taken..].starts_with(content) {
+      if let Some(next) = lines.next() {
+        line = next;
+        runs = classify(next);
+        taken = 0;
+      }
+    }
+    if line[taken..].starts_with(content) {
+      let range = taken..taken + content.len();
+      taken = range.end;
+      out.push(segment_row(decoration, line, range, &runs));
+    } else {
+      let mut whole = RenderLine::text(decoration, Role::Prompt);
+      whole.push(content, Role::UserText);
+      out.push(whole);
+    }
+  }
+  out
+}
+
+/// One row of the frame, cut at the run boundaries that fall inside it.
+///
+/// A run that a wrapped row only shows part of keeps that part's role, so an
+/// operation that wraps is still recognisably the operation on the row it lands on.
+/// The whitespace the classifier does not emit is pushed in [`Role::UserText`], which
+/// paints no background, so it is invisible either way and the coloured frame and the
+/// plain frame hold the same characters in the same columns.
+fn segment_row(decoration: &str, line: &str, row: Range<usize>, runs: &[Run]) -> RenderLine {
+  let mut out = RenderLine::text(decoration, Role::Prompt);
+  let mut cursor = row.start;
+  for run in runs {
+    let start = run.start.max(row.start);
+    let end = run.end.min(row.end);
+    if start >= end {
+      continue;
+    }
+    if cursor < start {
+      out.push(&line[cursor..start], Role::UserText);
+    }
+    out.push(&line[start..end], run.role);
+    cursor = end;
+  }
+  if cursor < row.end {
+    out.push(&line[cursor..row.end], Role::UserText);
+  }
+  out
 }
 
 /// `pi-rs interactive`: a session that holds many turns.
@@ -791,5 +935,233 @@ mod tests {
     let narrow = Loop::new("local/vulcan".to_string(), 1);
     assert_eq!(narrow.editor.width(), 1);
     assert_eq!(narrow.columns, 1);
+  }
+
+  /// The frame the loop would draw for `buffer` at `columns`: the rows `draw` writes
+  /// today, paired with the segmented rows the paint path produces for them.
+  ///
+  /// Built through `Loop` so the editor is laid out at the width the loop really
+  /// uses, prefix spent out of it.
+  fn painted(buffer: &str, columns: usize) -> Vec<(String, RenderLine)> {
+    let mut surface = Loop::new("local/vulcan".to_string(), columns);
+    surface.editor.apply(Intent::Paste(buffer.to_string()));
+    let layout = surface.editor.display(PROMPT_PREFIX);
+    let segmented = input_rows(&layout.rows, PROMPT_PREFIX, &surface.editor.text());
+    assert_eq!(
+      layout.rows.len(),
+      segmented.len(),
+      "{buffer:?} at {columns}"
+    );
+    layout.rows.into_iter().zip(segmented).collect()
+  }
+
+  /// The roles a row was painted with, decoration first.
+  fn roles(line: &RenderLine) -> Vec<Role> {
+    line.segments.iter().map(|segment| segment.role).collect()
+  }
+
+  /// What a terminal would show for a rendered row: the escape sequences removed, the
+  /// characters left behind.
+  ///
+  /// Only `\x1b[` … `m` is stripped, because that is all [`Palette`] emits, and a row
+  /// is one line of text: a colour left open across a row end would show up here as a
+  /// character that was never typed.
+  fn visible(rendered: &str) -> String {
+    let mut out = String::new();
+    let mut rest = rendered;
+    while let Some(start) = rest.find("\x1b[") {
+      out.push_str(&rest[..start]);
+      let Some(end) = rest[start..].find('m') else {
+        out.push_str(&rest[start..]);
+        return out;
+      };
+      rest = &rest[start + end + 1..];
+    }
+    out.push_str(rest);
+    out
+  }
+
+  /// Inputs the frame has to survive unchanged, and the terminal widths they are
+  /// drawn at: wide glyphs, an emoji, an unterminated quote, two buffer lines, and
+  /// widths narrow enough that every run wraps.
+  const FRAMES: [(&str, usize); 9] = [
+    ("", 80),
+    ("read", 80),
+    ("read crates/pi-rs-tui/src/lib.rs --offset=10", 80),
+    ("가나다 라마바", 80),
+    ("\u{1f41a} build --all", 80),
+    ("quote \"unterminated tail", 80),
+    ("read a\nsecond b", 80),
+    ("read crates/x/lib.rs --offset=10", 12),
+    ("가나다 \u{1f41a} next", 1),
+  ];
+
+  #[test]
+  fn painting_a_row_changes_neither_its_characters_nor_its_width() {
+    for (buffer, columns) in FRAMES {
+      for (row, line) in painted(buffer, columns) {
+        // Plain text is the reference rendering: the row the loop drew before the
+        // classifier was wired in is still exactly what the painted row says.
+        assert_eq!(line.plain(), row, "{buffer:?} at {columns}");
+        // Escape sequences carry no columns, so the row still costs what it cost.
+        assert_eq!(line.width(), display_width(&row), "{buffer:?} at {columns}");
+        // The strongest form of the same rule: strip the sequences from the coloured
+        // rendering and what a terminal shows is the row, character for character.
+        assert_eq!(
+          visible(&line.render(Palette::colored())),
+          row,
+          "{buffer:?} at {columns}"
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn a_declining_palette_writes_the_bytes_this_loop_wrote_before_segmentation() {
+    for (buffer, columns) in FRAMES {
+      for (row, line) in painted(buffer, columns) {
+        // Monochrome is not a degraded render, it is the reference one, and it is what
+        // `NO_COLOR` and `TERM=dumb` resolve to. It emits no escape at all.
+        assert_eq!(
+          line.render(Palette::monochrome()),
+          row,
+          "{buffer:?} at {columns}"
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn an_empty_buffer_paints_the_prompt_and_no_buffer_text() {
+    let (row, line) = &painted("", 80)[0];
+    assert_eq!(row, PROMPT_PREFIX);
+    assert_eq!(roles(line), [Role::Prompt]);
+  }
+
+  #[test]
+  fn the_first_run_of_a_line_is_painted_as_the_operation_and_the_rest_as_arguments() {
+    // The roles come from `highlight::tokens`, so the wiring has to reach the row with
+    // them in the order the classifier reported them: prompt, operation, separator,
+    // argument, separator, argument. `tokens` never claims a flag or a path, so this
+    // frame must not start claiming one either.
+    let (row, line) = &painted("read crates/x/lib.rs --offset=10", 80)[0];
+    assert_eq!(row, "> read crates/x/lib.rs --offset=10");
+    assert_eq!(
+      roles(line),
+      [
+        Role::Prompt,
+        Role::Operation,
+        Role::UserText,
+        Role::Argument,
+        Role::UserText,
+        Role::Argument,
+      ]
+    );
+  }
+
+  #[test]
+  fn an_unterminated_quote_is_one_argument_to_the_end_of_the_row() {
+    let (row, line) = &painted("quote \"unterminated tail", 80)[0];
+    assert_eq!(row, "> quote \"unterminated tail");
+    assert_eq!(
+      roles(line),
+      [
+        Role::Prompt,
+        Role::Operation,
+        Role::UserText,
+        Role::Argument
+      ]
+    );
+  }
+
+  /// Inputs the paint path has to hand back unchanged: a bare operation, an
+  /// operation and a flag, a double-quoted argument carrying a space, an
+  /// unterminated quote, a CJK argument, an emoji argument, and leading whitespace
+  /// the classifier never emits a run for.
+  const PAINT_LINES: [&str; 7] = [
+    "status",
+    "status --all",
+    "commit -m \"fix the wiring\"",
+    "\"unterminated",
+    "read 가나다.txt",
+    "build \u{1f41a}",
+    "   status --all",
+  ];
+
+  /// A whole line painted at once, as the row of a buffer that fits its width.
+  fn paint(line: &str) -> RenderLine {
+    segment_row("", line, 0..line.len(), &classify(line))
+  }
+
+  #[test]
+  fn a_painted_line_holds_the_characters_it_was_given_and_costs_their_width() {
+    for line in PAINT_LINES {
+      let styled = paint(line);
+      // The characters are the input, byte for byte. `tokens` reports runs and no
+      // separators, so a wiring that rebuilds the line from run texts drops the
+      // spaces, the indent, and the closing quote.
+      assert_eq!(styled.plain(), line, "{line:?}");
+      // Colour costs no columns: the row is still what the editor measured.
+      assert_eq!(styled.width(), display_width(line), "{line:?}");
+      // The strongest form of both: strip the escapes from the coloured render and a
+      // terminal still shows exactly the input.
+      let coloured = styled.render(Palette::colored());
+      assert_eq!(visible(&coloured), line, "{line:?}");
+    }
+  }
+
+  #[test]
+  fn the_no_colour_path_yields_the_same_characters_as_the_plain_path() {
+    for line in PAINT_LINES {
+      let styled = paint(line);
+      // Monochrome is what `NO_COLOR` and `TERM=dumb` resolve to. It is not a
+      // degraded render of something else: it writes the plain path's characters and
+      // no escape at all.
+      let rendered = styled.render(Palette::monochrome());
+      assert_eq!(rendered, styled.plain(), "{line:?}");
+      assert!(!rendered.contains('\x1b'), "{line:?}");
+      assert_eq!(visible(&rendered), line, "{line:?}");
+    }
+  }
+
+  #[test]
+  fn a_run_that_wraps_keeps_its_role_on_the_row_it_continues_on() {
+    // Six columns of buffer: the operation is split across the first two rows, and the
+    // continuation row is the tail of the operation, not a new operation of its own.
+    let rows = painted("readmethis next", 8);
+    let plain: Vec<&str> = rows.iter().map(|(row, _)| row.as_str()).collect();
+    assert_eq!(plain, ["> readme", "  this n", "  ext"]);
+    assert_eq!(roles(&rows[0].1), [Role::Prompt, Role::Operation]);
+    assert_eq!(
+      roles(&rows[1].1),
+      [
+        Role::Prompt,
+        Role::Operation,
+        Role::UserText,
+        Role::Argument
+      ]
+    );
+    assert_eq!(roles(&rows[2].1), [Role::Prompt, Role::Argument]);
+  }
+
+  #[test]
+  fn painting_a_frame_loses_no_character_of_the_buffer() {
+    for (buffer, columns) in FRAMES {
+      let recovered: String = painted(buffer, columns)
+        .iter()
+        // Segment zero is the row's decoration, which is not buffer text.
+        .map(|(_, line)| {
+          line.segments[1..]
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>()
+        })
+        .collect();
+      assert_eq!(
+        recovered,
+        buffer.replace('\n', ""),
+        "{buffer:?} at {columns}"
+      );
+    }
   }
 }
