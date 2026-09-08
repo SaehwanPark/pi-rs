@@ -333,3 +333,44 @@ fn an_ambiguous_prefix_is_refused_and_names_the_sessions_that_matched() {
   assert!(unique.status.success(), "{}", stderr(&unique));
   assert_eq!(turns(&stdout(&unique)), expected_turns());
 }
+
+#[test]
+fn a_leading_dash_id_is_rejected_before_the_store_is_opened() {
+  let dir = TempDir::new().expect("temp dir");
+  // A config that cannot load: if the id were handled after it, the error would say so.
+  let unreadable = dir.path().join("never-opened.json");
+  fs::write(&unreadable, "[]").expect("write a config that will not load");
+  let out = export(&unreadable, &["--not-an-id"]);
+  assert!(!out.status.success(), "a leading dash is not a session id");
+  let report = stderr(&out);
+  assert!(
+    report.contains("--not-an-id"),
+    "the refusal must name the value it rejected: {report}"
+  );
+  assert!(
+    !report.contains("never-opened.json"),
+    "the id must be rejected before the config, and so before the store, is opened: {report}"
+  );
+
+  // With a real session present, the same refusal still writes nothing.
+  let config = seeded_store(
+    dir.path(),
+    "state-dash",
+    &pi_session("a1b2c3d4-0000-7000-8000-000000000001", ""),
+    SESSION_ID,
+  );
+  let out_path = dir.path().join("refused-by-a-dash.jsonl");
+  let refused = export(
+    &config,
+    &["--not-an-id", "--out", out_path.to_str().unwrap()],
+  );
+  assert!(
+    !refused.status.success(),
+    "a leading dash is not a session id"
+  );
+  assert!(
+    !out_path.exists(),
+    "a refused export writes nothing: {}",
+    out_path.display()
+  );
+}
