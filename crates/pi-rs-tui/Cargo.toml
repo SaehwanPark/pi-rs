@@ -17,3 +17,7 @@ crossterm.workspace = true
 [[bench]]
 name = "render"
 harness = false
+
+[[bench]]
+name = "keystroke"
+harness = false

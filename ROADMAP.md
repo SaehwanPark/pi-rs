@@ -94,7 +94,10 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [ ] Implement syntax highlighting for operation vs arguments.
 - [x] Implement path-aware rendering (`pi-rs-tui::command` path shapes, `Role::Path`).
 - [x] Ensure narrow-terminal fallback (`MIN_COLUMN` drops decoration, keeps word alignment).
-- [ ] Measure keystroke/render latency.
+- [ ] Measure keystroke/render latency. Keystroke latency is measured and budgeted here
+      (`bench/keystroke.sh`, `crates/pi-rs-tui/benches/keystroke.rs`: eleven cases, budgets that
+      fail the run when exceeded); the render and command-parse half of the item is on
+      `bench/tui-render-budgets` (PR #15), so this stays open until that lands.
 
 ### Providers
 
