@@ -128,7 +128,9 @@ beside them.
 ## Not done yet
 
 1. `pi-rs-tui` — ratatui transcript rendering.
-2. Interactive binary composition root/TUI (the headless one-shot path is complete).
+2. Interactive binary composition root/TUI (the headless one-shot path is
+    complete; `pi-rs-tui::editor` holds the buffer, its rows, and its recall, but
+    nothing yet feeds it terminal events).
 3. End-to-end agent loop against the real local endpoint (the one-shot tool loop is
    covered against a fake OpenAI server; single completions are verified live;
    tool round-trips through the real provider are not).
