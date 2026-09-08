@@ -28,14 +28,16 @@ use std::path::PathBuf;
 
 use pi_rs_core::{
   capability::{CapabilityGap, EpochReason, ModelCapabilities, ModelRef, ReasoningExposure},
+  context::{ContextLevel, ReductionReason},
   event::{
-    AgentEvent, AssistantDelta, EventEnvelope, EventMeta, ExternalContextRetrieved,
+    AgentEvent, AssistantDelta, CheckpointCreated, ContextCompactionCompleted,
+    ContextCompactionStarted, ContextReduced, EventEnvelope, EventMeta, ExternalContextRetrieved,
     ModelEpochStarted, ModelFailover, ModelRequestCompleted, ModelRequestStarted, ModelRetry,
     ReasoningDelta, SessionStarted, ToolCompleted, ToolFailed, ToolRequested, ToolStarted,
-    ToolUnknown, UserMessage,
+    ToolUnknown, TurnCompleted, TurnStatus, UserMessage,
   },
   failure::ModelFailureKind,
-  ids::{EventId, SessionId, ToolCallId, TraceId, TurnId},
+  ids::{CheckpointId, EventId, SessionId, ToolCallId, TraceId, TurnId},
   provenance::ReasoningProvenance,
   session::{SESSION_SCHEMA_VERSION, SessionHeader},
   tool::ToolExecutionState,
@@ -623,4 +625,126 @@ fn external_context_retrieved_round_trips() {
     !body.inline,
     "inline versus referenced changes what replay can recover"
   );
+}
+
+#[test]
+fn context_reduced_round_trips() {
+  let blob = BlobRef::for_bytes(b"the full tool output that did not fit".as_slice(), None);
+  let original = AgentEvent::ContextReduced(ContextReduced {
+    reason: ReductionReason::OversizedToolOutput { limit_bytes: 8_192 },
+    original_bytes: 40_960,
+    visible_bytes: 7_900,
+    blob: blob.clone(),
+    recovery_ref: "blobs/3f9a1c7e2b04".into(),
+    tool_call_id: Some(tool_call_id()),
+  });
+  let entry = round_trip(original.clone());
+  let restored = &entry.envelope.event;
+
+  assert_same_variant(restored, &original);
+  let AgentEvent::ContextReduced(body) = restored else {
+    unreachable!("assert_same_variant already proved the discriminant");
+  };
+  assert_eq!(
+    body.reason,
+    ReductionReason::OversizedToolOutput { limit_bytes: 8_192 },
+    "why a payload was reduced is what makes the reduction auditable"
+  );
+  assert_eq!(body.original_bytes, 40_960);
+  assert_eq!(body.visible_bytes, 7_900);
+  assert_eq!(body.blob, blob);
+  assert_eq!(
+    body.recovery_ref, "blobs/3f9a1c7e2b04",
+    "recovery must be possible from this string alone"
+  );
+  assert_eq!(body.tool_call_id, Some(tool_call_id()));
+}
+
+#[test]
+fn context_compaction_started_round_trips() {
+  let original = AgentEvent::ContextCompactionStarted(ContextCompactionStarted {
+    level: ContextLevel::L1Ordinary,
+    reason: "recent window exceeded its target".into(),
+  });
+  let entry = round_trip(original.clone());
+  let restored = &entry.envelope.event;
+
+  assert_same_variant(restored, &original);
+  let AgentEvent::ContextCompactionStarted(body) = restored else {
+    unreachable!("assert_same_variant already proved the discriminant");
+  };
+  assert_eq!(
+    body.level,
+    ContextLevel::L1Ordinary,
+    "the level decides whether a safe boundary was required, so it cannot blur"
+  );
+  assert_eq!(body.reason, "recent window exceeded its target");
+}
+
+#[test]
+fn context_compaction_completed_round_trips() {
+  let original = AgentEvent::ContextCompactionCompleted(ContextCompactionCompleted {
+    level: ContextLevel::L2Phase,
+    removed_messages: 12,
+    retained_messages: 30,
+    context_epoch: 4,
+  });
+  let entry = round_trip(original.clone());
+  let restored = &entry.envelope.event;
+
+  assert_same_variant(restored, &original);
+  let AgentEvent::ContextCompactionCompleted(body) = restored else {
+    unreachable!("assert_same_variant already proved the discriminant");
+  };
+  assert_eq!(body.level, ContextLevel::L2Phase);
+  assert_eq!(body.removed_messages, 12);
+  assert_eq!(body.retained_messages, 30);
+  assert_eq!(
+    body.context_epoch, 4,
+    "a compaction boundary the next request must be attributed to"
+  );
+}
+
+#[test]
+fn checkpoint_created_round_trips() {
+  let original = AgentEvent::CheckpointCreated(CheckpointCreated {
+    checkpoint_id: CheckpointId::from_string("66666666-6666-4666-8666-666666666666"),
+    capsule_version: 1,
+    summarized_events: 250,
+    path: "checkpoints/66666666-6666-4666-8666-666666666666.json".into(),
+  });
+  let entry = round_trip(original.clone());
+  let restored = &entry.envelope.event;
+
+  assert_same_variant(restored, &original);
+  let AgentEvent::CheckpointCreated(body) = restored else {
+    unreachable!("assert_same_variant already proved the discriminant");
+  };
+  assert_eq!(
+    body.checkpoint_id,
+    CheckpointId::from_string("66666666-6666-4666-8666-666666666666")
+  );
+  assert_eq!(body.capsule_version, 1);
+  assert_eq!(body.summarized_events, 250);
+  assert_eq!(
+    body.path, "checkpoints/66666666-6666-4666-8666-666666666666.json",
+    "the capsule path is how a reader finds what the barrier summarized"
+  );
+}
+
+#[test]
+fn turn_completed_round_trips() {
+  let original = AgentEvent::TurnCompleted(TurnCompleted {
+    status: TurnStatus::Completed,
+    duration_ms: 1_890,
+  });
+  let entry = round_trip(original.clone());
+  let restored = &entry.envelope.event;
+
+  assert_same_variant(restored, &original);
+  let AgentEvent::TurnCompleted(body) = restored else {
+    unreachable!("assert_same_variant already proved the discriminant");
+  };
+  assert_eq!(body.status, TurnStatus::Completed);
+  assert_eq!(body.duration_ms, 1_890);
 }
