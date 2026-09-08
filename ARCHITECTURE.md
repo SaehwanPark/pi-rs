@@ -251,6 +251,20 @@ Rules:
 
 Never serialize or render these as equivalent.
 
+That rule is pinned at every hop a claim crosses, in `tests/provenance_roundtrip.rs`:
+
+- the claim is a required field, on the provider event, on the trace line, and inside a
+  session message's reasoning chunk. There is no `Default` for `ReasoningProvenance`, so
+  a producer states one or does not compile;
+- a trace line that has lost its claim is a malformed line. The journal counts it as
+  damaged and refuses it; it is never read back as `Native`, which is the one weakening
+  that would turn someone else's summary into reported model thought;
+- each claim renders under its own label and its own style role, and a resumed session
+  reports the same claim the run recorded, including the optional source detail;
+- `Native` is the only claim that may be described as emitted reasoning, and only
+  `Reconstructed` is described as pi-rs inference. Those two predicates are what the
+  prose is generated from, so they are asserted directly.
+
 ## 9. Tool runtime
 
 All tool execution should have durable lifecycle state.
