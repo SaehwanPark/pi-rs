@@ -177,12 +177,16 @@ pub const PROMPT_HELP: &str = concat!(
 );
 
 pub const IMPORT_HELP: &str = concat!(
-  "Usage: pi-rs import-pi <pi-session.jsonl> [options]\n",
+  "Usage: pi-rs import-pi <pi-session.jsonl|session-dir> [options]\n",
   "\n",
-  "Reads one Pi session file and reports what a pi-rs session would hold. Nothing is\n",
-  "executed and nothing is written: the default is a dry run, and an entry pi-rs cannot\n",
-  "carry is named with the reason rather than mapped onto the nearest-looking event.\n",
-  "The report goes to stdout; where a session was written goes to stderr.\n",
+  "Reads one Pi session file — or every *.jsonl directly inside a directory, each as\n",
+  "its own session, in name order — and reports what a pi-rs session would hold.\n",
+  "Nothing is executed and nothing is written: the default is a dry run, and an entry\n",
+  "pi-rs cannot carry is named with the reason rather than mapped onto the\n",
+  "nearest-looking event. The report goes to stdout; where a session was written goes\n",
+  "to stderr. A directory imports files as separate sessions: lineage Pi records\n",
+  "across files is not reconstructed. One unreadable file fails the batch at the end\n",
+  "without cancelling the sessions beside it.\n",
   "\n",
   "Options:\n",
   "  --store <dir>            State root to write into (requires --write).\n",

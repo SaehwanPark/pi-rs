@@ -259,7 +259,7 @@ fn usage_errors_exit_two_and_help_exits_zero() {
 
   let help = import(&["--help"]);
   assert!(help.status.success(), "{}", text(&help.stderr));
-  assert!(text(&help.stdout).contains("pi-rs import-pi <pi-session.jsonl>"));
+  assert!(text(&help.stdout).contains("pi-rs import-pi <pi-session.jsonl|session-dir>"));
 }
 
 #[test]
@@ -281,4 +281,159 @@ fn an_unwritable_destination_fails_once_without_a_panic() {
   assert!(stderr.starts_with("error:"), "{stderr}");
   assert!(!stderr.contains("panicked"), "{stderr}");
   assert!(text(&output.stdout).contains("Pi session"));
+}
+
+/// The smallest file Pi would accept: a header line and one user entry. Directory tests
+/// need several distinct sessions, and the committed fixture is one deep tree.
+fn session_file(dir: &std::path::Path, name: &str, id: &str, text: &str) -> PathBuf {
+  let path = dir.join(name);
+  fs::write(
+    &path,
+    format!(
+      "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2026-07-20T09:00:00.000Z\",\"cwd\":\"/home/dev/app\"}}\n\
+       {{\"type\":\"message\",\"id\":\"e1\",\"parentId\":null,\"timestamp\":\"2026-07-20T09:00:01.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"{text}\"}}}}\n"
+    ),
+  )
+  .expect("write session file");
+  path
+}
+
+const FIRST_ID: &str = "pi-aaa01111-1111-7000-8000-00000000000a";
+const SECOND_ID: &str = "pi-bbb02222-2222-7000-8000-00000000000b";
+
+#[test]
+fn a_directory_imports_every_session_file_it_holds() {
+  let root = TempDir::new().expect("temp root");
+  let dir = root.path().join("sessions");
+  fs::create_dir(&dir).expect("sessions dir");
+  session_file(
+    &dir,
+    "a-first.jsonl",
+    FIRST_ID.strip_prefix("pi-").unwrap(),
+    "first session",
+  );
+  session_file(
+    &dir,
+    "b-second.jsonl",
+    SECOND_ID.strip_prefix("pi-").unwrap(),
+    "second session",
+  );
+  // Not *.jsonl, so the batch ignores it without complaining about it.
+  fs::write(dir.join("notes.txt"), b"not a session").expect("write decoy");
+
+  let state = root.path().join("state");
+  let dry = import(&[dir.to_str().unwrap(), "--store", state.to_str().unwrap()]);
+  assert!(dry.status.success(), "{}", text(&dry.stderr));
+  let stdout = text(&dry.stdout);
+  // Two full reports, each naming its own file and the session it would file.
+  assert_eq!(stdout.matches("Pi session").count(), 2, "{stdout}");
+  assert!(
+    stdout.contains(FIRST_ID) && stdout.contains(SECOND_ID),
+    "{stdout}"
+  );
+  assert!(
+    text(&dry.stderr).contains("2 session(s) reported, nothing written"),
+    "{}",
+    text(&dry.stderr)
+  );
+  assert!(!state.exists(), "a dry batch created its destination");
+
+  let written = import(&[
+    dir.to_str().unwrap(),
+    "--store",
+    state.to_str().unwrap(),
+    "--write",
+  ]);
+  assert!(written.status.success(), "{}", text(&written.stderr));
+  assert!(
+    text(&written.stderr).contains("2 of 2 session(s) written"),
+    "{}",
+    text(&written.stderr)
+  );
+  let layout = StateLayout::new(&state);
+  for id in [FIRST_ID, SECOND_ID] {
+    assert!(
+      layout
+        .session_path(&pi_rs_core::SessionId::from_string(id))
+        .exists(),
+      "{id} was not filed"
+    );
+  }
+}
+
+#[test]
+fn a_file_that_fails_in_a_batch_is_named_and_the_rest_still_lands() {
+  let root = TempDir::new().expect("temp root");
+  let dir = root.path().join("sessions");
+  fs::create_dir(&dir).expect("sessions dir");
+  session_file(
+    &dir,
+    "good.jsonl",
+    FIRST_ID.strip_prefix("pi-").unwrap(),
+    "fine",
+  );
+  let broken = dir.join("broken.jsonl");
+  // No header line: a file the importer refuses rather than half-reads.
+  fs::write(
+    &broken,
+    "{\"type\":\"message\",\"id\":\"e1\",\"parentId\":null,\"message\":{\"role\":\"user\",\"content\":\"orphan\"}}\n",
+  )
+  .expect("write broken file");
+
+  let state = root.path().join("state");
+  let output = import(&[
+    dir.to_str().unwrap(),
+    "--store",
+    state.to_str().unwrap(),
+    "--write",
+  ]);
+  // A partial batch is not a success a script would want to miss...
+  assert!(!output.status.success());
+  let stderr = text(&output.stderr);
+  // ...but the failure names the file, and the session beside it is still filed.
+  assert!(stderr.contains("broken.jsonl"), "{stderr}");
+  assert!(stderr.contains("1 of 2 session(s) written"), "{stderr}");
+  let layout = StateLayout::new(&state);
+  assert!(
+    layout
+      .session_path(&pi_rs_core::SessionId::from_string(FIRST_ID))
+      .exists(),
+    "the valid file next to the broken one must still land"
+  );
+  assert!(text(&output.stdout).contains(FIRST_ID));
+}
+
+#[test]
+fn a_batch_imports_each_time_the_same_session_twice_is_the_refusal() {
+  let root = TempDir::new().expect("temp root");
+  let dir = root.path().join("sessions");
+  fs::create_dir(&dir).expect("sessions dir");
+  session_file(
+    &dir,
+    "a-first.jsonl",
+    FIRST_ID.strip_prefix("pi-").unwrap(),
+    "first",
+  );
+  let state = root.path().join("state");
+  let first = import(&[
+    dir.to_str().unwrap(),
+    "--store",
+    state.to_str().unwrap(),
+    "--write",
+  ]);
+  assert!(first.status.success(), "{}", text(&first.stderr));
+  // Re-running the batch hits the same refusal a single re-import gives, per file.
+  let second = import(&[
+    dir.to_str().unwrap(),
+    "--store",
+    state.to_str().unwrap(),
+    "--write",
+  ]);
+  assert!(!second.status.success());
+  let stderr = text(&second.stderr);
+  assert!(
+    stderr.contains("already exists") || stderr.contains("exists"),
+    "{stderr}"
+  );
+  assert!(stderr.contains("0 of 1 session(s) written"), "{stderr}");
 }
