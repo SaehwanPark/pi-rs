@@ -89,6 +89,15 @@ pub(crate) fn open_session(
   let tools = ToolRegistry::new(workspace)
     .with_policy(&tool_policy)
     .with_builtins();
+  // Skills are offered the way Pi offers them: a control prompt in front of every
+  // request, naming what exists and telling the model to read the file. Only the
+  // global locations are read — a skill is instructions for the model, and this
+  // command has no trust decision to consult about the workspace, so the project's
+  // own skill files stay unread (and `pi-rs skills --project` stays how one is seen).
+  // The scan is two small directories, which is what lets it sit on the startup path.
+  let skills_prompt =
+    pi_rs_compat::skill::discover(&pi_rs_compat::scan::Discovery::new(canonical_cwd.clone()))
+      .control_prompt();
 
   let mut policy = pi_rs_core::ProfilePolicy::new(
     config.context_profile,
@@ -174,6 +183,11 @@ pub(crate) fn open_session(
   .with_messages(context)
   .with_working_dir(canonical_cwd)
   .with_thinking(config.thinking);
+  if !skills_prompt.is_empty() {
+    // The skill-control prompt is the whole system prompt pi-rs speaks today, and
+    // with_system stays unset when there is nothing to offer.
+    runtime = runtime.with_system(skills_prompt);
+  }
   if let Some(backup) = &backup {
     // Failover is off until a backup exists. Attaching one is the whole
     // configuration surface: the policy comes from the primary's own capabilities.

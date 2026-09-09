@@ -657,8 +657,11 @@ Do not begin until stable baselines exist.
 
 ### P1 — Follow-on
 
-- [ ] Load `SKILL.md` bodies and honour `disable-model-invocation`; present skills to
-      the model as a skill-control prompt (Phase 8 remainder; loader and listing done).
+- [x] Load `SKILL.md` bodies and honour `disable-model-invocation`; present skills to
+      the model as a skill-control prompt: `Skill::body()` reads one on demand, the block
+      Pi offers (`skill::control_prompt`) names only visible skills, and `run`/`interactive`
+      send it as the system message; `--show` is the explicit invocation, and
+      `--control-prompt` shows exactly what a session would send.
 - [x] Invoke a prompt template from inside a session (`/name`): `interactive` discovers
       the scan at open, Tab completes the names, and `prompt::parse_arguments` splits the
       typed string by Pi's editor rule — quotes stripped, empty quotes no argument,

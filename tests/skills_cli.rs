@@ -88,3 +88,45 @@ fn a_mistyped_flag_fails_loudly_rather_than_reading_more_than_asked() {
     "{stderr}"
   );
 }
+
+#[test]
+fn the_control_prompt_replaces_the_listing_when_asked_for() {
+  let home = fixture_home();
+  let temp = tempfile::TempDir::new().expect("temp project");
+  let (stdout, _stderr) = skills(&["skills", "--control-prompt"], &home, temp.path());
+  assert!(stdout.contains("<available_skills>"), "{stdout}");
+  assert!(stdout.contains("<name>pdf-tools</name>"), "{stdout}");
+  // The fixture's one disable-model-invocation skill: listed by `pi-rs skills`, never
+  // offered to a model.
+  assert!(
+    !stdout.contains("loose"),
+    "the control prompt must not name explicit-only skills:\n{stdout}"
+  );
+}
+
+#[test]
+fn show_prints_one_body_and_reaches_even_the_skill_the_model_may_not() {
+  let home = fixture_home();
+  let temp = tempfile::TempDir::new().expect("temp project");
+  let (stdout, _stderr) = skills(&["skills", "--show", "pdf-tools"], &home, temp.path());
+  assert!(
+    !stdout.contains("---"),
+    "frontmatter is not the body:\n{stdout}"
+  );
+  assert!(
+    stdout.contains("references/api.md"),
+    "the body, and nothing before it:\n{stdout}"
+  );
+
+  // `loose` is exactly the skill the model may not reach for; asking for it by name is
+  // the explicit invocation its flag reserves for the user, so it must not be refused.
+  let (_stdout, stderr) = skills(&["skills", "--show", "loose"], &home, temp.path());
+  assert!(
+    !stderr.contains("no skill named"),
+    "an explicit-only skill is showable on request:\n{stderr}"
+  );
+
+  let (stdout, stderr) = skills(&["skills", "--show", "no-such-skill"], &home, temp.path());
+  assert!(stdout.is_empty(), "{stdout}");
+  assert!(stderr.contains("no skill named"), "{stderr}");
+}
