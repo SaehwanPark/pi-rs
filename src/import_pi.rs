@@ -1,19 +1,27 @@
-//! `pi-rs import-pi`: bring one Pi session file into the pi-rs store.
+//! `pi-rs import-pi`: bring Pi session files into the pi-rs store.
 //!
 //! The default is a dry run, and the report *is* the answer to this command, so the report
 //! goes to stdout and only the destination line goes to stderr — the split `pi-rs trace`
 //! uses for the same reason. Nothing is executed: a tool call inside Pi's file records
 //! something that already happened in Pi, and this command never replays it.
 //!
+//! The path is one session file or a directory of them. A directory imports each `*.jsonl`
+//! it holds directly, in name order, each as its own session — which is also the honest
+//! statement of what a batch carries: Pi's cross-file lineage (forks and parents recorded
+//! as separate files) is not reconstructed, because nothing in the pi-rs session model has
+//! the shape that lineage would fold into.
+//!
 //! Writing refuses when the session id already exists. Re-importing the same file is usually
 //! a mistake, and the alternative — a second session with the same content under a different
-//! id, or an overwrite of the first — is worse than asking the reader to remove it.
+//! id, or an overwrite of the first — is worse than asking the reader to remove it. Inside a
+//! batch that refusal is one file's failure line, not the batch's: one unreadable or already
+//! filed session does not cancel the sessions next to it.
 
 use std::{
   collections::BTreeMap,
   fs,
   io::{self, Write},
-  path::PathBuf,
+  path::{Path, PathBuf},
 };
 
 use pi_rs_core::RuntimeConfig;
@@ -22,19 +30,47 @@ use pi_rs_store::{Store, WritePolicy, pi_import};
 use crate::cli::ImportArgs;
 
 pub fn execute(args: ImportArgs) -> Result<(), String> {
-  // Read, plan, and report before any destination is opened, so a file this version of
-  // the importer cannot understand never leaves a half-written session behind.
-  let source = pi_import::read(&args.path).map_err(|error| error.to_string())?;
+  if args.path.is_dir() {
+    return execute_batch(args);
+  }
+  execute_one(args)
+}
+
+/// Read and plan, the two steps that can fail before a word of report is printed.
+fn plan_file(path: &Path) -> Result<(pi_import::PiSession, pi_import::ImportPlan), String> {
+  let source = pi_import::read(path).map_err(|error| error.to_string())?;
   let plan = pi_import::plan(&source).map_err(|error| error.to_string())?;
+  Ok((source, plan))
+}
+
+/// The report, with the one error a report should swallow: a closed pipe is how
+/// `pi-rs import-pi f | head` ends, and it is not an import failure.
+fn report(source: &pi_import::PiSession, plan: &pi_import::ImportPlan) -> Result<(), String> {
   let mut out = io::stdout();
-  write_report(&mut out, &source, &plan).map_err(|error| {
-    // A closed pipe is how `pi-rs import-pi f | head` ends. It is not an import failure.
+  write_report(&mut out, source, plan).map_err(|error| {
     if error.kind() == io::ErrorKind::BrokenPipe {
       String::new()
     } else {
       format!("cannot write the report: {error}")
     }
-  })?;
+  })
+}
+
+/// One file of a batch, reported on stdout and — with a store in hand — filed.
+fn import_one(path: &Path, store: Option<&Store>) -> Result<(), String> {
+  let (source, plan) = plan_file(path)?;
+  report(&source, &plan)?;
+  if let Some(store) = store {
+    pi_import::write(store, &plan).map_err(|error| format!("cannot write the session: {error}"))?;
+  }
+  Ok(())
+}
+
+fn execute_one(args: ImportArgs) -> Result<(), String> {
+  // Read, plan, and report before any destination is opened, so a file this version of
+  // the importer cannot understand never leaves a half-written session behind.
+  let (source, plan) = plan_file(&args.path)?;
+  report(&source, &plan)?;
 
   let mut err = io::stderr();
   if !args.write {
@@ -56,6 +92,79 @@ pub fn execute(args: ImportArgs) -> Result<(), String> {
     root.display()
   );
   Ok(())
+}
+
+/// The files of a directory import: every `*.jsonl` directly inside it, in name order.
+/// Not recursive — Pi keeps one session per file in one directory, and a recursive walk
+/// would silently import whatever a project happened to leave in a nested folder.
+fn session_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
+  let mut files: Vec<PathBuf> = fs::read_dir(dir)
+    .map_err(|error| format!("cannot read {}: {error}", dir.display()))?
+    .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+    .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl") && path.is_file())
+    .collect();
+  files.sort();
+  if files.is_empty() {
+    return Err(format!("no *.jsonl session files under {}", dir.display()));
+  }
+  Ok(files)
+}
+
+fn execute_batch(args: ImportArgs) -> Result<(), String> {
+  let files = session_files(&args.path)?;
+  // One store for the batch: opening it is the destination's only setup cost, and a
+  // per-file failure must not reopen or roll it back.
+  let store = if args.write {
+    let (root, policy) = destination(&args)?;
+    Some((
+      Store::open(&root, policy).map_err(|error| format!("cannot open store: {error}"))?,
+      root,
+    ))
+  } else {
+    None
+  };
+  let mut err = io::stderr();
+  let mut imported = 0usize;
+  let mut failed: Vec<String> = Vec::new();
+  for file in &files {
+    match import_one(file, store.as_ref().map(|(store, _)| store)) {
+      Ok(_) => imported += 1,
+      // The empty message is a closed pipe: stop mid-batch, as a closed pipe stops a
+      // `sed`; whatever remains on stdout is no longer wanted.
+      Err(error) if error.is_empty() => return Err(error),
+      Err(error) => {
+        let _ = writeln!(err, "import: {}: {error}", file.display());
+        failed.push(file.display().to_string());
+      }
+    }
+  }
+  match &store {
+    None => {
+      let _ = writeln!(
+        err,
+        "import: {} session(s) reported, nothing written; pass --write to file them",
+        files.len() - failed.len()
+      );
+    }
+    Some((_, root)) => {
+      let _ = writeln!(
+        err,
+        "import: {} of {} session(s) written under {}",
+        imported,
+        files.len(),
+        root.display()
+      );
+    }
+  }
+  if failed.is_empty() {
+    return Ok(());
+  }
+  // A partial batch is not a success a script would want to miss.
+  Err(format!(
+    "{} of {} file(s) failed",
+    failed.len(),
+    files.len()
+  ))
 }
 
 /// Where to write, and under which policy.

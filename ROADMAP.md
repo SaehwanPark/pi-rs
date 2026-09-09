@@ -292,8 +292,9 @@ Open in this area, in order:
 
 - [x] Implement Pi session import prototype.
 - [x] Carry imported conversation messages into the session message log.
-- [ ] Import a whole Pi session directory, or name what a single-file import leaves out.
-- [ ] Implement Pi session export prototype.
+- [x] Import a whole Pi session directory: `import-pi <dir>` files every `*.jsonl` directly
+      inside it, each as its own session; cross-file lineage is named, not reconstructed.
+- [x] Implement Pi session export prototype.
 - [ ] Document non-round-trippable metadata.
 
 ### Stage gate
@@ -664,7 +665,9 @@ Do not begin until stable baselines exist.
       unclosed quote swallows the rest.
 - [ ] Checkpoint creation driven by the runtime under context pressure, not only the
       explicit path; document what a checkpoint does to compaction policy.
-- [ ] Import a whole Pi session directory, or name what a single-file import leaves out.
+- [x] Import a whole Pi session directory: `import-pi <dir>` files every `*.jsonl` it holds
+      directly, each as its own session, and names cross-file lineage as the thing it
+      deliberately does not reconstruct.
 
 ### P2 — Later / deliberately deferred
 

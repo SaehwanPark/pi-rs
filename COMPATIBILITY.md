@@ -210,6 +210,12 @@ Do not weaken the internal event model merely to force exact storage-format equi
 session. It is a reader and a writer, never an executor: a tool call in Pi's file records
 work Pi already did, and `pi-rs` will not do it again.
 
+The path may also be a directory: every `*.jsonl` directly inside it is imported, in name
+order, each as its own session. That is also the boundary of what a batch carries — lineage
+Pi records *across* files (a fork written as a second file pointing at the first) is not
+reconstructed, because no pi-rs session state has that shape. One file's failure is one
+report line; the sessions beside it still land, and the exit says the batch was partial.
+
 Mapped, at the fidelity the file supports:
 
 | Pi | `pi-rs` |
