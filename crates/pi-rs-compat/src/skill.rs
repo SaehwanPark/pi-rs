@@ -115,6 +115,45 @@ pub enum SkillWarning {
   TooDeep { path: PathBuf },
 }
 
+impl Skill {
+  /// The instructions themselves: the file with its frontmatter block removed.
+  ///
+  /// Read at call time, never during a scan. Pi works the same way — a scan carries
+  /// names and descriptions, and the body is read when a skill is actually used — and
+  /// it is also what the startup rules want: bodies are off the path where the user
+  /// can type. If the file changed after the scan, whatever it says now is what a
+  /// reader gets; `frontmatter::strip` returns the whole text when there is no block
+  /// to remove, which is the honest reading of a file that no longer has one.
+  pub fn body(&self) -> Result<String, SkillBodyError> {
+    let text = std::fs::read_to_string(&self.path).map_err(|error| SkillBodyError {
+      path: self.path.clone(),
+      reason: error.to_string(),
+    })?;
+    Ok(frontmatter::strip(&text).to_string())
+  }
+}
+
+/// A skill body that could not be read at the moment it was asked for.
+///
+/// The scan read the same file successfully; this error is about the file moving or
+/// breaking afterwards, which is why it names the path rather than retrying anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillBodyError {
+  pub path: PathBuf,
+  pub reason: String,
+}
+
+impl std::fmt::Display for SkillBodyError {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      formatter,
+      "cannot read the body of '{}': {}",
+      self.path.display(),
+      self.reason
+    )
+  }
+}
+
 /// What a scan found, and everything it declined.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Scan {
@@ -127,6 +166,69 @@ impl Scan {
   pub fn named(&self, name: &str) -> Option<&Skill> {
     self.skills.iter().find(|skill| skill.name == name)
   }
+
+  /// The skill-control prompt for this scan; see [`control_prompt`].
+  pub fn control_prompt(&self) -> String {
+    control_prompt(&self.skills)
+  }
+}
+
+/// The skill-control prompt: the block a session adds to its system prompt so the
+/// model knows what skills exist and may load one with the read tool.
+///
+/// Reproduced from Pi's `formatSkillsForPrompt` (the `read` tool variant), including
+/// the XML shape the Agent Skills standard prescribes and the escaping it applies.
+/// Two deliberate differences, both structural rather than textual:
+///
+/// - the separator newlines Pi puts before the block when appending it to a base
+///   prompt are not part of what this returns — the caller joins; and
+/// - `location` is [`Skill::path`], the file the read tool must be given, which is
+///   what Pi's `filePath` is.
+pub fn control_prompt(skills: &[Skill]) -> String {
+  // disable-model-invocation skills are invisible here by definition: the flag says
+  // the model may not decide to load this skill, and a listing is exactly that
+  // decision being offered.
+  let visible: Vec<&Skill> = skills
+    .iter()
+    .filter(|skill| !skill.disable_model_invocation)
+    .collect();
+  if visible.is_empty() {
+    return String::new();
+  }
+  let mut lines = vec![
+    "The following skills provide specialized instructions for specific tasks.".to_string(),
+    "Use the read tool to load a skill's file when the task matches its description."
+      .to_string(),
+    "When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands."
+      .to_string(),
+    String::new(),
+    "<available_skills>".to_string(),
+  ];
+  for skill in visible {
+    lines.push("  <skill>".to_string());
+    lines.push(format!("    <name>{}</name>", escape_xml(&skill.name)));
+    lines.push(format!(
+      "    <description>{}</description>",
+      escape_xml(&skill.description)
+    ));
+    lines.push(format!(
+      "    <location>{}</location>",
+      escape_xml(&skill.path.display().to_string())
+    ));
+    lines.push("  </skill>".to_string());
+  }
+  lines.push("</available_skills>".to_string());
+  lines.join("\n")
+}
+
+/// The five entities Pi escapes, and nothing else.
+fn escape_xml(text: &str) -> String {
+  text
+    .replace('&', "&amp;")
+    .replace('<', "&lt;")
+    .replace('>', "&gt;")
+    .replace('"', "&quot;")
+    .replace('\'', "&apos;")
 }
 
 /// Scan the documented locations.
@@ -369,6 +471,18 @@ mod tests {
     fs::write(
       &path,
       format!("---\nname: {name}\ndescription: {description}\n---\n\nBody\n"),
+    )
+    .unwrap();
+    path
+  }
+
+  /// A skill that only an explicit request may reach.
+  fn skill_file_hidden(dir: &Path, file: &str, name: &str, description: &str) -> PathBuf {
+    let path = dir.join(file);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+      &path,
+      format!("---\nname: {name}\ndescription: {description}\ndisable-model-invocation: true\n---\n\nBody\n"),
     )
     .unwrap();
     path
@@ -717,6 +831,139 @@ mod tests {
         .any(|warning| matches!(warning, SkillWarning::TooDeep { .. })),
       "{:?}",
       scan.warnings
+    );
+  }
+
+  #[test]
+  fn the_control_prompt_lists_the_body_of_a_skill_as_its_location() {
+    let fixture = Fixture::new();
+    let path = skill_file(
+      &fixture.home.join(".agents/skills/pdf-tools"),
+      "SKILL.md",
+      "pdf-tools",
+      "Extracts text from PDFs.",
+    );
+    let scan = discover(&fixture.discovery());
+    let prompt = scan.control_prompt();
+    // The three sentences a model needs before it can decide to load anything, then the
+    // entry per skill. Pi emits exactly this shape; the sentences are pinned with it.
+    for expected in [
+      "The following skills provide specialized instructions for specific tasks.",
+      "Use the read tool to load a skill's file when the task matches its description.",
+      "<available_skills>",
+      "<name>pdf-tools</name>",
+      "<description>Extracts text from PDFs.</description>",
+      "</available_skills>",
+    ] {
+      assert!(prompt.contains(expected), "missing '{expected}':\n{prompt}");
+    }
+    assert!(
+      prompt.contains(&format!("<location>{}</location>", path.display())),
+      "the model is told to read a file, so it has to be given the one path that works:\n{prompt}"
+    );
+    assert!(!prompt.starts_with('\n'), "the caller joins:\n{prompt}");
+  }
+
+  #[test]
+  fn a_skill_the_model_may_not_invoke_is_not_offered_to_it() {
+    let fixture = Fixture::new();
+    skill_file(
+      &fixture.home.join(".agents/skills/visible"),
+      "SKILL.md",
+      "visible",
+      "Always offered.",
+    );
+    skill_file_hidden(
+      &fixture.home.join(".agents/skills/private"),
+      "SKILL.md",
+      "private",
+      "Only on explicit request.",
+    );
+    let scan = discover(&fixture.discovery());
+    assert!(scan.named("private").is_some(), "loaded, just not offered");
+    let prompt = scan.control_prompt();
+    assert!(prompt.contains("<name>visible</name>"), "{prompt}");
+    assert!(
+      !prompt.contains("private"),
+      "disable-model-invocation means the model never sees the name either:\n{prompt}"
+    );
+  }
+
+  #[test]
+  fn a_scan_with_nothing_to_offer_offers_no_block() {
+    // An empty block is how a caller learns there is no reason to add a system prompt at
+    // all, so this is a contract rather than an edge case.
+    let fixture = Fixture::new();
+    assert_eq!(discover(&fixture.discovery()).control_prompt(), "");
+    let hidden_only = {
+      let mut scan = discover(&fixture.discovery());
+      scan.skills = vec![Skill {
+        name: "private".to_string(),
+        description: "Only on explicit request.".to_string(),
+        path: PathBuf::from("/home/me/.agents/skills/private/SKILL.md"),
+        source: Source::Global,
+        license: None,
+        compatibility: None,
+        allowed_tools: Vec::new(),
+        disable_model_invocation: true,
+      }];
+      scan
+    };
+    assert_eq!(hidden_only.control_prompt(), "");
+  }
+
+  #[test]
+  fn the_five_xml_entities_pi_escapes_are_the_five_escaped_here() {
+    let skill = Skill {
+      name: "a&b".to_string(),
+      description: "Reads <xml> and \"quotes\" or 'apostrophes'".to_string(),
+      path: PathBuf::from("/tmp/SKILL.md"),
+      source: Source::Global,
+      license: None,
+      compatibility: None,
+      allowed_tools: Vec::new(),
+      disable_model_invocation: false,
+    };
+    let prompt = control_prompt(&[skill]);
+    assert!(prompt.contains("<name>a&amp;b</name>"), "{prompt}");
+    assert!(
+      prompt
+        .contains("<description>Reads &lt;xml&gt; and &quot;quotes&quot; or &apos;apostrophes&apos;</description>"),
+      "{prompt}"
+    );
+  }
+
+  #[test]
+  fn a_skill_body_is_the_file_with_its_frontmatter_removed() {
+    let fixture = Fixture::new();
+    let fixture_path = skill_file(
+      &fixture.home.join(".agents/skills/pdf-tools"),
+      "SKILL.md",
+      "pdf-tools",
+      "Extracts text from PDFs.",
+    );
+    let scan = discover(&fixture.discovery());
+    let skill = scan.named("pdf-tools").expect("skill loaded");
+    assert_eq!(fixture_path, skill.path);
+    assert_eq!(skill.body().expect("body reads"), "Body\n");
+  }
+
+  #[test]
+  fn a_body_that_cannot_be_read_names_the_file() {
+    let fixture = Fixture::new();
+    let path = skill_file(
+      &fixture.home.join(".agents/skills/pdf-tools"),
+      "SKILL.md",
+      "pdf-tools",
+      "Extracts text from PDFs.",
+    );
+    let scan = discover(&fixture.discovery());
+    let skill = scan.named("pdf-tools").expect("skill loaded");
+    fs::remove_file(&path).expect("remove the file after the scan");
+    let error = skill.body().expect_err("a vanished body is an error");
+    assert!(
+      error.to_string().contains("pdf-tools"),
+      "the error has to name the skill whose body went missing: {error}"
     );
   }
 }

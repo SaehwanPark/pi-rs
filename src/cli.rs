@@ -135,6 +135,11 @@ pub const SKILLS_HELP: &str = concat!(
   "be:\n",
   "\n",
   "  --project                Read the project's own skill locations\n",
+  "  --control-prompt         Print the skill-control prompt a session puts in front\n",
+  "                           of the model, instead of the listing. Skills marked\n",
+  "                           explicit-only are not in it.\n",
+  "  --show <name>            Print one skill's body. This is the explicit invocation\n",
+  "                           an explicit-only skill reserves for the user.\n",
   "  --help                   Show this help.\n",
 );
 
@@ -259,6 +264,12 @@ pub struct SkillsArgs {
   /// is instructions for the model, and a checkout should not be able to hand the
   /// model instructions that nobody in this session agreed to.
   pub project: bool,
+  /// Print the skill-control prompt — the block a session puts in front of the model —
+  /// instead of the human listing.
+  pub control_prompt: bool,
+  /// Print one skill's body: the explicit invocation a `disable-model-invocation`
+  /// skill reserves for the user.
+  pub show: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -426,19 +437,37 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
 /// `pi-rs skills`: what a model would be offered, and what was declined.
 fn parse_skills(remaining: &[OsString]) -> Result<Command, String> {
   let mut project = false;
-  for arg in remaining {
-    let flag = arg
+  let mut control_prompt = false;
+  let mut show: Option<String> = None;
+  let mut index = 0;
+  while index < remaining.len() {
+    let flag = remaining[index]
       .to_str()
       .ok_or_else(|| format!("skills argument is not valid UTF-8\n{SKILLS_HELP}"))?;
+    index += 1;
     match flag {
       "--project" => project = true,
+      "--control-prompt" => control_prompt = true,
+      "--show" => {
+        let name = remaining
+          .get(index)
+          .and_then(|value| value.to_str())
+          .filter(|value| !value.starts_with('-'))
+          .ok_or_else(|| format!("--show needs a skill name\n{SKILLS_HELP}"))?;
+        index += 1;
+        show = Some(name.to_string());
+      }
       "--help" | "-h" => return Ok(Command::Help(SKILLS_HELP)),
       other => {
         return Err(format!("unknown skills argument '{other}'\n{SKILLS_HELP}"));
       }
     };
   }
-  Ok(Command::Skills(SkillsArgs { project }))
+  Ok(Command::Skills(SkillsArgs {
+    project,
+    control_prompt,
+    show,
+  }))
 }
 
 /// `pi-rs prompts`: list the templates.
@@ -1345,12 +1374,36 @@ mod tests {
     // The default is the conservative one, so it has to be the parsed default too.
     assert_eq!(
       parse(strings(&["skills"])).unwrap(),
-      Command::Skills(SkillsArgs { project: false })
+      Command::Skills(SkillsArgs {
+        project: false,
+        control_prompt: false,
+        show: None,
+      })
     );
     assert_eq!(
       parse(strings(&["skills", "--project"])).unwrap(),
-      Command::Skills(SkillsArgs { project: true })
+      Command::Skills(SkillsArgs {
+        project: true,
+        control_prompt: false,
+        show: None,
+      })
     );
+    // The two surfaces that replace the listing, and the name --show insists on.
+    assert!(matches!(
+      parse(strings(&["skills", "--control-prompt"])).unwrap(),
+      Command::Skills(SkillsArgs {
+        control_prompt: true,
+        ..
+      })
+    ));
+    assert!(matches!(
+      parse(strings(&["skills", "--show", "pdf-tools"])).unwrap(),
+      Command::Skills(SkillsArgs {
+        show: Some(ref name),
+        ..
+      }) if name == "pdf-tools"
+    ));
+    assert!(parse(strings(&["skills", "--show"])).is_err());
   }
 
   #[test]

@@ -14,8 +14,8 @@ use pi_rs_compat::{
 
 use crate::cli::SkillsArgs;
 
-/// List the skills that would be offered to a model, and report the ones that were
-/// skipped.
+/// Show what a model would be offered: the listing, the control prompt, or one skill's
+/// body — and report the skills that were skipped.
 pub fn execute(args: SkillsArgs) -> Result<(), String> {
   let cwd = std::env::current_dir().map_err(|error| format!("current directory: {error}"))?;
   let discovery = if args.project {
@@ -25,14 +25,34 @@ pub fn execute(args: SkillsArgs) -> Result<(), String> {
   };
   let scan = skill::discover(&discovery);
 
-  for skill in &scan.skills {
-    let hidden = if skill.disable_model_invocation {
-      " (explicit invocation only)"
-    } else {
-      ""
-    };
-    println!("{}  {}{}", skill.source.as_str(), skill.name, hidden);
-    println!("{}", skill.description);
+  // The two non-listing surfaces print their one thing raw; the commentary below them is
+  // still commentary, so it still goes to stderr.
+  if let Some(name) = &args.show {
+    // Asking for a skill by name is the explicit invocation that a
+    // disable-model-invocation skill reserves for the user, so the flag does not gate
+    // this path — it gates only what the *model* may reach for.
+    let skill = scan
+      .named(name)
+      .ok_or_else(|| format!("no skill named '{name}'; pi-rs skills lists what there is"))?;
+    print!("{}", skill.body().map_err(|error| error.to_string())?);
+  } else if args.control_prompt {
+    // Empty stdout when nothing may be offered is the answer, not a failure: it is the
+    // same "" the caller of Scan::control_prompt gets, and the same thing a session uses
+    // to decide that no system prompt is warranted.
+    let prompt = scan.control_prompt();
+    if !prompt.is_empty() {
+      println!("{prompt}");
+    }
+  } else {
+    for skill in &scan.skills {
+      let hidden = if skill.disable_model_invocation {
+        " (explicit invocation only)"
+      } else {
+        ""
+      };
+      println!("{}  {}{}", skill.source.as_str(), skill.name, hidden);
+      println!("{}", skill.description);
+    }
   }
 
   for warning in &scan.warnings {

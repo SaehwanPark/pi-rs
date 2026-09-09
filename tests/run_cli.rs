@@ -775,3 +775,83 @@ fn the_answer_does_not_change_with_what_the_surface_shows() {
   assert_eq!(loud.stdout, quiet.stdout);
   assert!(!loud.stdout.is_empty());
 }
+
+/// The committed skills fixture, used as `$HOME` so the scan is the same on every machine.
+fn fixture_home() -> std::path::PathBuf {
+  std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    .join("tests/compat/skills/home")
+    .canonicalize()
+    .expect("fixture home")
+}
+
+#[test]
+fn a_skill_listing_reaches_the_model_as_the_system_message() {
+  let temp = TempDir::new().unwrap();
+  let workspace = temp.path().join("workspace");
+  fs::create_dir(&workspace).unwrap();
+  let server = FakeServer::answer(vec![text_response("done")]);
+  let config = write_config(temp.path(), &server.base_url(), true);
+  let output = Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+    .args(["run", "--config"])
+    .arg(&config)
+    .arg("--cwd")
+    .arg(&workspace)
+    .args(["--prompt", "hello"])
+    .env("HOME", fixture_home())
+    .env("USERPROFILE", fixture_home())
+    .output()
+    .expect("run pi-rs");
+  let requests = server.requests();
+  assert!(
+    output.status.success(),
+    "{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  let body = &requests[0].body;
+  // Pi's mechanism, exactly: the model is told what skills exist and where the files
+  // are, and decides to read one. The block travels as the system message, first.
+  assert!(body.contains("\"role\":\"system\""), "{body}");
+  assert!(body.contains("<available_skills>"), "{body}");
+  assert!(body.contains("pdf-tools"), "{body}");
+  assert!(
+    !body.contains("loose"),
+    "a disable-model-invocation skill is not offered to the model:\n{body}"
+  );
+}
+
+#[test]
+fn a_run_with_no_skills_nearby_sends_no_system_message() {
+  let temp = TempDir::new().unwrap();
+  let workspace = temp.path().join("workspace");
+  fs::create_dir(&workspace).unwrap();
+  let server = FakeServer::answer(vec![text_response("done")]);
+  let config = write_config(temp.path(), &server.base_url(), true);
+  let output = Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+    .args(["run", "--config"])
+    .arg(&config)
+    .arg("--cwd")
+    .arg(&workspace)
+    .args(["--prompt", "hello"])
+    .env("HOME", temp.path()) // a home with no skills anywhere under it
+    .env("USERPROFILE", temp.path())
+    .output()
+    .expect("run pi-rs");
+  let requests = server.requests();
+  assert!(
+    output.status.success(),
+    "{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  // Nothing to offer is nothing to say: no system message, no empty block, and the
+  // blank-system rule in the provider keeps the request byte-identical to before.
+  assert!(
+    !requests[0].body.contains("\"role\":\"system\""),
+    "{}",
+    requests[0].body
+  );
+  assert!(
+    !requests[0].body.contains("available_skills"),
+    "{}",
+    requests[0].body
+  );
+}

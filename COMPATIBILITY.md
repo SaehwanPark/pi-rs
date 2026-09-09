@@ -81,8 +81,20 @@ followed — linking in a skill kept elsewhere is the normal way to share one, a
 already decided about the directory holding the link — with the depth bound stopping a
 link that walks a scan back on itself and saying so.
 
-Not yet: package-local skills, the `skills` array in settings, `--skill` paths,
-skill-body activation, and the model-facing prompt listing.
+A session offers its skills the way Pi does. `pi-rs run` and `pi-rs interactive` scan
+the global locations at session open and put the result in front of every request as the
+system message: Pi's skill-control block — the three instruction sentences, then one
+`<skill>` entry per visible skill with its `name`, `description`, and `location` (the
+file the read tool should be given), XML-escaped as the Agent Skills standard spells it.
+A `disable-model-invocation` skill is absent from the block down to its name; asking for
+it by name (`pi-rs skills --show <name>`, which prints the body with the frontmatter
+removed) is the explicit invocation that flag reserves for the user.
+`pi-rs skills --control-prompt` prints exactly what a session would send, empty stdout
+when there is nothing to offer — and only global locations reach a session, because the
+workspace's own skill files need a trust decision `run` does not have; `--project` with
+the `skills` command stays how one is read.
+
+Not yet: package-local skills, the `skills` array in settings, and `--skill` paths.
 
 ## 6. Prompt templates
 
