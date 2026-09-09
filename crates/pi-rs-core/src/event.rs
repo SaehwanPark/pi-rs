@@ -260,6 +260,17 @@ pub enum AgentEvent {
   /// Producer: none found at 2026-09-07, test fixtures only
   /// (docs/COMPACT_EVENT_AUDIT.md).
   ContextCompactionCompleted(ContextCompactionCompleted),
+  /// Why: the summary that replaced a compacted range enters canonical history
+  /// as a message, and a message-bearing event is what a session log line binds
+  /// its content to. The text itself declares that it is a summary of earlier
+  /// conversation; this event's role is attribution, not new semantics.
+  /// Ordering: after `ContextCompactionStarted`, before the epoch record that
+  /// references the summary.
+  /// Persistence: always. Replay: one more message in canonical history; the
+  /// epoch record, not this event, is what makes it model-visible.
+  /// UI: renders like any assistant-visible text when a consumer asks for it.
+  /// Producer: `TurnLoop::compact`.
+  ContextSummary,
   /// Why: a compaction moved the model-visible context to a new epoch, and this is
   /// the durable record of which canonical range it replaced and what stands in
   /// for that range.
@@ -524,8 +535,10 @@ pub struct ContextCompactionEpoch {
   /// Last canonical sequence number the summary replaces. Inclusive, and never
   /// below `replaces_from`: a summary always stands in for at least one record.
   pub replaces_through: EventSeq,
-  /// Reference to the stored summary, never the summary itself.
-  pub summary: BlobRef,
+  /// Reference to the stored summary, never the summary itself. `None` when the
+  /// trace holds no blob store: the epoch still opened, and the summary message
+  /// it substitutes still stands in model-visible context.
+  pub summary: Option<BlobRef>,
 }
 
 /// The epoch ordinal the next [`ContextCompactionEpoch`] record must claim.
@@ -723,7 +736,7 @@ mod tests {
       context_epoch: epoch,
       replaces_from: EventSeq(from),
       replaces_through: EventSeq(through),
-      summary: BlobRef::for_bytes(b"summary text", Some("text/plain")),
+      summary: Some(BlobRef::for_bytes(b"summary text", Some("text/plain"))),
     }
   }
 

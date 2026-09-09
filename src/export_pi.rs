@@ -272,6 +272,7 @@ fn kind_name(event: &AgentEvent) -> &'static str {
     AgentEvent::ContextCompactionStarted(_) => "context_compaction_started",
     AgentEvent::ContextCompactionCompleted(_) => "context_compaction_completed",
     AgentEvent::ContextCompactionEpoch(_) => "context_compaction_epoch",
+    AgentEvent::ContextSummary => "context_summary",
     AgentEvent::CheckpointCreated(_) => "checkpoint_created",
     AgentEvent::TurnCompleted(_) => "turn_completed",
     AgentEvent::Diagnostic(_) => "diagnostic",

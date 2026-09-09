@@ -443,7 +443,7 @@ fn epoch_fixture(root: &Path, id: &str) -> (Vec<(u32, AgentEvent)>, Fixture, Blo
       context_epoch: next_context_epoch(events.iter().map(|(_, event)| event)),
       replaces_from: EventSeq(replaced_from),
       replaces_through: EventSeq(replaced_through),
-      summary: summary.clone(),
+      summary: Some(summary.clone()),
     }),
   ));
   let session = fixture(root, id, &events);
