@@ -67,3 +67,37 @@ evidence-backed; delete one when its prevention becomes structurally enforced.
 - Prevention: when resolving conflicts in `TOP_HELP`/`RUN_HELP`, diff the rendered
   `pi-rs --help` output against every `tests/*_cli.rs` assertion before committing
   the merge.
+
+## A probe that "only estimates" can still mutate: build_request evicts
+
+- Context: the overflow intercept needed the exact request that crossed the
+  window, so the retry loop called `build_request()` as a preflight probe
+  before `attempt()`.
+- Symptom: the intercept measured a 1-message history where six messages had
+  just been pushed; `summarize_oldest` kept answering "nothing to summarize".
+- Cause: `build_request` is not a pure estimator. Its
+  `ContextAction::ReducePayload` path calls `evict_oldest`, which rewrites
+  `self.messages` in place. A "measure it" call is a mutation call with a
+  return value.
+- Resolution: removed the preflight; `attempt()` is the only caller, and the
+  intercept measures `self.messages` at its own entry point.
+- Prevention: name the function after what it does
+  (`build_request` does build, and building can prepare), or return a borrow
+  instead of rewriting. Grep a suspect for `self.` assignments before using
+  its result as a measurement.
+
+## A test window must be large enough to hold the fix it exercises
+
+- Context: overflow fixtures chose `context_window = 8` so that tiny fake
+  histories would cross it cheaply.
+- Symptom: the summarization path never ran; the interceptor correctly
+  reported that no summary was possible, twice, in two different tests.
+- Cause: the summarization instruction alone costs ~65 tokens. No request at
+  `window = 8` can contain the request for a summary — the feature is
+  structurally untestable at that size, and the honest runtime says so.
+- Resolution: size fixtures from the feature's own floor (instruction +
+  stand-in + one kept message + overhead), then scale the history to still
+  cross the window.
+- Prevention: before shrinking a numeric fixture to the bone, ask what the
+  code-under-test must put on the wire; the window has to carry that plus the
+  crossing.
