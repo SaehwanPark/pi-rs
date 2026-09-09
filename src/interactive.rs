@@ -64,6 +64,7 @@ use crossterm::{
   terminal::{self, Clear, ClearType},
 };
 
+use pi_rs_compat::prompt;
 use pi_rs_core::{CancelToken, TurnStatus};
 use pi_rs_runtime::{TurnError, TurnReport};
 use pi_rs_tui::{
@@ -88,6 +89,7 @@ const COMMANDS: [&str; 3] = ["help", "quit", "exit"];
 /// point of a command — and the reason an unknown one is an error here rather
 /// than a prompt: sending `/nope` to the model would let a typo ask a question
 /// nobody meant to ask.
+#[derive(Debug)]
 enum Submitted {
   /// Send what is typed to the model as a turn.
   Turn,
@@ -95,20 +97,31 @@ enum Submitted {
   Help,
   /// End the loop. The session still closes through its normal path.
   Quit,
+  /// A loaded prompt template, with the argument string exactly as typed after the
+  /// name. What the model receives is the expansion, not these parts.
+  Template { name: String, arguments: String },
   /// A recognised command shape with no command behind it.
   Unknown(String),
 }
 
 /// Which of those one submitted line is. Parsing is [`pi_rs_tui::command`]'s,
 /// so `/help x` is help with an argument and `/123` is prose, exactly as the
-/// highlighter already decided while the line was being typed.
-fn route(text: &str) -> Submitted {
+/// highlighter already decided while the line was being typed. A name the loop
+/// answers itself outranks a template of the same name: `/quit` quits even when a
+/// template is named `quit`.
+fn route(text: &str, templates: &prompt::Scan) -> Submitted {
   let input = Input::parse(text);
-  match input.command_name() {
-    None => Submitted::Turn,
-    Some("help") => Submitted::Help,
-    Some("quit") | Some("exit") => Submitted::Quit,
-    Some(name) => Submitted::Unknown(name.to_string()),
+  match input {
+    Input::Prompt { .. } => Submitted::Turn,
+    Input::Command { name, ref rest, .. } => match name.as_str() {
+      "help" => Submitted::Help,
+      "quit" | "exit" => Submitted::Quit,
+      _ if templates.named(&name).is_some() => Submitted::Template {
+        name: name.clone(),
+        arguments: rest.clone(),
+      },
+      _ => Submitted::Unknown(name.clone()),
+    },
   }
 }
 
@@ -355,6 +368,9 @@ struct Loop {
   /// [`Palette::monochrome`], which emits exactly the bytes this loop wrote before
   /// the classifier was wired in.
   palette: Palette,
+  /// The prompt templates this session loaded, in `pi-rs prompts` order. Builtin
+  /// commands outrank them, and their names join what Tab completes.
+  templates: prompt::Scan,
   /// How many lines the cursor sits below the row the current frame starts on.
   ///
   /// Not the frame's height: a frame ends with the cursor parked on the caret, and
@@ -374,12 +390,22 @@ impl Loop {
       turns: 0,
       columns: 1,
       cancel: CancelToken::new(),
+      templates: prompt::Scan::default(),
       above: 0,
       palette: palette(),
     };
     surface.set_columns(columns);
     surface.editor.set_completions(COMMANDS);
     surface
+  }
+
+  /// Load the scan a session invokes templates from, and teach Tab their names too.
+  fn with_templates(mut self, templates: prompt::Scan) -> Self {
+    let mut names: Vec<&str> = COMMANDS.to_vec();
+    names.extend(templates.templates.iter().map(|t| t.name.as_str()));
+    self.editor.set_completions(names);
+    self.templates = templates;
+    self
   }
 
   /// Set the width the buffer soft-wraps at and the status line is cut to.
@@ -440,18 +466,42 @@ impl Loop {
 
   /// Route one submitted line: commands are answered here, everything else runs.
   fn submit(&mut self, session: &mut SessionHandle<'_>, text: &str) -> Result<Submitted, String> {
-    match route(text) {
+    match route(text, &self.templates) {
       Submitted::Turn => {
         self.turn(session, text)?;
         Ok(Submitted::Turn)
       }
       Submitted::Help => {
-        self.write_note(&[
+        let mut lines = vec![
           "/help       this list".to_string(),
           "/quit, /exit  end the session (ctrl-c on an empty draft does the same)".to_string(),
           "tab         complete the command the caret sits on".to_string(),
-        ])?;
+        ];
+        if !self.templates.templates.is_empty() {
+          lines.push("/<name>     expand a prompt template (pi-rs prompts lists them)".to_string());
+        }
+        self.write_note(&lines)?;
         Ok(Submitted::Help)
+      }
+      Submitted::Template { name, arguments } => {
+        // Expansion is pure string work and finishes before the turn needs the
+        // loop mutably; the model sees the expanded prompt, never the `/name` line.
+        let expanded = self.templates.named(&name).map(|template| {
+          let args = prompt::parse_arguments(&arguments);
+          template.expand(&args.iter().map(String::as_str).collect::<Vec<_>>())
+        });
+        match expanded {
+          Some(expanded) => {
+            self.turn(session, &expanded)?;
+            Ok(Submitted::Template { name, arguments })
+          }
+          None => {
+            self.write_note(&[format!(
+              "/{name} is not a command here — /help lists what is"
+            )])?;
+            Ok(Submitted::Unknown(name))
+          }
+        }
       }
       Submitted::Unknown(name) => {
         self.write_note(&[format!(
@@ -743,7 +793,14 @@ pub fn execute(args: InteractiveArgs) -> Result<(), String> {
     // guard is what restores it, including when `run` returns an error.
     let _terminal = RawTerminal::enter().map_err(terminal_failure)?;
     let columns = term::Stream::Stdout.width().unwrap_or(FALLBACK_COLUMNS);
-    Loop::new(session.model().to_string(), columns).run(session)
+    // Pi loads prompt templates before the editor opens, and so this does: the scan
+    // is two small directories. Project locations need trust, and this command has
+    // no trust decision to consult, so — like `pi-rs prompts` without --project —
+    // they are not read.
+    let templates = prompt::discover(&pi_rs_compat::scan::Discovery::new(args.cwd.clone()));
+    Loop::new(session.model().to_string(), columns)
+      .with_templates(templates)
+      .run(session)
   })
 }
 
@@ -766,23 +823,82 @@ mod tests {
     key(KeyCode::Char('c'), KeyModifiers::CONTROL, kind)
   }
 
+  /// A scan holding exactly these template names, for routing tests.
+  fn scan_with(names: &[&str]) -> prompt::Scan {
+    prompt::Scan {
+      templates: names
+        .iter()
+        .map(|name| prompt::Template {
+          name: (*name).to_string(),
+          description: format!("the {name} template"),
+          description_from_body: false,
+          argument_hint: None,
+          path: std::path::PathBuf::from(format!("/prompts/{name}.md")),
+          source: pi_rs_compat::scan::Source::Global,
+          body: format!("run the {name} on $@"),
+        })
+        .collect(),
+      warnings: Vec::new(),
+    }
+  }
+
   #[test]
   fn a_submitted_line_is_a_command_or_a_prompt() {
-    assert!(matches!(route("what does src/main.rs do"), Submitted::Turn));
+    let none = prompt::Scan::default();
+    assert!(matches!(
+      route("what does src/main.rs do", &none),
+      Submitted::Turn
+    ));
     // A path is not a command: the parser already decided which words may be
     // command names, and the loop must not second-guess it with a looser rule.
     assert!(matches!(
-      route("/tmp/build.log is huge, read it"),
+      route("/tmp/build.log is huge, read it", &none),
       Submitted::Turn
     ));
-    assert!(matches!(route("/help"), Submitted::Help));
-    assert!(matches!(route("/help me"), Submitted::Help));
-    assert!(matches!(route("/quit"), Submitted::Quit));
-    assert!(matches!(route("/exit"), Submitted::Quit));
-    match route("/nope") {
+    assert!(matches!(route("/help", &none), Submitted::Help));
+    assert!(matches!(route("/help me", &none), Submitted::Help));
+    assert!(matches!(route("/quit", &none), Submitted::Quit));
+    assert!(matches!(route("/exit", &none), Submitted::Quit));
+    match route("/nope", &none) {
       Submitted::Unknown(name) => assert_eq!(name, "nope"),
       _ => panic!("a command shape with no command is an unknown, not a prompt"),
     }
+  }
+
+  #[test]
+  fn a_loaded_template_is_invoked_and_keeps_its_arguments_as_typed() {
+    let templates = scan_with(&["review", "quit"]);
+    match route("/review src/main.rs \"and tests\"", &templates) {
+      Submitted::Template { name, arguments } => {
+        assert_eq!(name, "review");
+        assert_eq!(arguments, "src/main.rs \"and tests\"");
+      }
+      other => panic!("a template name is an invocation: {other:?}"),
+    }
+    // A builtin outranks a template of the same name, and the bare form works too.
+    assert!(matches!(route("/quit", &templates), Submitted::Quit));
+    assert!(matches!(
+      route("/review", &templates),
+      Submitted::Template { .. }
+    ));
+    // What matches no template is still an unknown, never a prompt.
+    match route("/nope", &templates) {
+      Submitted::Unknown(name) => assert_eq!(name, "nope"),
+      other => panic!("{other:?}"),
+    }
+  }
+
+  #[test]
+  fn templates_join_the_names_tab_completes() {
+    let mut surface =
+      Loop::new("local/vulcan".to_string(), 80).with_templates(scan_with(&["review"]));
+    for ch in "/rev".chars() {
+      surface.editor.apply(Intent::Insert(ch));
+    }
+    assert_eq!(surface.editor.apply(Intent::Complete), Outcome::Changed);
+    // The unique match closes the word: a following space is the completion saying
+    // this name is finished.
+    assert_eq!(surface.editor.text(), "/review ");
   }
 
   #[test]

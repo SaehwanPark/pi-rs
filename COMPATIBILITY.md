@@ -117,9 +117,12 @@ placeholder, so is every digit after a `$`; a placeholder that matches none of t
 is left in the output exactly as written rather than deleted or rejected. Options are read
 before the name, so `pi-rs prompt lint --strict` passes `--strict` to the template.
 
-Not yet: invoking `/name` inside a running session, splitting one typed string into
-arguments the way the editor does, package `prompts/` directories, `pi.prompts` entries,
-the `prompts` array in settings, `--prompt-template` paths, and `--no-prompt-templates`.
+`pi-rs interactive` invokes a loaded template as `/name [arguments…]`: the typed string
+is split by Pi's editor rule (`parseCommandArgs`) — bash-style quotes whose quirks are
+reproduced, not smoothed — and the expansion is sent as the turn.
+
+Not yet: package `prompts/` directories, `pi.prompts` entries, the `prompts` array in
+settings, `--prompt-template` paths, and `--no-prompt-templates`.
 
 ## 7. Packages
 

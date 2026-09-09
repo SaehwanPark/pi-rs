@@ -658,8 +658,10 @@ Do not begin until stable baselines exist.
 
 - [ ] Load `SKILL.md` bodies and honour `disable-model-invocation`; present skills to
       the model as a skill-control prompt (Phase 8 remainder; loader and listing done).
-- [ ] Invoke a prompt template from inside a session (`/name`), and split one typed
-      string into template arguments the way Pi's editor does.
+- [x] Invoke a prompt template from inside a session (`/name`): `interactive` discovers
+      the scan at open, Tab completes the names, and `prompt::parse_arguments` splits the
+      typed string by Pi's editor rule — quotes stripped, empty quotes no argument,
+      unclosed quote swallows the rest.
 - [ ] Checkpoint creation driven by the runtime under context pressure, not only the
       explicit path; document what a checkpoint does to compaction policy.
 - [ ] Import a whole Pi session directory, or name what a single-file import leaves out.

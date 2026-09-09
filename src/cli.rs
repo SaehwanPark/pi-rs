@@ -82,6 +82,8 @@ pub const INTERACTIVE_HELP: &str = concat!(
   "Commands:\n",
   "  /help                    this list\n",
   "  /quit, /exit             end the session\n",
+  "  /<name> [args]           expand a prompt template into the turn\n",
+  "                           (pi-rs prompts lists the loaded ones)\n",
   "\n",
   "Required:\n",
   "  --config <file>          Provider configuration\n",
