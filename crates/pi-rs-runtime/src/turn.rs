@@ -135,6 +135,10 @@ pub enum TurnError {
   Aborted(TurnStatus),
   /// Durable recording failed. A harness may not continue blind.
   Sink(String),
+  /// Out of requests. The budget is the user's, and maintenance spends it
+  /// like an answer does: when the summarization a turn needed can no longer
+  /// be asked, the honest report is exhaustion, not a model failure.
+  Exhausted,
 }
 
 impl From<SinkError> for TurnError {
@@ -155,7 +159,7 @@ impl TurnError {
         TurnStatus::Failed { kind } => Some(*kind),
         TurnStatus::Completed | TurnStatus::Cancelled => None,
       },
-      Self::Sink(_) => None,
+      Self::Sink(_) | Self::Exhausted => None,
     }
   }
 
@@ -261,6 +265,25 @@ pub struct TurnLoop<'a> {
   /// cooldown. `None` until the first eviction; a loop that has never compacted
   /// has waited longer than any cooldown.
   last_compaction: Option<Instant>,
+  /// A request has crossed this provider's window during this loop's life.
+  ///
+  /// The context policy treats this as an observation, not a guess: from here
+  /// on it *requires* compaction at the safe boundary instead of suggesting
+  /// one, because its own thresholds have already been wrong once.
+  overflow_seen: bool,
+  /// The *provider* reported the crossing, over content it had already
+  /// streamed. The loop answers a runtime refusal by summarizing; a crossing
+  /// reported on streamed content is reported back, never rewritten.
+  provider_crossed: bool,
+  /// The question this turn was asked with, kept for the maintenance that
+  /// a refused request may need: the re-issue must carry it, and a
+  /// summarization must not sweep it into its prefix.
+  turn_question: String,
+  /// The summarized candidate maintenance produced for the re-issue. The
+  /// context check answers *it* rather than the full history: deciding
+  /// twice, by two different questions, is how a loop asks a question it
+  /// has already refused to answer.
+  maintenance_candidate: Option<ModelRequest>,
   /// Last provider-reported input tokens, preferred over any estimate.
   measured_input_tokens: Option<u64>,
   /// Envelopes this loop produced. Journal positions come from the trace, and
@@ -310,6 +333,10 @@ impl<'a> TurnLoop<'a> {
       session_started: false,
       context_epoch: 0,
       last_compaction: None,
+      overflow_seen: false,
+      provider_crossed: false,
+      turn_question: String::new(),
+      maintenance_candidate: None,
       measured_input_tokens: None,
       envelopes: Vec::new(),
       history: None,
@@ -421,9 +448,17 @@ impl<'a> TurnLoop<'a> {
     let turn_id = TurnId::new();
     let clock = Instant::now();
     let mut report = TurnReport::new(turn_id.clone(), self.epoch_index());
-    self.requests.store(0, Ordering::SeqCst);
+    // One summarization per turn: the epoch it opens moves the estimate well
+    // below the trigger, and a second model call in the same turn would be the
+    // loop deciding twice that the user's history is too long.
+    let mut summarized = false;
 
     self.ensure_session_started()?;
+    // The size question has to be asked before the history grows the answer
+    // into it: the user message lands on the trace below, and a session that
+    // is already over the window with the question on it has one honest
+    // refusal and no summarization that cannot help.
+    self.turn_question = input.to_string();
     let user = Message::user(input);
     self.emit_message(
       Some(turn_id.clone()),
@@ -443,13 +478,44 @@ impl<'a> TurnLoop<'a> {
       if cancel.is_cancelled() {
         return self.finish(report, TurnStatus::Cancelled, clock, Some(turn_id.clone()));
       }
+      // The build's arithmetic runs first and refuses before a byte is sent.
+      // That refusal is the same event as the provider's own, and maintenance
+      // answers it the same way: once, by summarizing, and only from state
+      // that cannot have committed anything yet.
 
-      let response = match self.attempt(turn_id.clone(), cancel, progress) {
+
+      // The request is built before anything streams, because that is the
+      // only state in which a size refusal can be taken back: nothing has
+      // committed, so a summarization can re-issue the same turn honestly.
+      // A refusal *here* is the build's own arithmetic against the window,
+      // and it goes to the same maintenance the provider's refusal gets —
+      // the two differ only in who measured, and both are asked before the
+      // history is spent.
+      eprintln!("PREATTEMPT real={}", self.messages.len());
+    let response = match self.attempt(turn_id.clone(), cancel, progress) {
         Ok(response) => response,
         // Cancellation is reported, never recovered from.
         Err(TurnFailure::Cancelled) => {
           return self.finish(report, TurnStatus::Cancelled, clock, Some(turn_id.clone()));
         }
+        // A refusal of size — from the build's arithmetic or from the
+        // provider's own mouth — is the one failure the loop answers
+        // itself, once, by summarizing and re-issuing.
+        Err(error @ TurnFailure::Aborted(TurnError::Aborted(_))) => {
+          let error = match error {
+            TurnFailure::Aborted(error) => error,
+            other => return Err(turn_error_of(other)),
+          };
+          if self.maintenance_of(&error).is_none() || summarized {
+            return Err(error);
+          }
+          let crossed = self.provider_crossed;
+          match self.maintain(&error, &crossed, &turn_id, cancel, progress, &mut report, clock) {
+            Ok(()) => continue,
+            Err(end) => return Err(end),
+          }
+        }
+        Err(TurnFailure::Aborted(error)) => return Err(error),
         Err(TurnFailure::Fatal(failure)) => {
           // The turn ends *before* the error is returned. A trace with no
           // `turn_completed` cannot tell a crashed session from an interrupted one,
@@ -689,6 +755,148 @@ impl<'a> TurnLoop<'a> {
   ///
   /// The loop may re-issue only while nothing has been streamed. That single rule
   /// is what keeps recovery from duplicating committed content.
+  /// Whether a refusal is maintenance's to answer: a size refusal, stated
+  /// either by the build's own arithmetic or by the provider before any of
+  /// its content was committed. Anything else stands exactly as it was.
+  fn maintenance_of(&self, error: &TurnError) -> Option<()> {
+    matches!(
+      error,
+      TurnError::Aborted(TurnStatus::Failed {
+        kind: ModelFailureKind::ContextOverflow,
+      })
+    )
+    .then_some(())
+  }
+
+  /// The one maintenance a refused turn gets: summarize the oldest history
+  /// the window can carry a re-issue beside, open the epoch that makes it
+  /// durable, and hand the re-issued request to the next build. `Ok` means
+  /// the turn was kept alive; `Err` is the turn's final error, and the
+  /// refusal that ends a maintained turn is reported, not retried.
+  fn maintain(
+    &mut self,
+    refusal: &TurnError,
+    provider_crossed: &bool,
+    turn_id: &TurnId,
+    cancel: &CancelToken,
+    progress: &mut dyn TurnProgress,
+    report: &mut TurnReport,
+    clock: Instant,
+  ) -> Result<(), TurnError> {
+    // The turn that is about to be lost is what tells the next one that
+    // this window really does get crossed; recording it is not a policy,
+    // it is the trace keeping its promise.
+    self.overflow_seen = true;
+    let window = self.provider().capabilities().context_window;
+    let total = self.messages.len();
+    eprintln!("MAINT real={total} texts={:?}", self.messages.iter().map(|m| m.text().len()).collect::<Vec<_>>());
+    let tolerance = (window / 8).max(1);
+    let capabilities = self.provider().capabilities();
+    let model = self.active_model();
+    let system = self.system.clone();
+    let thinking = self.thinking;
+    // Maintenance is decided of the request the re-issue will actually
+    // carry: a summary stand-in for a prefix, the tail and the question
+    // kept verbatim. The provider answers requests by their own size, so
+    // this is the size that has to matter: it must fit the window that
+    // refused the turn. Near the bound the estimate cannot measure; only a
+    // re-issue worth asking for is worth its request. The empty prefix is
+    // maintenance too: at the smallest windows the summary *is* the
+    // history, and the instruction alone is the ask.
+    let reissue_fits = |size: usize| {
+      estimate_tokens(&reissue_of(&self.messages, &size, &system, &capabilities, &model, thinking))
+        <= window
+    };
+    let worth_asking = |size: usize| {
+      estimate_tokens(&reissue_of(
+        &self.messages,
+        &size,
+        &system,
+        &capabilities,
+        &model,
+        thinking,
+      )) + tolerance
+        >= window
+    };
+    // A request the provider itself refused is answered with the smallest
+    // prefix that re-issues: keep every message the window can carry beside
+    // the summary, because that is exactly the margin the provider just
+    // proved exists. A refusal measured before the request left is answered
+    // the other way, largest candidate first: maintenance earns its ask only
+    // when it brings a request near the bound, and near the bound the
+    // estimate — not the ask — decides how much history still fits beside
+    // the summary.
+    let candidate = if *provider_crossed {
+      (1..=total).find(|size| reissue_fits(*size))
+    } else {
+      (1..=total)
+        .rev()
+        .find(|size| reissue_fits(*size) && worth_asking(*size))
+    };
+    eprintln!("SCAN window={window} total={total} crossed={provider_crossed} cand={candidate:?} fits={:?}",
+      (1..=total).map(reissue_fits).collect::<Vec<_>>());
+    eprintln!(
+      "MAINT crossed={provider_crossed} window={window} total={total} candidate={candidate:?} fits[1]={} fits[{}]={}",
+      reissue_fits(1),
+      total,
+      reissue_fits(total)
+    );
+    let Some(prefix) = candidate else {
+      return Err(refusal.clone());
+    };
+    // A summarization and its re-issue are two requests: the budget that
+    // ends at this turn pays for both, or maintenance is a summary nobody
+    // can answer. Exhaustion is the honest end, and it is stated before
+    // the epoch is opened, not after the trace says history was reduced
+    // for nothing.
+    let spare = self
+      .max_requests
+      .saturating_sub(self.requests.load(Ordering::SeqCst));
+    if spare < 2 {
+      self.diagnostic(
+        Some(turn_id.clone()),
+        DiagnosticLevel::Warn,
+        "request budget cannot pay for a summarization and its re-issue",
+      )?;
+      report.budget_exhausted = true;
+      let finished = self.finish(
+        std::mem::replace(report, TurnReport::new(turn_id.clone(), report.epoch)),
+        TurnStatus::Failed {
+          kind: ModelFailureKind::ContextOverflow,
+        },
+        clock,
+        Some(turn_id.clone()),
+      )?;
+      drop(finished);
+      return Err(refusal.clone());
+    }
+    if !self.summarize_oldest(prefix, turn_id, turn_id, cancel, progress)? {
+      // The provider refused to summarize: maintenance has no answer,
+      // and the caller's refusal stands with the last word.
+      return Err(refusal.clone());
+    }
+    // The history compaction actually wrote, not the scan's arithmetic:
+    // maintenance drains the prefix it is given, so the request that can be
+    // re-issued is the one measured against the history as it stands. A
+    // summarization that left no smaller history behind is maintenance
+    // answering its own question, and the refusal keeps the last word.
+    let candidate = summarized_candidate(
+      &self.messages,
+      1,
+      self.system.as_ref(),
+      &self.provider().capabilities(),
+      &self.active_model(),
+      self.thinking,
+    );
+    if estimate_messages(&candidate.messages) <= window {
+      self.maintenance_candidate = Some(candidate);
+      return Ok(());
+    }
+    // No prefix left a request that fits: maintenance has spent its
+    // request, and the same refusal answered twice is the turn's result.
+    Err(refusal.clone())
+  }
+
   fn attempt(
     &mut self,
     turn_id: TurnId,
@@ -707,6 +915,12 @@ impl<'a> TurnLoop<'a> {
       }
       attempts_on_model += 1;
       let request = self.build_request(&turn_id).map_err(TurnFailure::from)?;
+      eprintln!(
+        "ROUND {} [{}]",
+        estimate_messages(&request.messages),
+        request.messages.iter().map(|m| m.text().len().to_string()).collect::<Vec<_>>().join(",")
+      );
+
       // The turn's request budget is spent here, at the point the request exists.
       self.requests.fetch_add(1, Ordering::SeqCst);
       let epoch = self.epoch_index();
@@ -789,10 +1003,38 @@ impl<'a> TurnLoop<'a> {
             }
           }
         }
-        Err(failure) => {
+        Err(refusal) => {
+          // A refusal for size is not a fault to recover from: the model was
+          // healthy, it was the request that could not fit. Retrying sends the
+          // same impossible request, and failing over credits a backup with
+          // fixing a problem the history caused. This is the one place that
+          // learns the window has actually been crossed, and the turn loop
+          // answers it the only way a window permits: by summarizing.
+          if refusal.kind == ModelFailureKind::ContextOverflow {
+            self.overflow_seen = true;
+            // The provider refused the request it was given: its window is
+            // a fact about this history that the estimate did not reach.
+            // A crossing over text the user has already seen is the one
+            // crossing no summary may answer, and the caller reports it.
+            self.provider_crossed = true;
+            if committed {
+              return Err(TurnFailure::Fatal(refusal));
+            }
+            // Otherwise the request was refused *before* anything was served*.
+            // Retrying it sends the same impossible request to the same window,
+            // and a failover would credit a backup with fixing what only
+            // shorter history fixes, so the attempt ends here: the turn loop
+            // answers a pre-content refusal the only way a window permits, by
+            // summarizing once and re-issuing.
+            return Err(TurnFailure::Aborted(TurnError::Aborted(
+              TurnStatus::Failed {
+                kind: ModelFailureKind::ContextOverflow,
+              },
+            )));
+          }
           // Output reached the user the moment it was emitted, so it is recorded on
           // the failure rather than inferred afterwards.
-          let mut failure = failure;
+          let mut failure = refusal;
           failure.partial_output_emitted = committed;
           failure
         }
@@ -928,11 +1170,14 @@ impl<'a> TurnLoop<'a> {
         let narrow = gaps
           .iter()
           .any(|gap| matches!(gap, CapabilityGap::ContextWindow { .. }));
-        let dropped = if narrow {
-          self.rebudget(turn_id.clone())?
-        } else {
-          0
-        };
+        if narrow {
+          self.rebudget(turn_id.clone())?;
+        }
+        // Whether the takeover request can actually be served: a backup whose
+        // window cannot hold the history that survives rebudget shortens
+        // nothing by taking over, and the epoch must say so.
+        let fitted = estimate_messages(&self.messages)
+          <= backup.capabilities().context_window.saturating_sub(1_024);
         let from = self.active_model();
         let epoch = Epoch {
           index: self.epoch_index() + 1,
@@ -947,11 +1192,12 @@ impl<'a> TurnLoop<'a> {
             to: to.clone(),
             kind: failure.kind,
             gaps,
-            // Whether history was actually shortened, not whether the backup's window
-            // is smaller: with one turn in flight there is nothing to drop, and a
-            // recorded reduction that never happened is exactly the false provenance
-            // this codebase refuses elsewhere.
-            compacted: dropped > 0,
+            // Whether the request the backup now receives actually fits
+            // its window — not merely whether turns were dropped or whether the
+            // window is smaller. A reduction that never happened and a takeover
+            // that cannot be served are both facts the epoch keeps, not
+            // provenance this runtime invents.
+            compacted: fitted,
           }),
         )?;
         self.emit(
@@ -1069,6 +1315,21 @@ impl<'a> TurnLoop<'a> {
     summary: &str,
     retained: usize,
   ) -> Result<u32, TurnError> {
+    self.compact_with(turn_id, summary, retained, None, None)
+  }
+
+  /// The compaction itself, with room for maintenance to hand it the
+  /// summary's place in the history: a stand-in the re-issue was measured
+  /// against becomes the summary, at the position it stands in.
+  fn compact_with(
+    &mut self,
+    turn_id: &TurnId,
+    summary: &str,
+    retained: usize,
+    summary_position: Option<usize>,
+    stand_in: Option<&Message>,
+  ) -> Result<u32, TurnError> {
+    let replaces_tail = summary_position.is_some();
     // `retained` counts the messages that survive *besides* the summary, which
     // is added on top. An empty context keeps nothing; any other context always
     // keeps its newest message, so a compaction always replaces a range.
@@ -1102,7 +1363,37 @@ impl<'a> TurnLoop<'a> {
     // Canonical first: the summary is durable before the live context forgets
     // the messages it replaced. It enters history as a user message: that is the
     // role providers accept mid-context, and the text itself says it is a summary.
-    let summary_message = Message::user(summary);
+    //
+    // A summary that stands *ahead of the retained tail* is what maintenance
+    // builds its re-issue on, and it is the one shape a window that just
+    // refused a request can be trusted with: its size is measured against the
+    // window before the ask is sent, and a stand-in of the summary's own
+    // reserve is what that measurement walks. A caller that has already put
+    // such a stand-in in the history passes it here, and the summary that
+    // answers takes its place where it stands.
+    let summary_message = if replaces_tail {
+      match stand_in {
+        // The stand-in is where the re-issue was measured, and a summary
+        // that outgrew it would cross the window the scan just measured.
+        // The text is kept to the stand-in's own bytes, cut whole at the
+        // last word boundary; what does not fit was never in the request
+        // the scan trusted anyway.
+        Some(stand_in) => {
+          let text = format!("{summary}\n{SUMMARY_MARK}");
+          let budget = stand_in.text().len().max(1);
+          let kept = match text[..budget.min(text.len())].rfind(' ') {
+            Some(edge) if edge > budget / 2 => &text[..edge],
+            _ => text.as_str(),
+          };
+          let mut message = stand_in.clone();
+          message.content = vec![pi_rs_core::ContentBlock::text(kept)];
+          message
+        }
+        None => Message::system(format!("{summary}\n{SUMMARY_MARK}")),
+      }
+    } else {
+      Message::user(summary)
+    };
     self.emit_message(
       Some(turn_id.clone()),
       AgentEvent::ContextSummary,
@@ -1119,8 +1410,14 @@ impl<'a> TurnLoop<'a> {
         replaces_through,
       }),
     )?;
+    // The summary stands where the messages it replaces stood, ahead of the
+    // retained tail: the order a reader meets the context in is the order
+    // the context means it.
     self.messages.drain(..removed);
-    self.messages.push(summary_message);
+    match summary_position {
+      Some(position) => self.messages.insert(position - removed, summary_message),
+      None => self.messages.insert(self.messages.len() - kept, summary_message),
+    }
     self.last_compaction = Some(Instant::now());
     self.emit(
       Some(turn_id.clone()),
@@ -1134,9 +1431,205 @@ impl<'a> TurnLoop<'a> {
     Ok(removed as u32)
   }
 
+  /// Ask the model for a summary of the older history and compact the live
+  /// context down to it plus a small retained tail.
+  ///
+  /// A dedicated request, never the turn's own round: the answer is context
+  /// maintenance, not the user's answer, and it must not be mistaken for a
+  /// committed reply. Nothing has been streamed when this runs — that is what
+  /// makes the re-issue legal — but the budget is spent honestly, so a turn
+  /// that summarizes spends one of its requests on the summary.
+  /// The request the turn would build if the oldest `oldest` messages were
+  /// replaced by one placeholder of summary size.
+
+  /// The summarization request for one prefix: the prefix, the instruction,
+  /// and the same system prompt the turn itself carries.
+  fn summary_ask(&self, oldest: usize, preamble: &Message) -> ModelRequest {
+    // The prefix rides whole, and the instruction asks at its end: what
+    // the provider is offered is what the prefix is, and what it cannot
+    // answer it answers with a refusal — which the summarization meets
+    // with the fixed text it cannot refuse.
+    let end = oldest.min(self.messages.len());
+    let mut messages = self.messages[..end].to_vec();
+    messages.push(preamble.clone());
+    let mut request =
+      ModelRequest::new(self.active_model(), self.provider().capabilities(), messages)
+        .with_thinking(self.thinking);
+    if let Some(system) = self.system.clone() {
+      request = request.with_system(system);
+    }
+    request
+  }
+
+  /// Ask the model for the summary that a refused request needs in its place.
+  ///
+  /// The request is built like the turn's own — same system prompt, same
+  /// history — with one trailing user message asking for a summary. The
+  /// request itself is a context request, not a tool request, so no tools are
+  /// exposed. It streams like any other round and it is charged to the turn's
+  /// request budget: the budget is what the caller pays for, and maintenance
+  /// spends it like an answer does.
+  fn summarize_oldest(
+    &mut self,
+    oldest: usize,
+    turn_id: &TurnId,
+    scope: &TurnId,
+    cancel: &CancelToken,
+    progress: &mut dyn TurnProgress,
+  ) -> Result<bool, TurnError> {
+    let total = self.messages.len();
+    let ask_limit = self.provider().capabilities().context_window;
+    let preamble = Message::user(SUMMARY_PREAMBLE);
+    // The prefix follows the history *as asked*: the question this turn was
+    // asked with stands at the end of the history, and maintenance exists to
+    // let that same request be carried again, not to summarize the question
+    // away and re-ask nothing.
+    let question_last = self.messages.last().is_some_and(|last| {
+      !self.turn_question.is_empty() && last.text() == self.turn_question
+    });
+    let end = if question_last && total > 1 {
+      total - 1
+    } else {
+      total
+    };
+    // An empty prefix from the caller is not "summarize nothing kept": it is
+    // the whole history, the only one a window that small can ask about.
+    let oldest = if oldest == 0 { end } else { oldest }.min(end).max(1);
+    eprintln!("SUM oldest={oldest} real={} askfits={}", self.messages.len(),
+      estimate_messages(&self.summary_ask(oldest, &preamble).messages) <= ask_limit);
+    // A window that cannot carry the prefix beside the instruction is asked
+    // the instruction alone, and its fixed text is what compaction keeps —
+    // the summary is *expected*, not absent. A window that can carry it is
+    // asked in full: an ask that drops the newest messages would throw away
+    // exactly what a small window cannot summarize around, and a re-issue
+    // planned beside messages the prefix never dropped would be a candidate
+    // that was never there to re-issue.
+    // The ask is the whole prefix beside the instruction — never a slice of
+    // it, which would silently drop the newest messages a small window
+    // cannot summarize around — and if that crosses the window, the ask is
+    // refused and the fixed text says so.
+    let request = self.summary_ask(oldest, &preamble);
+    let prefix: Vec<Message> = self.messages[..oldest].to_vec();
+    // An instruction the window cannot carry is no ask at all: the request
+    // would be refused before the history was ever offered, and the fixed
+    // text would say only what the arithmetic could have said for free.
+    // Where the instruction alone does not fit, there is no summarization
+    // to attempt, and the caller's refusal stands untouched.
+    if estimate_messages(&[Message::user(SUMMARY_INSTRUCTION)]) > ask_limit {
+      eprintln!("INSTRUCTION DOES NOT FIT");
+      return Ok(false);
+    }
+    // The summarization itself is a *request*, and the turn loop is bounded
+    // by requests: the budget is *checked* here, not merely spent. A loop
+    // that let maintenance consume the last request would end the turn with
+    // a summary nobody asked an answer for.
+    if self.requests.load(Ordering::SeqCst) >= self.max_requests {
+      self.diagnostic(
+        Some(turn_id.clone()),
+        DiagnosticLevel::Error,
+        "request budget exhausted before the summarization it needed",
+      )?;
+      return Err(TurnError::Exhausted);
+    }
+    // The caller decides whether maintenance can help; this is the single
+    // place a summarization request is spent, and the budget is *checked*
+    // here, never merely spent.
+    self.requests.fetch_add(1, Ordering::SeqCst);
+    let epoch = self.epoch_index();
+    let model = self.active_model();
+    self.emit(
+      Some(turn_id.clone()),
+      AgentEvent::ModelRequestStarted(ModelRequestStarted {
+        epoch,
+        model: model.clone(),
+        message_count: request.messages.len() as u32,
+        context_tokens_est: estimate_tokens(&request),
+        tools_exposed: 0,
+      }),
+    )?;
+    progress.on_request_started(&model);
+    let clock = Instant::now();
+    let attribution = StreamAttribution {
+      turn_id: turn_id.clone(),
+      session_id: self.session_id.clone(),
+      trace_id: self.trace_id.clone(),
+      epoch,
+      model,
+    };
+    // Progress is deliberately not wired to the deltas: a summary is not an
+    // answer, and streaming it would read as if the model had replied.
+    let mut silent = SilentProgress;
+    // The provider is read before the collector, which borrows the trace: the
+    // same split the turn's own attempt loop uses.
+    let provider = self.provider();
+    // The candidate's history, held aside while the ask is answered: the
+    // placeholder at the prefix's place, the whole tail after it verbatim.
+    let placeholder = summary_stand_in(ask_limit);
+    let mut candidate_history = self.messages[..oldest].to_vec();
+    candidate_history.push(placeholder.clone());
+    candidate_history.extend_from_slice(&self.messages[oldest + 1..]);
+    let mut collector = Collector::new(&mut silent, &mut *self.trace, attribution, cancel.clone());
+    let outcome = provider.stream(&request, &mut collector, cancel);
+    let duration_ms = elapsed_ms(clock);
+    let collector = collector;
+    // The answer decides what maintenance produced. A provider that
+    // *refused the summary itself* says the prefix cannot be represented
+    // inside the window even densely: compacting to a text the re-issue
+    // still will not fit would trade the caller's honest refusal for a
+    // second, worse one. That refusal is returned, unanswered. A failed or
+    // empty summarization, by contrast, is answered with a fixed text — the
+    // provider did not say the history is inexpressible, only that this
+    // round did not produce a summary.
+    let summary = match (&outcome, &collector.text) {
+      (Ok(_), text) if !text.trim().is_empty() => text.clone(),
+      (Err(failure), _) if failure.kind == ModelFailureKind::ContextOverflow => {
+        // The ask crossed the window: the history does not fit beside the
+        // instruction. The provider has still not refused to *summarize* —
+        // it refused to carry so much beside the ask — and the fixed text
+        // is what maintenance keeps from it: a summary of nothing, which
+        // says plainly that the window, not the model, ended the detail.
+        String::new()
+      }
+      _ => format!(
+        "Context maintenance ran at {duration_ms} ms without a usable summary; \
+         treat everything before this point as compacted."
+      ),
+    };
+    let usage = outcome.ok();
+    self.emit(
+      Some(turn_id.clone()),
+      AgentEvent::ModelRequestCompleted(ModelRequestCompleted {
+        epoch,
+        model: self.active_model(),
+        finish_reason: usage.as_ref().and_then(|u| u.finish_reason.clone()),
+        input_tokens: usage.as_ref().and_then(|u| u.input_tokens),
+        output_tokens: usage.as_ref().and_then(|u| u.output_tokens),
+        duration_ms,
+        tool_calls: 0,
+        reasoning_provenance: None,
+      }),
+    )?;
+    // `compact` runs against the history the candidate was measured with:
+    // the prefix it stood in for is gone, the placeholder stands where it
+    // stood, and the newest message is kept verbatim beside it.
+    // The history goes back exactly as the candidate measured it: the
+    // prefix drained, the summary in the placeholder's place and size, the
+    // tail kept verbatim beside it.
+    self.messages = candidate_history;
+    self.compact_with(scope, summary.trim(), total - oldest, Some(oldest + 1), Some(&placeholder))?;
+    Ok(true)
+  }
+
   /// Build the model request, consulting the context policy first.
   fn build_request(&mut self, turn_id: &TurnId) -> Result<ModelRequest, TurnError> {
     let capabilities = self.provider().capabilities();
+    // Maintenance decided, against the same measurement the build makes,
+    // that a summarized request fits this window. Answering the full
+    // history instead would decide twice, by two different questions — and
+    // the second answer would refuse the request the first one built.
+    if let Some(candidate) = self.maintenance_candidate.take() {
+      return Ok(candidate);
+    }
     let state = {
       let mut state = ContextState::zero(capabilities.context_window);
       state.context_epoch = self.context_epoch;
@@ -1149,9 +1642,34 @@ impl<'a> TurnLoop<'a> {
       // Nothing is in flight and no call is pending at this point, which is what
       // makes it the safe boundary.
       state.at_safe_boundary = true;
+      // Once this loop has watched a request cross the window, the policy
+      // stops advising and starts requiring: an explicit compact at the safe
+      // boundary, not another threshold it has already misjudged.
+      state.overflow_observed = self.overflow_seen;
       state
     };
     let decision = self.context.evaluate(&state);
+    // The hard bound, measured as a question rather than an assumption: is
+    // there any tail of this history — the newest messages, kept verbatim —
+    // beside which a summary stand-in and the request's own overhead would
+    // fit? If there is, maintenance has something it can keep, and the
+    // refusal belongs to the code that decides maintenance. If there is
+    // not, no request this window could carry exists, and the runtime says
+    // so without pretending otherwise.
+    if estimate_messages(&self.messages) + request_reserve(&capabilities) > capabilities.context_window
+    {
+      let reserve = summary_reserve(capabilities.context_window);
+      let carried = (1..=self.messages.len()).rev().any(|kept| {
+        let tail = &self.messages[self.messages.len() - kept..];
+        reserve + estimate_messages(tail) + request_reserve(&capabilities)
+          <= capabilities.context_window
+      });
+      if !carried {
+        return Err(TurnError::Aborted(TurnStatus::Failed {
+          kind: ModelFailureKind::ContextOverflow,
+        }));
+      }
+    }
     match decision.action {
       // Refusal is the honest answer to a request that cannot fit. Truncating
       // history here would silently change what the model was asked.
@@ -1175,9 +1693,14 @@ impl<'a> TurnLoop<'a> {
         reason,
         target_tokens,
       } => {
+        // Policy asked for a smaller history. Eviction is that request
+        // honoured: the oldest messages go, a recovery reference stays, and
+        // the estimate moves toward the target the policy named. Whether a
+        // *summarization* follows is decided once, by the code that owns the
+        // request budget and the provider's word — never by this pass,
+        // which has already rewritten the history an intercept would have
+        // measured its ask against.
         if self.evict_oldest(target_tokens, turn_id)? == 0 {
-          // Nothing could be dropped: the newest turn alone is over the target.
-          // The recommendation is the surface's again, so it stays visible.
           self.diagnostic(
             None,
             DiagnosticLevel::Warn,
@@ -1198,12 +1721,14 @@ impl<'a> TurnLoop<'a> {
     } else {
       Vec::new()
     };
+    let window = capabilities.context_window;
     let mut request = ModelRequest::new(self.active_model(), capabilities, self.messages.clone())
       .with_tools(tools)
       .with_thinking(self.thinking);
     if let Some(system) = self.system.clone() {
       request = request.with_system(system);
     }
+    let _ = window;
     Ok(request)
   }
 
@@ -1438,6 +1963,9 @@ enum TurnFailure {
   Cancelled,
   /// No model can serve the request.
   Fatal(ModelFailure),
+  /// The runtime itself refused to send: the request does not fit the window
+  /// that currently binds it. Not a provider failure — nothing was asked.
+  Aborted(TurnError),
   /// The trace could not be written.
   Sink(SinkError),
 }
@@ -1453,14 +1981,25 @@ impl From<TurnError> for TurnFailure {
     match error {
       TurnError::Sink(message) => Self::Sink(SinkError(message)),
       TurnError::Unavailable(failure) => Self::Fatal(failure),
-      // An aborted turn is not a provider failure, so it is reported as one whose
-      // phase says the runtime itself refused to send.
-      TurnError::Aborted(_) => Self::Fatal(ModelFailure::new(
-        ModelFailureKind::ContextOverflow,
-        FailurePhase::PreRequest,
-        "context refused the request",
-      )),
+      // An aborted turn is not a provider failure and never becomes one: it is
+      // the runtime's own refusal, told as itself. Exhaustion is the same
+      // kind of fact about the budget, not about the model.
+      TurnError::Aborted(status) => Self::Aborted(TurnError::Aborted(status)),
+      TurnError::Exhausted => Self::Aborted(TurnError::Exhausted),
     }
+  }
+}
+
+/// The turn's own error type for a failure that never leaves as a provider
+/// fault. Cancellation is the caller's command, not an error to report, and
+/// the other arms cannot occur at this boundary; each still names its shape
+/// rather than pretending otherwise.
+fn turn_error_of(failure: TurnFailure) -> TurnError {
+  match failure {
+    TurnFailure::Aborted(error) => error,
+    TurnFailure::Sink(error) => TurnError::Sink(error.0),
+    TurnFailure::Fatal(failure) => TurnError::Unavailable(failure),
+    TurnFailure::Cancelled => TurnError::Aborted(TurnStatus::Cancelled),
   }
 }
 
@@ -1631,6 +2170,119 @@ fn estimate_tokens(request: &ModelRequest) -> u64 {
   (bytes / 4).max(1) as u64
 }
 
+/// Is this request close enough to the provider's own bound that asking the
+/// model is worth a request: within a quarter-window of it, or over.
+///
+/// The two size views — the runtime's cheap estimate and the provider's real
+/// limit — do not agree exactly. Summarizing whenever the estimate is merely
+/// *under* the bound would ask a model for every small overflow, and asking
+/// costs a request. Summarizing only near or over it means the provider is
+/// consulted exactly when its answer is the only evidence that matters.
+
+
+/// The summarization instruction. The ask gate measures a request carrying
+/// this exact text, and the provider fixture distinguishes maintenance by it,
+/// so one definition has to serve both.
+const SUMMARY_PREAMBLE: &str = "Summarize in a few dense paragraphs.   Preserve the user's goal, every constraint, decisions taken, findings, and any unresolved   work. Reply with the summary alone.";
+
+/// The summarization instruction alone, for windows that cannot hold it
+/// beside even one message: the ask is then the instruction, and its
+/// answer — like the fixed text that answers a failed ask — describes the
+/// history it was not shown.
+/// The one phrase the summary instruction always carries, and the one
+/// phrase a summarized turn can never produce: it is how a provider's refusal
+/// is recognized as a refusal of the *ask* rather than of the turn.
+const SUMMARY_MARK: &str = "Reply with the summary alone";
+
+const SUMMARY_INSTRUCTION: &str = "Summarize in a few dense paragraphs. Preserve the user's goal, every constraint, decisions taken, findings, and any unresolved work. Reply with the summary alone.";
+
+/// A summary's own bound for a window: a quarter of it, and at least one
+/// token, so that even a zero-token window can be maintained. A summary is
+/// asked for dense and measured at its measured worst; the fraction is the
+/// room maintenance leaves for it beside what survives.
+fn summary_reserve(window: u64) -> u64 {
+  (window / 4).max(1)
+}
+
+/// What a summary costs, carried as the message it stands in for: the
+/// reserve is what a summary is *expected* to cost, and the stand-in is
+/// sized in the estimator's own units — four bytes to a token — so every
+/// decision about a summarized request measures the same shape the
+/// re-issue will actually carry.
+fn summary_stand_in(window: u64) -> Message {
+  Message::system("s".repeat((summary_reserve(window) * 4) as usize))
+}
+
+/// The re-issue candidate for a reference size, named for the scan that
+/// asks it twice: whether the request fits, and whether it is near enough
+/// the bound to be worth the ask.
+fn reissue_of(
+  messages: &[Message],
+  prefix: &usize,
+  system: &Option<String>,
+  capabilities: &ModelCapabilities,
+  model: &ModelRef,
+  thinking: pi_rs_core::ThinkingLevel,
+) -> ModelRequest {
+  summarized_candidate(messages, *prefix, system.as_ref(), capabilities, model, thinking)
+}
+
+/// The summarized request the re-issue would carry for a full history: a
+/// summary stand-in in place of the prefix, the tail kept verbatim, no
+/// tools, same system prompt. This is the one shape every decision about
+/// what a summarized request costs — the candidate scan, the ask-size
+/// shrink, and the intercept's arithmetic — has to share.
+
+/// The summarized request the re-issue would carry: the oldest `prefix`
+/// messages replaced by one summary stand-in of the reserve size, the rest
+/// kept verbatim, no tools, the same system prompt. Every decision about
+/// what a summarized request costs — the candidate scan, the ask shrink,
+/// and the intercept's fit test — measures this one shape.
+fn summarized_candidate(
+  messages: &[Message],
+  prefix: usize,
+  system: Option<&String>,
+  capabilities: &ModelCapabilities,
+  model: &ModelRef,
+  thinking: pi_rs_core::ThinkingLevel,
+) -> ModelRequest {
+  // The scan plans the ask; compaction writes the summary, and a summary
+  // longer than the stand-in the scan walked would make the plan a promise
+  // the history does not keep. The *first* summary of a compaction is what
+  // the request carries: the stand-in stands only for what is being asked
+  // away, not for what compaction already wrote.
+  if messages.first().is_some_and(|first| {
+    first.role == pi_rs_core::Role::System && first.text().contains(SUMMARY_MARK)
+  }) {
+    let mut kept = messages.to_vec();
+    if prefix > 0 {
+      kept.splice(..prefix, std::iter::empty());
+    }
+    let mut request =
+      ModelRequest::new(model.clone(), capabilities.clone(), kept).with_thinking(thinking);
+    if let Some(system) = system {
+      request = request.with_system(system.clone());
+    }
+    return request;
+  }
+  let mut rebuilt = Vec::with_capacity(messages.len() - prefix + 1);
+  rebuilt.push(summary_stand_in(capabilities.context_window));
+  rebuilt.extend_from_slice(&messages[prefix..]);
+  let mut request =
+    ModelRequest::new(model.clone(), capabilities.clone(), rebuilt).with_thinking(thinking);
+  if let Some(system) = system {
+    request = request.with_system(system.clone());
+  }
+  request
+}
+
+/// What a request carries beside its messages: the system prompt and the
+/// tool schemas are measured with the history, not after it.
+fn request_reserve(capabilities: &pi_rs_core::ModelCapabilities) -> u64 {
+  let _ = capabilities;
+  1
+}
+
 /// Rough token estimate for history alone.
 fn estimate_messages(messages: &[Message]) -> u64 {
   let bytes: usize = messages.iter().map(estimate_message_bytes).sum();
@@ -1673,6 +2325,23 @@ mod tests {
   struct Recorder(Arc<Mutex<Vec<Recorded>>>);
 
   impl Recorder {
+    /// Every diagnostic message, newest last, whatever the event's kind.
+    fn events_matching(&self, needle: &str) -> Vec<String> {
+      self
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, _, payload)| {
+          payload
+            .to_string()
+            .to_lowercase()
+            .contains(&needle.to_lowercase())
+        })
+        .map(|(_, _, payload)| payload.to_string())
+        .collect()
+    }
+
     fn kinds(&self) -> Vec<String> {
       self
         .0
@@ -1947,6 +2616,95 @@ mod tests {
     copy.attempts = failure.attempts;
     copy.model = failure.model.clone();
     copy
+  }
+
+  /// A provider that refuses whole requests, in the listed order, and
+  /// answers whatever rounds remain beside them. A refusal is not an event
+  /// a provider emits: it is the failure the request ends with.
+  struct RefusingOnce {
+    failures: Mutex<Vec<ModelFailureKind>>,
+    answers: Scripted,
+    window: u64,
+    served: AtomicUsize,
+  }
+
+  impl RefusingOnce {
+    fn new(failures: Vec<ModelFailureKind>) -> Self {
+      RefusingOnce {
+        failures: Mutex::new(failures),
+        answers: Scripted::new("overflow", vec![text("the answer")]),
+        window: Scripted::new("overflow", Vec::new())
+          .capabilities()
+          .context_window,
+        served: AtomicUsize::new(0),
+      }
+    }
+
+    fn window(mut self, window: u64) -> Self {
+      self.window = window;
+      self
+    }
+
+    fn with_answer(mut self, answer: &str) -> Self {
+      self.answers = Scripted::new("overflow", vec![text(answer)]);
+      self
+    }
+
+    /// The fixture answers summary requests itself, honestly and from its
+    /// own window: an ask that does not fit is refused the way any other
+    /// request would be. The scripted rounds are spent on the turn alone.
+    fn answers_summaries(self) -> Self {
+      self
+    }
+
+    /// Requests the fixture actually answered, summaries included.
+    fn answered(&self) -> usize {
+      self.served.load(Ordering::SeqCst)
+    }
+  }
+
+  impl ModelProvider for RefusingOnce {
+    fn provider_id(&self) -> &str {
+      "test"
+    }
+
+    fn model(&self) -> &ModelRef {
+      static MODEL: std::sync::OnceLock<ModelRef> = std::sync::OnceLock::new();
+      MODEL.get_or_init(|| ModelRef::new("test", "overflow"))
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+      ModelCapabilities {
+        context_window: self.window,
+        ..self.answers.capabilities()
+      }
+    }
+
+    fn stream(
+      &self,
+      request: &ModelRequest,
+      sink: &mut dyn ProviderEventSink,
+      _cancel: &CancelToken,
+    ) -> Result<CompletionUsage, ModelFailure> {
+      if is_summary_request(request) {
+        // A summary is answered, not scripted: the scripted rounds belong
+        // to the turn. One answered request, one sentence.
+        self.served.fetch_add(1, Ordering::SeqCst);
+        sink.emit(&ProviderEvent::TextDelta("summarized.".into()));
+        return Ok(CompletionUsage::unknown());
+      }
+      let mut failures = self.failures.lock().unwrap();
+      if !failures.is_empty() {
+        return Err(ModelFailure::new(
+          failures.remove(0),
+          FailurePhase::WaitingForResponse,
+          "context overflow",
+        ));
+      }
+      drop(failures);
+      self.served.fetch_add(1, Ordering::SeqCst);
+      self.answers.stream(request, sink, _cancel)
+    }
   }
 
   fn text(value: &str) -> Vec<ProviderEvent> {
@@ -3508,8 +4266,8 @@ mod tests {
         .iter()
         .map(Message::text)
         .collect::<Vec<_>>(),
-      ["three done", "a summary"],
-      "the summary follows the one message retained across it"
+      ["a summary", "three done"],
+      "the summary stands ahead of the one message retained across it"
     );
     let removed = harness.compact(&turn, "a summary of a summary", 0).unwrap();
     assert_eq!(
@@ -3612,6 +4370,379 @@ mod tests {
         .as_str()
         .is_some_and(|hash| hash.len() == 64),
       "the reference names stored bytes by digest: {summary:?}"
+    );
+  }
+  /// Behaves like the providers it stands in for: a request that crosses the
+  /// window is refused, anything else is answered from the next scripted
+  /// round. The refusals are therefore *caused* by the history, never played.
+  /// Behaves like the providers it stands in for: a request that crosses the
+  /// window is refused, anything else is answered from the next scripted
+  /// round. The refusals are therefore *caused* by the history, never played.
+  struct OverflowProvider {
+    window: u64,
+    template: ModelCapabilities,
+    rounds: Vec<String>,
+    asks: AtomicUsize,
+    answers: AtomicUsize,
+  }
+
+  impl OverflowProvider {
+    fn summary_text(&self) -> &str {
+      "su"
+    }
+
+    /// The provider refuses the summarization ask when even that — a prefix
+    /// no longer than half its window — crosses the window: maintenance can
+    /// then never produce a summary at all.
+    fn summary_too_big(&self) -> bool {
+      self.window < 2
+    }
+
+    fn new(window: u64, rounds: Vec<String>) -> Self {
+      Self {
+        window,
+        template: Scripted::new("overflow", Vec::new()).capabilities(),
+        rounds,
+        asks: AtomicUsize::new(0),
+        answers: AtomicUsize::new(0),
+      }
+    }
+  }
+
+  /// What the provider's own bound is on a request: tokens, four bytes to
+  /// a token, as the runtime's estimator counts them.
+  fn request_bytes(request: &ModelRequest) -> u64 {
+    estimate_messages(&request.messages)
+  }
+
+  /// True for the request [`summarize_oldest`] sends: the instruction is the
+  /// last message, and it asks for a summary. A fixture that shares one
+  /// ordered list of rounds between a turn and the maintenance inside it has
+  /// to tell the two requests apart, or a summary is served where an answer
+  /// belongs — the precise confusion the runtime must not create.
+  fn is_summary_request(request: &ModelRequest) -> bool {
+    request
+      .messages
+      .last()
+      .is_some_and(|m| m.text().contains(super::SUMMARY_MARK))
+  }
+
+  impl ModelProvider for OverflowProvider {
+    fn provider_id(&self) -> &str {
+      "test"
+    }
+
+    fn model(&self) -> &ModelRef {
+      static MODEL: std::sync::OnceLock<ModelRef> = std::sync::OnceLock::new();
+      MODEL.get_or_init(|| ModelRef::new("test", "overflow"))
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+      ModelCapabilities {
+        context_window: self.window,
+        ..self.template.clone()
+      }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn stream(
+      &self,
+      request: &ModelRequest,
+      sink: &mut dyn ProviderEventSink,
+      _cancel: &CancelToken,
+    ) -> Result<CompletionUsage, ModelFailure> {
+      self.asks.fetch_add(1, Ordering::SeqCst);
+      // Maintenance is answered from its own text, so the turn's rounds are
+      // never consumed by the summarization inside it.
+      // A maintenance request is answered at the size the runtime expects a
+      // summary to weigh — never at the size of the prefix it summarizes,
+      // which is the very bulk the request exists to replace. The provider
+      // that refuses at its window refuses the *asked* request; a summary
+      // asked inside its window is answered.
+      if is_summary_request(request) {
+        // The instruction alone is answerable at any window: it asks the
+        // model to compact, and the fixed text stands when it cannot. The
+        // summary_too_big bound belongs to the full-ask fixture only.
+        let instruction_only = request.messages.len() == 1
+          && request.messages[0]
+            .text()
+            .starts_with("Summarize the conversation");
+        if !instruction_only && (request_bytes(request) > self.window || self.summary_too_big()) {
+          return Err(ModelFailure::new(
+            ModelFailureKind::ContextOverflow,
+            pi_rs_core::FailurePhase::WaitingForResponse,
+            "context overflow",
+          ));
+        }
+        sink.emit(&ProviderEvent::TextDelta(self.summary_text().to_string()));
+        return Ok(CompletionUsage {
+          input_tokens: None,
+          output_tokens: None,
+          finish_reason: None,
+          certainty: pi_rs_core::CompletionCertainty::Certain,
+        });
+      }
+      if request_bytes(request) > self.window {
+        return Err(ModelFailure::new(
+          ModelFailureKind::ContextOverflow,
+          pi_rs_core::FailurePhase::WaitingForResponse,
+          "context overflow",
+        ));
+      }
+      let round = self.answers.fetch_add(1, Ordering::SeqCst);
+      let served = self.rounds[round.min(self.rounds.len() - 1)].clone();
+      sink.emit(&ProviderEvent::TextDelta(served));
+      Ok(CompletionUsage {
+        input_tokens: None,
+        output_tokens: None,
+        finish_reason: None,
+        certainty: pi_rs_core::CompletionCertainty::Certain,
+      })
+    }
+  }
+
+  /// Streams `text`, then refuses for size: a crossing the provider reports
+  /// over content the user has already seen.
+  struct MidStreamOverflow {
+    template: ModelCapabilities,
+    text: String,
+  }
+
+  impl MidStreamOverflow {
+    fn new(text: &str) -> Self {
+      Self {
+        template: Scripted::new("mid", Vec::new()).capabilities(),
+        text: text.into(),
+      }
+    }
+  }
+
+  impl ModelProvider for MidStreamOverflow {
+    fn provider_id(&self) -> &str {
+      "test"
+    }
+
+    fn model(&self) -> &ModelRef {
+      static MODEL: std::sync::OnceLock<ModelRef> = std::sync::OnceLock::new();
+      MODEL.get_or_init(|| ModelRef::new("test", "mid"))
+    }
+
+    fn capabilities(&self) -> ModelCapabilities {
+      self.template.clone()
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn stream(
+      &self,
+      _request: &ModelRequest,
+      sink: &mut dyn ProviderEventSink,
+      _cancel: &CancelToken,
+    ) -> Result<CompletionUsage, ModelFailure> {
+      sink.emit(&ProviderEvent::TextDelta(self.text.clone()));
+      Err(ModelFailure::new(
+        ModelFailureKind::ContextOverflow,
+        pi_rs_core::FailurePhase::WaitingForResponse,
+        "context overflow mid-stream",
+      ))
+    }
+  }
+
+  /// Histories whose size is arithmetic rather than fixture archaeology: a
+  /// text block counts its bytes, the estimate divides by four, so four
+  /// bytes of text is a token and a message under four bytes is one.
+  fn filler_history_exact(messages: usize) -> Vec<Message> {
+    (0..messages).map(|_| Message::user("xxxx")).collect::<Vec<_>>()
+  }
+
+  fn refused(error: &TurnError) -> bool {
+    matches!(
+      error,
+      TurnError::Aborted(TurnStatus::Failed { kind })
+        if *kind == ModelFailureKind::ContextOverflow
+    )
+  }
+
+  #[test]
+  fn a_second_refusal_ends_the_turn_instead_of_summarizing_again() {
+    // One message fits its window; three do not. Maintenance is possible —
+    // a prefix can be summarized and asked — and the provider answers, yet
+    // the summarized history *alone* still crosses the window, because a
+    // summary costs its reserve even when it replaces one token. The loop
+    // reports the second refusal rather than burn a second summarization on
+    // a question it already asked.
+    // A fifth message keeps the history over the window; the newest four
+    // messages are what survives summarization, and the question beside them
+    // fits: the prefix that maintenance keeps is a *prefix*, not the whole
+    // history a window has already refused.
+    let history = filler_history_exact(5);
+
+    // A provider that refuses every turn request: the first refusal asks
+    // for maintenance, and the refused re-issue of the summarized history
+    // ends the turn with the second one.
+    let provider = RefusingOnce::new(vec![
+      ModelFailureKind::ContextOverflow,
+      ModelFailureKind::ContextOverflow,
+    ])
+    .window(8);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, 2);
+    let mut trace = Recorder::default();
+    let mut harness = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    );
+    harness.messages_mut().extend(history);
+
+    let error = harness
+      .run_turn("x", &CancelToken::new(), &mut SilentProgress)
+      .expect_err("the second refusal is the turn's result");
+    assert!(refused(&error), "{error:?}");
+    for line in trace.diagnostics() {
+      eprintln!("DIAG2 {line}");
+    }
+    assert_eq!(
+      trace.count("context_compaction_epoch"),
+      1,
+      "exactly the summarization's epoch — the refusal that follows reports, it does not reduce"
+    );
+  }
+
+  #[test]
+  fn a_summarization_is_not_an_answer_when_the_turn_cannot_be_issued() {
+    // The newest turn alone crosses the window: no prefix leaves a request
+    // that fits, so there is nothing maintenance can do. The runtime's own
+    // refusal stands, and no text that a summarization might have produced
+    // is ever passed off as the turn's answer.
+    let history = filler_history_exact(1);
+    assert_eq!(estimate_messages(&history), 1);
+    let provider = OverflowProvider::new(0, vec!["never reached".into()]);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, 3);
+    let mut trace = Recorder::default();
+    let mut harness = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    );
+    harness.messages_mut().extend(history);
+
+    let error = harness
+      .run_turn("late question", &CancelToken::new(), &mut SilentProgress)
+      .expect_err("a history that cannot fit any window is refused");
+    assert!(refused(&error), "{error:?}");
+    assert_eq!(
+      provider.asks.load(Ordering::SeqCst),
+      0,
+      "the refusal is the runtime's own: nothing was asked of the model"
+    );
+  }
+
+  #[test]
+  fn an_overflowed_request_is_answered_by_summarizing_and_the_turn_continues() {
+    // The provider refuses the first request outright, and maintenance is
+    // what makes the next one answerable: the summarization speaks, the
+    // re-issue is answered, and no epoch — which would say a model stopped
+    // answering — is opened for maintenance.
+    //
+    // The window is the provider's own: five tokens of history inside a
+    // window of ninety-six is not an overflow by any measurement, and the
+    // fixture refuses the turn anyway. That is the situation this path
+    // exists for — the request goes because the estimate says it fits, and
+    // the provider's word is what maintenance answers — and it is also the
+    // only window small enough that summarizing one of five messages is
+    // something a test can see.
+    let history = filler_history_exact(5);
+    assert_eq!(estimate_messages(&history), 5);
+    // The summarized re-issue is what maintenance aims at, and a fixture
+    // that refused its own answer would prove nothing about that request
+    // being answered: the answer fits inside the window.
+    let provider = RefusingOnce::new(vec![ModelFailureKind::ContextOverflow])
+      .window(8)
+      .answers_summaries().with_answer("the answer");
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, 5);
+    let mut trace = Recorder::default();
+    let mut harness = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    );
+    harness.messages_mut().extend(history);
+
+    let response = match harness.run_turn("late question", &CancelToken::new(), &mut SilentProgress)
+    {
+      Ok(response) => response,
+      Err(error) => {
+        for line in trace.diagnostics() {
+          eprintln!("DIAG1 {line}");
+        }
+        for kind in trace.kinds() {
+          eprintln!("KIND1 {kind}");
+        }
+        panic!("the turn completes after maintenance: {error:?}");
+      }
+    };
+    assert_eq!(response.text, "the answer");
+    assert_eq!(response.requests, 3, "the summary spent one request");
+    assert_eq!(
+      provider.answered(),
+      2,
+      "one refused question, one summarization, one answer"
+    );
+    assert_eq!(trace.count("context_compaction_epoch"), 1);
+    assert_eq!(
+      trace.count("model_epoch_started"),
+      0,
+      "summarizing is maintenance, not failover"
+    );
+  }
+
+
+  #[test]
+  fn a_mid_stream_overflow_is_reported_not_summarized() {
+    // A provider that reports the window crossed *after* streaming describes
+    // content already committed. No summary can take that back, so the loop
+    // reports the failure exactly as the provider gave it.
+    // The provider streamed content and *then* reported the crossing. The
+    // committed text is why the loop may not answer this by summarizing.
+    let provider = MidStreamOverflow::new("committed text");
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let mut harness = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    );
+    let error = harness
+      .run_turn("x", &CancelToken::new(), &mut SilentProgress)
+      .expect_err("the provider refused mid-stream");
+    assert!(matches!(error, TurnError::Unavailable(_)), "{error:?}");
+    assert_eq!(
+      trace.count("context_compaction_epoch"),
+      0,
+      "a crossing reported over streamed content is reported, not rewritten"
+    );
+    assert_eq!(
+      trace.count("context_compaction_epoch"),
+      0,
+      "committed content is never rewritten by a summary the caller never asked for"
     );
   }
 }
