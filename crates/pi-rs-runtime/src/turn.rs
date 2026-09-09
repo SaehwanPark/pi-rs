@@ -23,7 +23,8 @@ use std::time::Instant;
 
 use pi_rs_core::{
   AgentEvent, AssistantDelta, AttributedMessage, BlobRef, CancelToken, CapabilityGap, ContentBlock,
-  ContextAction, ContextPolicy, ContextReduced, ContextState, Diagnostic, DiagnosticLevel,
+  ContextAction, ContextCompactionCompleted, ContextCompactionEpoch, ContextCompactionStarted,
+  ContextLevel, ContextPolicy, ContextReduced, ContextState, Diagnostic, DiagnosticLevel,
   EpochReason, EventEnvelope, EventMeta, EventSink, FailurePhase, Message, ModelCapabilities,
   ModelEpochStarted, ModelFailover, ModelFailure, ModelFailureKind, ModelProvider, ModelRef,
   ModelRequest, ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta,
@@ -262,6 +263,15 @@ pub struct TurnLoop<'a> {
   last_compaction: Option<Instant>,
   /// Last provider-reported input tokens, preferred over any estimate.
   measured_input_tokens: Option<u64>,
+  /// Envelopes this loop produced. Journal positions come from the trace, and
+  /// compaction needs them: the epoch names the canonical range it replaces,
+  /// and a loop that cannot cite positions cites none.
+  envelopes: Vec<EventEnvelope>,
+  /// Journal bounds that predate this loop — a resumed session's earlier
+  /// events — so a compaction after resume still names the full range it
+  /// replaces. Stored as bounds, not the log itself: the loop cites history, it
+  /// never replays it.
+  history: Option<(pi_rs_core::EventSeq, pi_rs_core::EventSeq)>,
 }
 
 impl<'a> TurnLoop<'a> {
@@ -301,6 +311,8 @@ impl<'a> TurnLoop<'a> {
       context_epoch: 0,
       last_compaction: None,
       measured_input_tokens: None,
+      envelopes: Vec::new(),
+      history: None,
     }
   }
 
@@ -387,6 +399,11 @@ impl<'a> TurnLoop<'a> {
   }
 
   /// Model-visible history so far.
+  /// Test-visible view of the live model context.
+  pub fn messages_mut(&mut self) -> &mut Vec<Message> {
+    &mut self.messages
+  }
+
   pub fn messages(&self) -> &[Message] {
     &self.messages
   }
@@ -558,7 +575,61 @@ impl<'a> TurnLoop<'a> {
     }
     let mut envelope = EventEnvelope::new(meta, event);
     self.trace.emit(&mut envelope)?;
+    self.envelopes.push(envelope.clone());
     Ok(envelope)
+  }
+
+  /// The oldest journal position this loop can cite.
+  ///
+  /// A compaction replaces the whole model-visible window: everything from the
+  /// start of the journal, whether the records were written by this process or
+  /// restored before it started. That is always position one of a durable
+  /// session, and `EventSeq(0)` for a purely in-memory loop with no journal.
+  fn first_cited_seq(&self) -> pi_rs_core::EventSeq {
+    self
+      .history
+      .map(|(first, _)| first)
+      .or_else(|| {
+        self
+          .envelopes
+          .iter()
+          .find_map(|envelope| envelope.meta.seq)
+          .map(|seq| {
+            if seq.0 == 1 {
+              seq
+            } else {
+              pi_rs_core::EventSeq(0)
+            }
+          })
+      })
+      .unwrap_or(pi_rs_core::EventSeq(0))
+  }
+
+  /// The newest journal position this loop can cite, if any trace reported one.
+  fn last_cited_seq(&self) -> pi_rs_core::EventSeq {
+    self
+      .envelopes
+      .iter()
+      .filter_map(|envelope| envelope.meta.seq)
+      .max()
+      .into_iter()
+      .chain(self.history.map(|(_, last)| last))
+      .max()
+      .unwrap_or(pi_rs_core::EventSeq(0))
+  }
+
+  /// Declare the journal bounds of history this loop inherited but did not emit.
+  ///
+  /// A resumed loop is handed messages, not envelopes; without this, a
+  /// compaction after resume would name a range that silently omits everything
+  /// the previous run wrote.
+  pub fn with_cited_history(
+    mut self,
+    first: pi_rs_core::EventSeq,
+    last: pi_rs_core::EventSeq,
+  ) -> Self {
+    self.history = Some((first, last));
+    self
   }
 
   fn emit_message(
@@ -970,6 +1041,97 @@ impl<'a> TurnLoop<'a> {
       )?;
     }
     Ok(dropped)
+  }
+
+  /// Replace the oldest model-visible messages with a summary at this safe
+  /// boundary, opening a durable compaction epoch.
+  ///
+  /// This is the summarizing tier of the reduction ladder: eviction loses whole
+  /// turns, a summary keeps their substance. The caller owns what the summary
+  /// says — typically a model-written condensation obtained through the same
+  /// provider — because deciding what to keep is a judgment the loop does not
+  /// make. What the loop guarantees is the bookkeeping:
+  ///
+  /// - the summary enters canonical history as a message, so the canonical trace
+  ///   still holds every word and a reader of the session log finds what replaced
+  ///   the window;
+  /// - a `ContextCompactionEpoch` opens in the journal, naming the summary
+  ///   payload and the inclusive range of journal positions it replaces, so
+  ///   "the model saw a summary" is auditable and reversible in principle;
+  /// - the live context becomes the retained tail plus the summary.
+  ///
+  /// Restoration does not yet consume epoch records: a resumed session replays
+  /// the full log, which is correct but not compact. That consumption belongs
+  /// with the reduction policy that will call this at window pressure.
+  pub fn compact(
+    &mut self,
+    turn_id: &TurnId,
+    summary: &str,
+    retained: usize,
+  ) -> Result<u32, TurnError> {
+    // `retained` counts the messages that survive *besides* the summary, which
+    // is added on top. An empty context keeps nothing; any other context always
+    // keeps its newest message, so a compaction always replaces a range.
+    let kept = if self.messages.is_empty() {
+      0
+    } else {
+      // One slot is reserved for the summary itself, so `retained` counts only
+      // the messages that survive *besides* it. It may be zero: then only the
+      // summary stands, and a one-message context still loses its only message.
+      retained.min(self.messages.len().saturating_sub(1))
+    };
+    let removed = self.messages.len() - kept;
+    if removed == 0 {
+      // Nothing to compact: summarizing a single-message context would open an
+      // epoch that replaced no range.
+      return Ok(0);
+    }
+    // Positions must be read before anything new is appended: the replaced
+    // range ends at the newest record that existed when compaction began.
+    let replaces_from = self.first_cited_seq();
+    let replaces_through = self.last_cited_seq();
+    self.context_epoch += 1;
+    self.emit(
+      Some(turn_id.clone()),
+      AgentEvent::ContextCompactionStarted(ContextCompactionStarted {
+        level: ContextLevel::L1Ordinary,
+        reason: format!("summarizing {removed} oldest messages"),
+      }),
+    )?;
+
+    // Canonical first: the summary is durable before the live context forgets
+    // the messages it replaced. It enters history as a user message: that is the
+    // role providers accept mid-context, and the text itself says it is a summary.
+    let summary_message = Message::user(summary);
+    self.emit_message(
+      Some(turn_id.clone()),
+      AgentEvent::ContextSummary,
+      &summary_message,
+    )?;
+
+    let summary_ref = self.trace.put_payload(summary.as_bytes())?;
+    self.emit(
+      Some(turn_id.clone()),
+      AgentEvent::ContextCompactionEpoch(ContextCompactionEpoch {
+        context_epoch: self.context_epoch,
+        summary: summary_ref,
+        replaces_from,
+        replaces_through,
+      }),
+    )?;
+    self.messages.drain(..removed);
+    self.messages.push(summary_message);
+    self.last_compaction = Some(Instant::now());
+    self.emit(
+      Some(turn_id.clone()),
+      AgentEvent::ContextCompactionCompleted(ContextCompactionCompleted {
+        level: ContextLevel::L1Ordinary,
+        removed_messages: removed as u32,
+        retained_messages: kept as u32,
+        context_epoch: self.context_epoch,
+      }),
+    )?;
+    Ok(removed as u32)
   }
 
   /// Build the model request, consulting the context policy first.
@@ -1505,7 +1667,8 @@ mod tests {
   /// One recorded event: its turn, its wire kind, and its payload.
   type Recorded = (Option<TurnId>, String, serde_json::Value);
 
-  /// Events as they were emitted, before any store assigns sequence numbers.
+  /// Events as they were emitted. Sequence numbers are stamped like a durable
+  /// log so tests can assert on journal coordinates, not only on kinds.
   #[derive(Clone, Default)]
   struct Recorder(Arc<Mutex<Vec<Recorded>>>);
 
@@ -1570,11 +1733,9 @@ mod tests {
         .and_then(|value| value.as_str())
         .unwrap_or("?")
         .to_string();
-      self
-        .0
-        .lock()
-        .unwrap()
-        .push((envelope.meta.turn_id.clone(), kind, payload));
+      let mut recorded = self.0.lock().unwrap();
+      envelope.meta.seq = Some(pi_rs_core::EventSeq(recorded.len() as u64 + 1));
+      recorded.push((envelope.meta.turn_id.clone(), kind, payload));
       Ok(())
     }
 
@@ -1582,6 +1743,20 @@ mod tests {
       // No blob store in these tests: reduction must still be reported, which is
       // what the `None` path exercises.
       Ok(None)
+    }
+  }
+
+  impl Recorder {
+    /// The payload of every event of a kind, in emission order.
+    fn all(&self, kind: &str) -> Vec<serde_json::Value> {
+      self
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, k, _)| k == kind)
+        .map(|(_, _, payload)| payload.clone())
+        .collect()
     }
   }
 
@@ -3229,6 +3404,214 @@ mod tests {
         .diagnostics()
         .iter()
         .any(|message| message.contains("compaction"))
+    );
+  }
+
+  #[test]
+  fn compaction_opens_a_durable_epoch_and_leaves_the_summary_visible() {
+    let provider = Scripted::new("compacted", vec![text("ok")]);
+    let tools = registry_with(Vec::new());
+    let policy =
+      pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, PRESSURED_WINDOW);
+    let mut trace = Recorder::default();
+    let harness = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    );
+
+    let turn = TurnId::new();
+    // The loop starts from a resumed session: two durable user messages at
+    // journal positions one and two, neither of which this process replayed.
+    let mut harness = harness.with_cited_history(pi_rs_core::EventSeq(1), pi_rs_core::EventSeq(2));
+    harness
+      .run_turn("first question", &CancelToken::new(), &mut SilentProgress)
+      .expect("the round completes");
+    harness
+      .messages_mut()
+      .retain(|message| message.text() != "ok");
+    let removed = harness
+      .compact(&turn, "the user asked about X; nothing answered yet", 1)
+      .expect("compaction records");
+    assert_eq!(removed, 1, "one message left the visible window");
+    assert_eq!(
+      harness
+        .messages()
+        .iter()
+        .map(Message::text)
+        .collect::<Vec<_>>(),
+      ["the user asked about X; nothing answered yet"],
+      "the summary is the whole visible history"
+    );
+    assert_eq!(harness.context_epoch, 1, "the first epoch is epoch one");
+
+    let kinds = trace.kinds();
+    let position = |wanted: &str| kinds.iter().position(|kind| *kind == wanted);
+    let started = position("context_compaction_started").expect("a start is recorded");
+    let summary = position("context_summary").expect("the summary is an event");
+    let epoch = position("context_compaction_epoch").expect("the epoch is durable");
+    let completed = position("context_compaction_completed").expect("a completion is recorded");
+    assert!(
+      started < summary && summary < epoch && epoch < completed,
+      "start, summary, epoch, completion: {kinds:?}"
+    );
+
+    let epoch_payload = trace.find("context_compaction_epoch").unwrap();
+    assert_eq!(epoch_payload["context_epoch"], 1);
+    assert!(
+      epoch_payload["summary"].is_null(),
+      "the recorder holds no blob store, so no recovery reference exists"
+    );
+    let completed_payload = trace.find("context_compaction_completed").unwrap();
+    assert_eq!(completed_payload["removed_messages"], 1);
+    assert_eq!(completed_payload["retained_messages"], 0);
+  }
+
+  #[test]
+  fn a_second_compaction_claims_the_next_epoch() {
+    // Three real rounds: each answer is an emitted envelope, so the epoch can
+    // name journal positions the way a durable trace would.
+    let provider = Scripted::new(
+      "twice",
+      vec![text("one done"), text("two done"), text("three done")],
+    );
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let mut harness = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    );
+
+    let turn = TurnId::new();
+    for label in ["one", "two", "three"] {
+      harness
+        .run_turn(label, &CancelToken::new(), &mut SilentProgress)
+        .expect("the round completes");
+    }
+    // Six live messages: three prompts, three answers. Keep one.
+    let removed = harness.compact(&turn, "a summary", 1).unwrap();
+    assert_eq!(removed, 5, "everything but the newest message left");
+    assert_eq!(
+      harness
+        .messages()
+        .iter()
+        .map(Message::text)
+        .collect::<Vec<_>>(),
+      ["three done", "a summary"],
+      "the summary follows the one message retained across it"
+    );
+    let removed = harness.compact(&turn, "a summary of a summary", 0).unwrap();
+    assert_eq!(
+      removed, 2,
+      "summary plus the one retained message compact again"
+    );
+    assert_eq!(
+      harness
+        .messages()
+        .iter()
+        .map(Message::text)
+        .collect::<Vec<_>>(),
+      ["a summary of a summary"],
+      "retaining nothing leaves only the second summary"
+    );
+
+    let epochs = trace.all("context_compaction_epoch");
+    assert_eq!(epochs.len(), 2);
+    assert_eq!(epochs[0]["context_epoch"], 1);
+    assert_eq!(
+      epochs[1]["context_epoch"], 2,
+      "epochs are numbered in order"
+    );
+  }
+
+  #[test]
+  fn a_durable_epoch_names_the_journal_range_it_replaces() {
+    // A store-backed trace stamps real journal positions, so the epoch record
+    // can be checked against the coordinates a reader must honor on restore.
+    let temp = pi_rs_store::TempDir::new("compaction-epoch");
+    let store = pi_rs_store::Store::open(temp.path(), pi_rs_store::WritePolicy::default())
+      .expect("store opens");
+    let session_id = SessionId::new();
+    let model = pi_rs_core::ModelRef::new("test", "durable");
+    let session = store
+      .begin(pi_rs_core::SessionHeader {
+        session_id: session_id.clone(),
+        version: pi_rs_core::session::SESSION_SCHEMA_VERSION,
+        started_at_ms: 1,
+        working_dir: "/workspace".into(),
+        model: model.clone(),
+        parent_session: None,
+        branched_from_event: None,
+        imported_from: None,
+      })
+      .expect("session begins");
+    let provider = Scripted::new("durable", vec![text("done once")]);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = StoreTrace::new(session);
+    let mut harness = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      session_id.clone(),
+      TraceId::new(),
+    );
+
+    let turn = TurnId::new();
+    harness
+      .run_turn("the question", &CancelToken::new(), &mut SilentProgress)
+      .expect("the round completes");
+    let removed = harness
+      .compact(&turn, "the question, unanswered", 0)
+      .expect("compaction records");
+    assert_eq!(removed, 2, "the prompt and its answer were replaced");
+    trace.flush().expect("the trace is durable");
+
+    // Read the durable journal rather than the live trace: the coordinates a
+    // future restore must honor are what the journal recorded.
+    let journal = pi_rs_store::TraceJournal::read(trace.session().trace_path())
+      .expect("the journal is readable");
+    let epoch = journal
+      .items
+      .iter()
+      .find_map(|item| match &item.envelope.event {
+        AgentEvent::ContextCompactionEpoch(record) => {
+          Some(serde_json::to_value(record).expect("the record serializes"))
+        }
+        _ => None,
+      })
+      .expect("the epoch is durable");
+    assert_eq!(epoch["context_epoch"], 1);
+    assert_eq!(
+      epoch["replaces_from"], 1,
+      "the summary replaces the session's first record"
+    );
+    // Session start, turn start, request start, request end, turn end, plus the
+    // summary: the summary event is the last record compaction replaced.
+    assert_eq!(epoch["replaces_through"], 7);
+    let summary = epoch["summary"]
+      .as_object()
+      .expect("the epoch carries a stored blob reference, not prose");
+    assert!(
+      summary["hash"]
+        .as_str()
+        .is_some_and(|hash| hash.len() == 64),
+      "the reference names stored bytes by digest: {summary:?}"
     );
   }
 }

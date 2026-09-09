@@ -161,6 +161,7 @@ impl DiagnosticFilter {
             | E::ModelEpochStarted(_)
             | E::ContextCompactionCompleted(_)
             | E::ContextCompactionEpoch(_)
+            | E::ContextSummary
         ),
       },
     }
@@ -419,6 +420,15 @@ pub fn render_event(event: &AgentEvent, options: &TranscriptOptions) -> Vec<Rend
       };
       vec![line]
     }
+    E::ContextSummary => {
+      // The summary message itself renders through the ordinary message path;
+      // the transcript only marks that a compaction introduced it, so a reader
+      // never mistakes the summary for something the user typed.
+      let mut line = RenderLine::new();
+      line.push("summary", Role::Meta);
+      fact(&mut line, Role::Muted, "introduced by compaction");
+      vec![line]
+    }
     E::ContextCompactionStarted(e) => {
       let mut line = label("compact");
       line.push(SEPARATOR, Role::Muted);
@@ -457,11 +467,13 @@ pub fn render_event(event: &AgentEvent, options: &TranscriptOptions) -> Vec<Rend
         Role::Meta,
         &format!("replaced {}..{}", e.replaces_from.0, e.replaces_through.0),
       );
-      fact(
-        &mut line,
-        Role::Path,
-        &format!("summary {}", e.summary.recovery_ref()),
-      );
+      // A loop without a blob store still opened the epoch; only the reference
+      // is missing, and the transcript says so instead of inventing one.
+      let summary = match &e.summary {
+        Some(blob) => blob.recovery_ref(),
+        None => "in context".into(),
+      };
+      fact(&mut line, Role::Path, &format!("summary {summary}"));
       // The one thing a reader must not have to guess: a new compaction epoch is a
       // change to the model-visible context, not a rewrite of the trace. Saying it
       // here is what stops this line from reading like the records it replaced were
