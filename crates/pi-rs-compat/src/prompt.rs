@@ -237,6 +237,49 @@ impl Template {
   }
 }
 
+/// Split one typed argument string the way Pi's editor does (`parseCommandArgs`).
+///
+/// Bash-style quotes, reproduced exactly — including the three places Pi's parser is
+/// quirkier than a shell, because a compatibility layer that smooths the quirks is
+/// not compatible:
+///
+/// - Quote characters disappear wherever they sit: `a"b c"` is the one argument `ab c`.
+/// - An empty quoted argument produces no argument at all: `a "" b` is two arguments,
+///   not three, because an empty token is never pushed.
+/// - An unclosed quote swallows the rest of the string: `"one two` is one argument,
+///   `one two`.
+pub fn parse_arguments(args: &str) -> Vec<String> {
+  let mut out: Vec<String> = Vec::new();
+  let mut current = String::new();
+  let mut quote: Option<char> = None;
+  for ch in args.chars() {
+    match quote {
+      Some(closing) => {
+        if ch == closing {
+          quote = None;
+        } else {
+          current.push(ch);
+        }
+      }
+      None => match ch {
+        '"' | '\'' => quote = Some(ch),
+        // The same whitespace class the editor tests: any Unicode whitespace splits,
+        // and only a non-empty token is flushed.
+        whitespace if whitespace.is_whitespace() => {
+          if !current.is_empty() {
+            out.push(std::mem::take(&mut current));
+          }
+        }
+        other => current.push(other),
+      },
+    }
+  }
+  if !current.is_empty() {
+    out.push(current);
+  }
+  out
+}
+
 /// The first non-empty line, trimmed. Used as the description when the file does not
 /// declare one.
 fn first_line(body: &str) -> String {
@@ -495,5 +538,38 @@ mod tests {
       template.expand(&["Button", "onClick"]),
       "Create a React component named Button with features: Button onClick"
     );
+  }
+
+  #[test]
+  fn arguments_split_like_the_editor_with_its_quirks_intact() {
+    assert_eq!(parse_arguments(""), Vec::<String>::new());
+    assert_eq!(parse_arguments("  a  b\t c "), ["a", "b", "c"]);
+    // One argument with an interior space, quotes gone.
+    assert_eq!(
+      parse_arguments(r#"Button "click handler""#),
+      ["Button", "click handler"]
+    );
+    // Quotes bind wherever they appear, not only at a token start.
+    assert_eq!(parse_arguments(r#"a"b c"d"#), ["ab cd"]);
+    // The three quirks, each pinned because smooth-and-wrong is worse than quirky.
+    assert_eq!(
+      parse_arguments(r#"a "" b"#),
+      ["a", "b"],
+      "an empty argument is no argument"
+    );
+    assert_eq!(
+      parse_arguments(r#""one two"#),
+      ["one two"],
+      "an unclosed quote swallows"
+    );
+    assert_eq!(
+      parse_arguments("'two words'"),
+      ["two words"],
+      "single quotes bind too"
+    );
+    // Adjacent quoted runs are one argument with no separator between them, and a
+    // space between them splits — the quotes group, they do not glue anything.
+    assert_eq!(parse_arguments(r#""he""llo""#), ["hello"]);
+    assert_eq!(parse_arguments(r#""he" "llo""#), ["he", "llo"]);
   }
 }

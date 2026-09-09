@@ -6,8 +6,9 @@
 //!
 //! `pi-rs prompt <name> <args>` is the surface half of Pi's `/name <args>`. It prints the
 //! expanded template and nothing else, so `pi-rs run --prompt "$(pi-rs prompt review)"`
-//! is possible without a model in the loop. Typing `/name` inside a running session is
-//! not wired up yet -- see `ROADMAP.md`.
+//! is possible without a model in the loop. `pi-rs interactive` invokes the same
+//! templates from inside a running session: `/name [args]` splits its arguments the way
+//! Pi's editor does (`prompt::parse_arguments`) and sends the expansion as the turn.
 
 use std::path::Path;
 
