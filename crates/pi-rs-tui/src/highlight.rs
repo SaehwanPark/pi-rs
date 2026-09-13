@@ -9,7 +9,7 @@
 //! [`crate::command`] already tokenises a line, but for a different question: it
 //! pulls flags and paths out of the arguments and covers a plain prompt
 //! completely. This module keeps the coarser split the highlighting rule needs,
-//! and reuses [`token_end`] so the two can never drift apart on what a run is.
+//! and reuses `token_end` so the two can never drift apart on what a run is.
 
 use crate::{command::token_end, line::Segment, style::Role};
 
@@ -38,8 +38,6 @@ use crate::{command::token_end, line::Segment, style::Role};
 ///
 /// Pure: no I/O, no allocation beyond the returned segments, and no display
 /// width assumptions — width is the caller's problem, see [`crate::width`].
-///
-/// [`token_end`]: crate::command::token_end
 pub fn tokens(input: &str) -> Vec<Segment> {
   let mut segments = Vec::new();
   let mut cursor = 0usize;
