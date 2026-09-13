@@ -319,7 +319,7 @@ Open in this area, in order:
 - [x] Import a whole Pi session directory: `import-pi <dir>` files every `*.jsonl` directly
       inside it, each as its own session; cross-file lineage is named, not reconstructed.
 - [x] Implement Pi session export prototype.
-- [ ] Document non-round-trippable metadata.
+- [x] Document non-round-trippable metadata. (Documented in `COMPATIBILITY.md` §10.3 and `docs/SESSION_COMPATIBILITY.md`; verified against import/export CLI loss reporting)
 
 ### Stage gate
 
