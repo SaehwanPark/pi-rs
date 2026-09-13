@@ -12,6 +12,8 @@
 //!   key by default. A literal key is accepted for local servers only, and
 //!   config serialization never emits one.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -207,6 +209,51 @@ pub struct RuntimeConfig {
   pub trace: TraceRetention,
   #[serde(default)]
   pub redaction: RedactionPolicy,
+  #[serde(default)]
+  pub mcp_servers: Vec<McpServerConfig>,
+}
+
+/// Configuration for an external MCP server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerConfig {
+  pub name: String,
+  pub command: String,
+  #[serde(default)]
+  pub args: Vec<String>,
+  #[serde(default)]
+  pub env: BTreeMap<String, String>,
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default)]
+  pub read_only_tools: Vec<String>,
+}
+
+impl McpServerConfig {
+  pub fn new(name: impl Into<String>, command: impl Into<String>) -> Self {
+    Self {
+      name: name.into(),
+      command: command.into(),
+      args: Vec::new(),
+      env: BTreeMap::new(),
+      enabled: false,
+      read_only_tools: Vec::new(),
+    }
+  }
+
+  pub fn with_args(mut self, args: Vec<String>) -> Self {
+    self.args = args;
+    self
+  }
+
+  pub fn with_env(mut self, env: BTreeMap<String, String>) -> Self {
+    self.env = env;
+    self
+  }
+
+  pub fn with_enabled(mut self, enabled: bool) -> Self {
+    self.enabled = enabled;
+    self
+  }
 }
 
 impl RuntimeConfig {
@@ -225,6 +272,7 @@ impl RuntimeConfig {
       ui: UiConfig::default(),
       trace: TraceRetention::default(),
       redaction: RedactionPolicy::default(),
+      mcp_servers: Vec::new(),
     }
   }
 

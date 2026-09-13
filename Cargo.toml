@@ -8,6 +8,7 @@ members = [
   "crates/pi-rs-compat",
   "crates/pi-rs-runtime",
   "crates/pi-rs-tui",
+  "crates/pi-rs-mcp",
 ]
 
 [workspace.package]
@@ -26,6 +27,7 @@ pi-rs-tools = { path = "crates/pi-rs-tools" }
 pi-rs-compat = { path = "crates/pi-rs-compat" }
 pi-rs-runtime = { path = "crates/pi-rs-runtime" }
 pi-rs-tui = { path = "crates/pi-rs-tui" }
+pi-rs-mcp = { path = "crates/pi-rs-mcp" }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -53,6 +55,7 @@ pi-rs-tools.workspace = true
 pi-rs-compat.workspace = true
 pi-rs-runtime.workspace = true
 pi-rs-tui.workspace = true
+pi-rs-mcp.workspace = true
 crossterm.workspace = true
 serde_json.workspace = true
 

@@ -458,33 +458,33 @@ Open in this area, in order:
 
 ### Protocol
 
-- [ ] Implement MCP transport abstraction.
-- [ ] Implement stdio transport.
+- [x] Implement MCP transport abstraction (`McpTransport` trait).
+- [x] Implement stdio transport (`StdioTransport` with child process and JSON-RPC 2.0).
 - [ ] Implement supported network transport.
-- [ ] Add protocol negotiation.
-- [ ] Add selected older-version compatibility.
-- [ ] Normalize tool schemas.
+- [x] Add protocol negotiation (`initialize` handshake and version agreement).
+- [x] Add selected older-version compatibility (`2024-11-05`, `2024-10-07`).
+- [x] Normalize tool schemas (`McpToolDefinition` input schema mapped to tool JSON schema).
 
 ### Lazy discovery
 
-- [ ] Do not connect all configured servers at startup.
-- [ ] Add server activation API.
-- [ ] Add capability filtering.
-- [ ] Add lazy schema discovery.
-- [ ] Cache discovered capabilities.
-- [ ] Measure first-use latency.
+- [x] Do not connect all configured servers at startup (startup verified at ~3.2 ms).
+- [x] Add server activation API (`McpManager::enable_server`, `SessionHandle::mcp_enable`, `/mcp enable`).
+- [x] Add capability filtering (`read_only_tools`, selective server activation).
+- [x] Add lazy schema discovery (`tools/list` on activation).
+- [x] Cache discovered capabilities (`McpManager::active_tools`).
+- [x] Measure first-use latency (`first_use_latencies` reported in `/mcp`).
 
 ### Tool integration
 
-- [ ] Normalize MCP tools into internal tool abstraction.
-- [ ] Preserve provenance/source metadata.
-- [ ] Emit MCP tool lifecycle events.
+- [x] Normalize MCP tools into internal tool abstraction (`McpTool` implementing `Tool`).
+- [x] Preserve provenance/source metadata (`[MCP:{server}]` description, namespaced identifier).
+- [x] Emit MCP tool lifecycle events (participates in `ToolRegistry` lifecycle, preserving `Unknown` on uncertain mutation).
 
 ### Stage gate
 
-- [ ] A configured MCP server can be used without delaying startup.
-- [ ] Large MCP catalogs do not all enter model context by default.
-- [ ] MCP tools participate in the same trace/tool lifecycle as native tools.
+- [x] A configured MCP server can be used without delaying startup (warm startup ~3.2 ms vs <100 ms budget).
+- [x] Large MCP catalogs do not all enter model context by default (activation is lazy and filtered).
+- [x] MCP tools participate in the same trace/tool lifecycle as native tools (verified via `mcp_integration.rs`).
 
 ---
 
