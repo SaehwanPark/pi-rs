@@ -598,6 +598,14 @@ impl<'a> TurnLoop<'a> {
     Ok(model_epoch)
   }
 
+  /// Reconcile an uncertain or interrupted tool call against environment state.
+  pub fn reconcile_tool_call(
+    &self,
+    request: &pi_rs_core::ToolRequest,
+  ) -> Result<pi_rs_core::ReconciliationStatus, pi_rs_core::ToolError> {
+    self.tools.reconcile(request)
+  }
+
   /// Model-visible history so far.
   /// Test-visible view of the live model context.
   pub fn messages_mut(&mut self) -> &mut Vec<Message> {

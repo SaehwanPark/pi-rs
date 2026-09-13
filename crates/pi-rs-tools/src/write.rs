@@ -15,7 +15,9 @@ use std::{
   io::Write,
 };
 
-use pi_rs_core::{Tool, ToolError, ToolMetadata, ToolOutcome, ToolProgress, ToolRequest};
+use pi_rs_core::{
+  ReconciliationStatus, Tool, ToolError, ToolMetadata, ToolOutcome, ToolProgress, ToolRequest,
+};
 use serde_json::json;
 
 use crate::{Deadline, Runtime, arg_str};
@@ -129,6 +131,55 @@ impl Tool for WriteTool {
       .text
       .push_str(&format!(" [in {} ms]", deadline.elapsed_ms()));
     Ok(outcome)
+  }
+
+  fn reconcile(&self, request: &ToolRequest) -> Result<ReconciliationStatus, ToolError> {
+    let path = arg_str(request, "path")?;
+    let contents = arg_str(request, "contents")?;
+    let append = crate::arg_bool(request, "append", false);
+    let resolved = self
+      .runtime
+      .workspace
+      .write_path(path)
+      .map_err(|error| ToolError::new(error.to_string()))?;
+
+    if !resolved.exists() {
+      return Ok(ReconciliationStatus::Unmodified {
+        details: format!("target file '{}' does not exist", path),
+      });
+    }
+
+    match fs::read(&resolved) {
+      Ok(bytes) => {
+        if !append {
+          if bytes == contents.as_bytes() {
+            Ok(ReconciliationStatus::Committed {
+              details: format!("target file '{}' contains exact requested contents", path),
+            })
+          } else {
+            Ok(ReconciliationStatus::Diverged {
+              details: format!(
+                "target file '{}' exists with differing contents ({} bytes vs expected {} bytes)",
+                path,
+                bytes.len(),
+                contents.len()
+              ),
+            })
+          }
+        } else if bytes.ends_with(contents.as_bytes()) {
+          Ok(ReconciliationStatus::Committed {
+            details: format!("target file '{}' ends with appended contents", path),
+          })
+        } else {
+          Ok(ReconciliationStatus::Diverged {
+            details: format!("target file '{}' does not end with appended contents", path),
+          })
+        }
+      }
+      Err(error) => Ok(ReconciliationStatus::RequiresManualInspection {
+        details: format!("cannot read target file '{}': {error}", path),
+      }),
+    }
   }
 }
 

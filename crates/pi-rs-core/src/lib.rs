@@ -78,8 +78,8 @@ pub use session::{
 };
 pub use sink::{EventSink, FanOut, MemorySink, NullSink, SinkError};
 pub use tool::{
-  ReplayDecision, Tool, ToolChunk, ToolError, ToolExecutionState, ToolMetadata, ToolOutcome,
-  ToolProgress, ToolRequest,
+  ReconciliationStatus, ReplayDecision, Tool, ToolChunk, ToolError, ToolExecutionState,
+  ToolMetadata, ToolOutcome, ToolProgress, ToolRequest,
 };
 pub use trace::{
   BlobRef, ExternalContextSource, ExternalizedField, RawPayloadCapture, TRACE_SCHEMA_VERSION,

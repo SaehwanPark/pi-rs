@@ -18,7 +18,9 @@
 
 use std::{fs, io::Write};
 
-use pi_rs_core::{Tool, ToolError, ToolMetadata, ToolOutcome, ToolProgress, ToolRequest};
+use pi_rs_core::{
+  ReconciliationStatus, Tool, ToolError, ToolMetadata, ToolOutcome, ToolProgress, ToolRequest,
+};
 use serde_json::json;
 
 use crate::{Deadline, Runtime, arg_str};
@@ -133,6 +135,56 @@ impl Tool for EditTool {
       updated.len(),
       deadline.elapsed_ms()
     )))
+  }
+
+  fn reconcile(&self, request: &ToolRequest) -> Result<ReconciliationStatus, ToolError> {
+    let path = arg_str(request, "path")?;
+    let find = arg_str(request, "find")?;
+    let replace = arg_str(request, "replace")?;
+    let resolved = self
+      .runtime
+      .workspace
+      .write_path(path)
+      .map_err(|error| ToolError::new(error.to_string()))?;
+
+    if !resolved.exists() {
+      return Ok(ReconciliationStatus::Unmodified {
+        details: format!("target file '{}' does not exist", path),
+      });
+    }
+
+    match fs::read_to_string(&resolved) {
+      Ok(content) => {
+        let has_replace = content.contains(replace);
+        let has_find = content.contains(find);
+
+        if has_replace && !has_find {
+          Ok(ReconciliationStatus::Committed {
+            details: format!(
+              "target file '{}' contains replacement text and no longer contains original text",
+              path
+            ),
+          })
+        } else if has_find && !has_replace {
+          Ok(ReconciliationStatus::Unmodified {
+            details: format!(
+              "target file '{}' contains original text and replacement is absent",
+              path
+            ),
+          })
+        } else {
+          Ok(ReconciliationStatus::Diverged {
+            details: format!(
+              "target file '{}' state is ambiguous (contains find: {}, contains replace: {})",
+              path, has_find, has_replace
+            ),
+          })
+        }
+      }
+      Err(error) => Ok(ReconciliationStatus::RequiresManualInspection {
+        details: format!("cannot read target file '{}': {error}", path),
+      }),
+    }
   }
 }
 

@@ -18,6 +18,7 @@ pub use edit::EditTool;
 pub use exec::ExecTool;
 pub use grep::GrepTool;
 pub use paths::{PathError, Workspace};
+pub use pi_rs_core::ReconciliationStatus;
 pub use read::ReadTool;
 pub use reduce::Reduction;
 pub use registry::{Approval, ApprovalGate, AutoApprove, DenyAll, Executed, ToolRegistry};
