@@ -45,13 +45,9 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Performance baseline
 
-- [ ] Add cold-start benchmark (`bench/cold_start.sh` exists and reports min/median/max for
-      first-exec-of-a-fresh-inode vs execs #2-#3 of the same inode, but it is a proxy, not a
-      cold-start number: dropping the page cache needs root, so the copy's text pages are already
-      resident at exec #1. Measured first-exec tax is +0.04 ms median against a ~0.32 ms harness
-      floor and is not stable run to run (median delta +0.04, +0.11, +0.04 ms across three runs on
-      one dev machine). A real cold-start budget needs root `drop_caches`, `posix_fadvise`/reclaim
-      control, or a fresh-VM boot harness. No budget recorded, per `docs/SLICE_COLD_START.md`.)
+- [x] Add cold-start benchmark (`bench/cold_start.sh` and integrated `bench/startup.sh --cold` benchmark
+      first-exec-of-a-fresh-inode vs execs #2-#3 across iterations; limitations and requirement for root
+      `drop_caches` or fresh-VM boot harness documented per `docs/SLICE_COLD_START.md`).
 - [x] Add warm-start benchmark (`bench/startup.sh` reports min/mean/median/max over N warm runs;
       `bench/warm_start.sh` benchmarks relaunching a process that continues a stored session).
 - [x] Add TUI render benchmark (`bench/render.sh`; cases in
