@@ -43,6 +43,9 @@ cd "$REPO_ROOT"
 cargo build --release --bin pi-rs --quiet
 
 BINARY="${REPO_ROOT}/target/release/pi-rs"
+if [[ -f "${REPO_ROOT}/target/release/pi-rs.exe" ]]; then
+  BINARY="${REPO_ROOT}/target/release/pi-rs.exe"
+fi
 
 COLD_MODE="$COLD_MODE" BINARY="$BINARY" ITERATIONS="$ITERATIONS" JSON_OUT="$JSON_OUT" python3 - <<'EOF'
 import json

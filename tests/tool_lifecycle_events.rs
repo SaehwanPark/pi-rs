@@ -262,17 +262,18 @@ fn tool_turn_records() -> Vec<Record> {
   let temp = TempDir::new().expect("temp root");
   let workspace = temp.path().join("workspace");
   fs::create_dir(&workspace).expect("create workspace");
+  #[cfg(windows)]
+  let exec_cmd = r#"{"command":"<nul set /p=executed>exec.txt"}"#;
+  #[cfg(not(windows))]
+  let exec_cmd = r#"{"command":"printf executed > exec.txt"}"#;
+
   let server = FakeServer::answer(vec![
     tool_response(
       WRITE_CALL,
       "write",
       r#"{"path":"model.txt","contents":"from tool\n"}"#,
     ),
-    tool_response(
-      EXEC_CALL,
-      "exec",
-      r#"{"command":"printf executed > exec.txt"}"#,
-    ),
+    tool_response(EXEC_CALL, "exec", exec_cmd),
     text_response("completed"),
   ]);
   // Both tools are mutating, so the run needs explicit auto-approval to reach them.

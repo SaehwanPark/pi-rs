@@ -295,6 +295,7 @@ mod tests {
     );
   }
 
+  #[cfg(unix)]
   #[test]
   fn the_write_boundary_is_the_path_the_tool_reports() {
     // The containment check and the reported path must be the same value, or the
