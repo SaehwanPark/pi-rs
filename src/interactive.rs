@@ -79,7 +79,7 @@ use crate::{
 const PROMPT_PREFIX: &str = "> ";
 
 /// The slash commands this loop answers itself, and what Tab completes to.
-const COMMANDS: [&str; 3] = ["help", "quit", "exit"];
+const COMMANDS: [&str; 4] = ["help", "quit", "exit", "compact"];
 
 /// Where a submitted line goes: the runtime, or a command this loop owns.
 ///
@@ -95,6 +95,8 @@ enum Submitted {
   Help,
   /// End the loop. The session still closes through its normal path.
   Quit,
+  /// Compact conversation history into a durable summary epoch.
+  Compact(Option<String>),
   /// A loaded prompt template, with the argument string exactly as typed after the
   /// name. What the model receives is the expansion, not these parts.
   Template { name: String, arguments: String },
@@ -114,6 +116,15 @@ fn route(text: &str, templates: &prompt::Scan) -> Submitted {
     Input::Command { name, ref rest, .. } => match name.as_str() {
       "help" => Submitted::Help,
       "quit" | "exit" => Submitted::Quit,
+      "compact" => {
+        let trimmed = rest.trim();
+        let summary = if trimmed.is_empty() {
+          None
+        } else {
+          Some(trimmed.to_string())
+        };
+        Submitted::Compact(summary)
+      }
       _ if templates.named(&name).is_some() => Submitted::Template {
         name: name.clone(),
         arguments: rest.clone(),
@@ -472,6 +483,7 @@ impl Loop {
       Submitted::Help => {
         let mut lines = vec![
           "/help       this list".to_string(),
+          "/compact    summarize earlier context and open a durable compaction epoch".to_string(),
           "/quit, /exit  end the session (ctrl-c on an empty draft does the same)".to_string(),
           "tab         complete the command the caret sits on".to_string(),
         ];
@@ -480,6 +492,23 @@ impl Loop {
         }
         self.write_note(&lines)?;
         Ok(Submitted::Help)
+      }
+      Submitted::Compact(custom) => {
+        match session.compact(custom.as_deref()) {
+          Ok(removed) if removed > 0 => {
+            self.write_note(&[format!(
+              "compacted {removed} message{} into a durable summary epoch",
+              if removed == 1 { "" } else { "s" }
+            )])?;
+          }
+          Ok(_) => {
+            self.write_note(&["nothing to compact: history is already compact".to_string()])?;
+          }
+          Err(error) => {
+            self.write_note(&[format!("compaction failed: {error:?}")])?;
+          }
+        }
+        Ok(Submitted::Compact(custom))
       }
       Submitted::Template { name, arguments } => {
         // Expansion is pure string work and finishes before the turn needs the
@@ -931,10 +960,25 @@ mod tests {
     assert!(matches!(route("/help me", &none), Submitted::Help));
     assert!(matches!(route("/quit", &none), Submitted::Quit));
     assert!(matches!(route("/exit", &none), Submitted::Quit));
+    assert!(matches!(route("/compact", &none), Submitted::Compact(None)));
+    assert!(matches!(
+      route("/compact focus on tests", &none),
+      Submitted::Compact(Some(s)) if s == "focus on tests"
+    ));
     match route("/nope", &none) {
       Submitted::Unknown(name) => assert_eq!(name, "nope"),
       _ => panic!("a command shape with no command is an unknown, not a prompt"),
     }
+  }
+
+  #[test]
+  fn compact_command_is_completed_by_tab() {
+    let mut surface = Loop::new("local/vulcan".to_string(), 80);
+    for ch in "/com".chars() {
+      surface.editor.apply(Intent::Insert(ch));
+    }
+    assert_eq!(surface.editor.apply(Intent::Complete), Outcome::Changed);
+    assert_eq!(surface.editor.text(), "/compact ");
   }
 
   #[test]

@@ -7,7 +7,7 @@ use std::{
 use pi_rs_core::{
   AttributedMessage, CancelToken, EventEnvelope, Message, ModelProvider, ModelRef,
   ReasoningProvenance, RuntimeConfig, SessionEndReason, SessionHeader, SessionId, SinkError,
-  TraceId, now_millis,
+  TraceId, TurnId, now_millis,
 };
 use pi_rs_provider::{Deferred, OpenAiCompat, ProviderConfig};
 use pi_rs_runtime::{StoreTrace, Trace, TurnError, TurnLoop, TurnProgress, TurnReport};
@@ -182,7 +182,8 @@ pub(crate) fn open_session(
   // Empty for a session that has just begun, so this only ever carries a resumed one.
   .with_messages(context)
   .with_working_dir(canonical_cwd)
-  .with_thinking(config.thinking);
+  .with_thinking(config.thinking)
+  .with_compaction_strategy(pi_rs_runtime::CompactionStrategy::Summarize);
   if !skills_prompt.is_empty() {
     // The skill-control prompt is the whole system prompt pi-rs speaks today, and
     // with_system stays unset when there is nothing to offer.
@@ -250,6 +251,15 @@ impl SessionHandle<'_> {
   /// output happened to arrive.
   pub fn turn_with(&mut self, prompt: &str, cancel: &CancelToken) -> Result<TurnReport, TurnError> {
     self.runtime.run_turn(prompt, cancel, &mut self.progress)
+  }
+
+  /// Compact earlier conversation history into a durable summary epoch.
+  pub fn compact(&mut self, summary: Option<&str>) -> Result<u32, TurnError> {
+    let turn_id = TurnId::new();
+    let target_tokens = 4_096;
+    self
+      .runtime
+      .compact_with_summary_or(&turn_id, target_tokens, summary)
   }
 
   /// Flush the transcript, end the session as a user exit, and report what the
