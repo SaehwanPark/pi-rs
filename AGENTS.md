@@ -62,11 +62,6 @@
   reconstruction must verify performance against defined budgets.
 - Update `ROADMAP.md` only from verified evidence. Keep incomplete work active
   and do not mark stage gates complete until gate evidence exists.
-- Available AI Subscriptions: Orchestrator can spawn subagents from external
-  providers `openai-codex` and Antigravity (both subscription) and internal
-  provider `local-vulcan`.
-  - Models to use in priority order: `gpt-5.6-luna` (`openai-codex`) >
-    Gemini 3.8 Fresh (Antigravity via `agy` headless mode).
 - Be aware of AI subscription usage limits and reset windows. Spawn a dedicated
   subagent to monitor limits per `docs/codexbar.md` (adjust checking frequency
   smartly) and report back when limits approach. When used percentage is 97% or
