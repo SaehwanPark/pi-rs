@@ -79,11 +79,12 @@ use crate::{
 const PROMPT_PREFIX: &str = "> ";
 
 /// The slash commands this loop answers itself, and what Tab completes to.
-const COMMANDS: [&str; 8] = [
+const COMMANDS: [&str; 9] = [
   "help",
   "quit",
   "exit",
   "compact",
+  "compact-phase",
   "checkpoints",
   "failover",
   "switch-back",
@@ -115,6 +116,8 @@ enum Submitted {
   Quit,
   /// Compact conversation history into a durable summary epoch.
   Compact(Option<String>),
+  /// Compact conversation history at a semantic phase boundary.
+  CompactPhase { phase: String, force: bool },
   /// List episode checkpoint capsules for this session.
   Checkpoints,
   /// Manually switch generation to the configured backup model.
@@ -153,6 +156,27 @@ fn route(text: &str, templates: &prompt::Scan) -> Submitted {
           Some(trimmed.to_string())
         };
         Submitted::Compact(summary)
+      }
+      "compact-phase" | "compactphase" => {
+        let trimmed = rest.trim();
+        let mut force = false;
+        let mut phase = String::new();
+        for part in trimmed.split_whitespace() {
+          if part == "--force" || part == "-f" {
+            force = true;
+          } else if phase.is_empty() {
+            phase = part.to_string();
+          } else {
+            phase.push(' ');
+            phase.push_str(part);
+          }
+        }
+        let phase = if phase.is_empty() {
+          "milestone".to_string()
+        } else {
+          phase
+        };
+        Submitted::CompactPhase { phase, force }
       }
       "mcp" => {
         let trimmed = rest.trim();
@@ -536,6 +560,7 @@ impl Loop {
         let mut lines = vec![
           "/help       this list".to_string(),
           "/compact    summarize earlier context and open a durable compaction epoch".to_string(),
+          "/compact-phase [phase] [--force] summarize at semantic phase boundary".to_string(),
           "/checkpoints list episode checkpoint capsules for the session".to_string(),
           "/failover   switch generation to the backup model".to_string(),
           "/switch-back switch generation back to the primary model".to_string(),
@@ -566,6 +591,25 @@ impl Loop {
           }
         }
         Ok(Submitted::Compact(custom))
+      }
+      Submitted::CompactPhase { phase, force } => {
+        match session.compact_phase(&phase, None, force) {
+          Ok(removed) if removed > 0 => {
+            self.write_note(&[format!(
+              "compacted {removed} message{} into phase summary epoch [{phase}]",
+              if removed == 1 { "" } else { "s" }
+            )])?;
+          }
+          Ok(_) => {
+            self.write_note(&[format!(
+              "nothing to compact: history is already compact for phase [{phase}]"
+            )])?;
+          }
+          Err(error) => {
+            self.write_note(&[format!("phase compaction failed: {error:?}")])?;
+          }
+        }
+        Ok(Submitted::CompactPhase { phase, force })
       }
       Submitted::Checkpoints => {
         match session.list_checkpoints() {
@@ -1143,6 +1187,22 @@ mod tests {
       Submitted::Compact(Some(s)) if s == "focus on tests"
     ));
     assert!(matches!(
+      route("/compact-phase", &none),
+      Submitted::CompactPhase { ref phase, force: false } if phase == "milestone"
+    ));
+    assert!(matches!(
+      route("/compact-phase testing", &none),
+      Submitted::CompactPhase { ref phase, force: false } if phase == "testing"
+    ));
+    assert!(matches!(
+      route("/compact-phase testing --force", &none),
+      Submitted::CompactPhase { ref phase, force: true } if phase == "testing"
+    ));
+    assert!(matches!(
+      route("/compactphase testing -f", &none),
+      Submitted::CompactPhase { ref phase, force: true } if phase == "testing"
+    ));
+    assert!(matches!(
       route("/checkpoints", &none),
       Submitted::Checkpoints
     ));
@@ -1189,7 +1249,17 @@ mod tests {
       surface.editor.apply(Intent::Insert(ch));
     }
     assert_eq!(surface.editor.apply(Intent::Complete), Outcome::Changed);
-    assert_eq!(surface.editor.text(), "/compact ");
+    assert_eq!(surface.editor.text(), "/compact");
+  }
+
+  #[test]
+  fn compact_phase_command_is_completed_by_tab() {
+    let mut surface = Loop::new("local/vulcan".to_string(), 80);
+    for ch in "/compact-".chars() {
+      surface.editor.apply(Intent::Insert(ch));
+    }
+    assert_eq!(surface.editor.apply(Intent::Complete), Outcome::Changed);
+    assert_eq!(surface.editor.text(), "/compact-phase ");
   }
 
   #[test]
