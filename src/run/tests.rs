@@ -593,3 +593,72 @@ fn session_resumes_across_checkpoint_barrier_with_capsule() {
     "second request carries new turn input"
   );
 }
+
+#[test]
+fn session_manual_failover_and_switch_back_across_turns() {
+  let temp = TempDir::new().unwrap();
+  let workspace = temp.path().join("workspace");
+  fs::create_dir(&workspace).unwrap();
+
+  let server = FakeServer::answer(vec![
+    answer("turn 1 answered by primary"),
+    answer("turn 2 answered by backup"),
+    answer("turn 3 answered by primary again"),
+  ]);
+
+  let base_url = server.base_url();
+  let config = write_config_with(temp.path(), &base_url, |config| {
+    let backup_ref = ModelRef::new("fake", "backup");
+    config.backup = Some(backup_ref);
+    config.endpoints.push(ModelEndpoint {
+      provider: "fake".into(),
+      model: "backup".into(),
+      base_url: Some(base_url.clone()),
+      api_key_env: None,
+      api_key: None,
+      capabilities: ModelCapabilities {
+        text: true,
+        images: false,
+        tools: true,
+        exposed_reasoning: ReasoningExposure::Native,
+        context_window: 32_768,
+        max_output_tokens: Some(1_024),
+      },
+      max_output_tokens: Some(1_024),
+    });
+  });
+  let surface = SurfaceArgs::default();
+
+  open_session(&config, &workspace, &surface, None, |session| {
+    // 1. Primary turn
+    session.turn("turn 1").map_err(|e| turn_error(&e))?;
+    assert_eq!(session.active_model(), ModelRef::new("fake", "agent"));
+    assert!(!session.failed_over());
+
+    // 2. Manual failover to backup
+    let epoch1 = session.failover_manual().expect("manual failover succeeds");
+    assert_eq!(epoch1.index, 1);
+    assert_eq!(epoch1.model, ModelRef::new("fake", "backup"));
+    assert_eq!(epoch1.reason, pi_rs_core::EpochReason::ManualSwitch);
+    assert_eq!(session.active_model(), ModelRef::new("fake", "backup"));
+    assert!(session.failed_over());
+
+    session.turn("turn 2").map_err(|e| turn_error(&e))?;
+
+    // 3. Switch back to primary
+    let epoch2 = session.switch_back_manual().expect("switch back succeeds");
+    assert_eq!(epoch2.index, 2);
+    assert_eq!(epoch2.model, ModelRef::new("fake", "agent"));
+    assert_eq!(epoch2.reason, pi_rs_core::EpochReason::ManualSwitchBack);
+    assert_eq!(session.active_model(), ModelRef::new("fake", "agent"));
+    assert!(!session.failed_over());
+
+    session.turn("turn 3").map_err(|e| turn_error(&e))?;
+
+    session.close().map_err(session_error)
+  })
+  .unwrap();
+
+  let requests = server.requests();
+  assert_eq!(requests.len(), 3);
+}

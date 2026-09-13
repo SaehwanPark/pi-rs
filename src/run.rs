@@ -340,6 +340,43 @@ impl SessionHandle<'_> {
       .map_err(|e| format!("cannot list checkpoints: {e:?}"))
   }
 
+  /// The model currently active for generation.
+  #[allow(dead_code)]
+  pub fn active_model(&self) -> pi_rs_core::ModelRef {
+    self.runtime.active_model()
+  }
+
+  /// The backup model, if configured.
+  #[allow(dead_code)]
+  pub fn backup_model(&self) -> Option<pi_rs_core::ModelRef> {
+    self.runtime.backup_model()
+  }
+
+  /// The primary model.
+  #[allow(dead_code)]
+  pub fn primary_model(&self) -> pi_rs_core::ModelRef {
+    self.runtime.primary_model()
+  }
+
+  /// `true` if the session is currently generating with the backup model.
+  #[allow(dead_code)]
+  pub fn failed_over(&self) -> bool {
+    self.runtime.failed_over()
+  }
+
+  /// Manually switch active generation to the backup model.
+  pub fn failover_manual(&mut self) -> Result<pi_rs_core::ModelEpoch, String> {
+    self.runtime.failover_manual().map_err(|e| format!("{e:?}"))
+  }
+
+  /// Manually switch active generation back to the primary model.
+  pub fn switch_back_manual(&mut self) -> Result<pi_rs_core::ModelEpoch, String> {
+    self
+      .runtime
+      .switch_back_manual()
+      .map_err(|e| format!("{e:?}"))
+  }
+
   /// Flush the transcript, end the session as a user exit, and report what the
   /// caller should show.
   ///
