@@ -78,6 +78,8 @@ pub struct Skill {
   /// `disable-model-invocation`. Such a skill never enters the model-facing prompt and
   /// is reachable only by explicit request.
   pub disable_model_invocation: bool,
+  /// Name of the package that declared or contained this skill, if loaded from a package.
+  pub package: Option<String>,
 }
 
 /// Something worth telling the operator about a candidate that was not loaded, or was
@@ -231,9 +233,31 @@ fn escape_xml(text: &str) -> String {
     .replace('\'', "&apos;")
 }
 
+/// Options for skill discovery, including explicit skill paths.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillOptions {
+  /// Explicit skill paths (directories with `SKILL.md` or single `.md` files)
+  /// provided on the command line via `--skill <path>`.
+  pub extra_skills: Vec<PathBuf>,
+}
+
 /// Scan the documented locations.
 pub fn discover(discovery: &Discovery) -> Scan {
+  discover_with_options(discovery, &SkillOptions::default())
+}
+
+/// Scan the documented locations plus explicit options.
+pub fn discover_with_options(discovery: &Discovery, options: &SkillOptions) -> Scan {
   let mut scanner = Scanner::default();
+
+  // 1. Explicit skills (--skill <path>) take highest priority
+  for path in &options.extra_skills {
+    scanner.explicit_path(path);
+  }
+
+  // 2. Global standalone skills:
+  //    $HOME/.pi/agent/skills
+  //    $HOME/.agents/skills
   if let Some(home) = &discovery.home {
     scanner.location(
       &home.join(".pi/agent/skills"),
@@ -242,6 +266,18 @@ pub fn discover(discovery: &Discovery) -> Scan {
     );
     scanner.location(&home.join(".agents/skills"), Source::Global, Family::Agents);
   }
+
+  // 3. Global package skills
+  let package_scan = crate::package::discover(discovery);
+  for pkg in &package_scan.packages {
+    if pkg.source == Source::Global {
+      scanner.package_skills(pkg);
+    }
+  }
+
+  // 4. Project standalone skills (trusted only)
+  //    <ancestor>/.pi/skills
+  //    <ancestor>/.agents/skills
   if discovery.trust == Trust::Trusted {
     for project in project_dirs(&discovery.cwd) {
       scanner.location(&project.join(".pi/skills"), Source::Project, Family::DotPi);
@@ -251,7 +287,15 @@ pub fn discover(discovery: &Discovery) -> Scan {
         Family::Agents,
       );
     }
+
+    // 5. Project package skills (trusted only)
+    for pkg in &package_scan.packages {
+      if pkg.source == Source::Project {
+        scanner.package_skills(pkg);
+      }
+    }
   }
+
   scanner.finish()
 }
 
@@ -285,11 +329,59 @@ struct Scanner {
 impl Scanner {
   fn location(&mut self, root: &Path, source: Source, family: Family) {
     if root.is_dir() {
-      self.walk(root, true, 0, source, family);
+      self.walk(root, true, 0, source, family, None);
     }
   }
 
-  fn walk(&mut self, dir: &Path, at_root: bool, depth: usize, source: Source, family: Family) {
+  fn package_skills(&mut self, pkg: &crate::package::Package) {
+    for loc in pkg.skill_locations() {
+      let kind = loc.metadata().ok();
+      if is_dir(&kind) {
+        let skill_md = loc.join("SKILL.md");
+        if skill_md.is_file() {
+          self.collect(&skill_md, pkg.source, Some(&pkg.name));
+        } else {
+          self.walk(&loc, true, 0, pkg.source, Family::DotPi, Some(&pkg.name));
+        }
+      } else if is_file(&kind) {
+        self.collect(&loc, pkg.source, Some(&pkg.name));
+      } else {
+        self.warnings.push(SkillWarning::Unreadable {
+          path: loc,
+          reason: "declared package skill path does not exist".to_string(),
+        });
+      }
+    }
+  }
+
+  fn explicit_path(&mut self, path: &Path) {
+    let kind = path.metadata().ok();
+    if is_dir(&kind) {
+      let skill_md = path.join("SKILL.md");
+      if skill_md.is_file() {
+        self.collect(&skill_md, Source::Global, None);
+      } else {
+        self.walk(path, true, 0, Source::Global, Family::DotPi, None);
+      }
+    } else if is_file(&kind) {
+      self.collect(path, Source::Global, None);
+    } else {
+      self.warnings.push(SkillWarning::Unreadable {
+        path: path.to_path_buf(),
+        reason: "file or directory does not exist".to_string(),
+      });
+    }
+  }
+
+  fn walk(
+    &mut self,
+    dir: &Path,
+    at_root: bool,
+    depth: usize,
+    source: Source,
+    family: Family,
+    package: Option<&str>,
+  ) {
     if depth > MAX_DEPTH {
       self.warnings.push(SkillWarning::TooDeep {
         path: dir.to_path_buf(),
@@ -325,22 +417,22 @@ impl Scanner {
         let skill_md = path.join("SKILL.md");
         if skill_md.is_file() {
           // A skill's own subdirectories hold its scripts and references.
-          self.collect(&skill_md, source);
+          self.collect(&skill_md, source, package);
         } else {
-          self.walk(&path, false, depth + 1, source, family);
+          self.walk(&path, false, depth + 1, source, family, package);
         }
       } else if is_file(&kind) {
         let name = entry.file_name().to_string_lossy().into_owned();
         // `SKILL.md` is the canonical skill file and counts wherever it appears; the
         // family rule decides what any other `.md` file is.
         if name == "SKILL.md" || (name.ends_with(".md") && family.accepts(at_root)) {
-          self.collect(&path, source);
+          self.collect(&path, source, package);
         }
       }
     }
   }
 
-  fn collect(&mut self, path: &Path, source: Source) {
+  fn collect(&mut self, path: &Path, source: Source, package: Option<&str>) {
     let text = match fs::read_to_string(path) {
       Ok(text) => text,
       Err(error) => {
@@ -412,6 +504,7 @@ impl Scanner {
         .map(|value| value.split_whitespace().map(str::to_string).collect())
         .unwrap_or_default(),
       disable_model_invocation: frontmatter.is_true("disable-model-invocation"),
+      package: package.map(str::to_string),
     });
   }
 
@@ -906,6 +999,7 @@ mod tests {
         compatibility: None,
         allowed_tools: Vec::new(),
         disable_model_invocation: true,
+        package: None,
       }];
       scan
     };
@@ -923,6 +1017,7 @@ mod tests {
       compatibility: None,
       allowed_tools: Vec::new(),
       disable_model_invocation: false,
+      package: None,
     };
     let prompt = control_prompt(&[skill]);
     assert!(prompt.contains("<name>a&amp;b</name>"), "{prompt}");
@@ -965,5 +1060,100 @@ mod tests {
       error.to_string().contains("pdf-tools"),
       "the error has to name the skill whose body went missing: {error}"
     );
+  }
+
+  #[test]
+  fn package_skills_are_discovered_from_global_packages() {
+    let fixture = Fixture::new();
+    let pkg_dir = fixture.home.join(".pi/packages/pack-a");
+    fs::create_dir_all(pkg_dir.join("skills/skill-from-pack")).expect("create pkg skill dir");
+    fs::write(
+      pkg_dir.join("package.json"),
+      r#"{"name": "pack-a", "pi": {"skills": ["skills/"]}}"#,
+    )
+    .expect("write package.json");
+    fs::write(
+      pkg_dir.join("skills/skill-from-pack/SKILL.md"),
+      "---\nname: skill-from-pack\ndescription: A package skill.\n---\nBody\n",
+    )
+    .expect("write SKILL.md");
+
+    let scan = discover(&fixture.discovery());
+    let skill = scan.named("skill-from-pack").expect("pkg skill found");
+    assert_eq!(skill.source, Source::Global);
+    assert_eq!(skill.package.as_deref(), Some("pack-a"));
+    assert_eq!(skill.description, "A package skill.");
+  }
+
+  #[test]
+  fn conventional_package_skill_md_is_discovered() {
+    let fixture = Fixture::new();
+    let pkg_dir = fixture.home.join(".pi/packages/pack-single");
+    fs::create_dir_all(&pkg_dir).expect("create pkg dir");
+    fs::write(
+      pkg_dir.join("package.json"),
+      r#"{"name": "pack-single", "version": "1.0.0"}"#,
+    )
+    .expect("write package.json");
+    fs::write(
+      pkg_dir.join("SKILL.md"),
+      "---\nname: single-skill\ndescription: Single conventional skill.\n---\nBody\n",
+    )
+    .expect("write SKILL.md");
+
+    let scan = discover(&fixture.discovery());
+    let skill = scan.named("single-skill").expect("single skill found");
+    assert_eq!(skill.source, Source::Global);
+    assert_eq!(skill.package.as_deref(), Some("pack-single"));
+  }
+
+  #[test]
+  fn project_package_skills_are_gated_by_trust() {
+    let fixture = Fixture::new();
+    let pkg_dir = fixture.project.join(".pi/packages/proj-pack");
+    fs::create_dir_all(pkg_dir.join("skills/proj-skill")).expect("create proj pkg dir");
+    fs::write(
+      pkg_dir.join("package.json"),
+      r#"{"name": "proj-pack", "pi": {"skills": ["skills/"]}}"#,
+    )
+    .expect("write package.json");
+    fs::write(
+      pkg_dir.join("skills/proj-skill/SKILL.md"),
+      "---\nname: proj-skill\ndescription: Project package skill.\n---\nBody\n",
+    )
+    .expect("write SKILL.md");
+
+    let untrusted = discover(&fixture.discovery());
+    assert!(
+      untrusted.named("proj-skill").is_none(),
+      "untrusted project package skill must not be read"
+    );
+
+    let trusted = discover(&fixture.discovery().trusted());
+    let skill = trusted
+      .named("proj-skill")
+      .expect("trusted pkg skill found");
+    assert_eq!(skill.source, Source::Project);
+    assert_eq!(skill.package.as_deref(), Some("proj-pack"));
+  }
+
+  #[test]
+  fn explicit_skill_options_take_precedence() {
+    let fixture = Fixture::new();
+    let extra_dir = fixture.project.join("custom-skill");
+    fs::create_dir_all(&extra_dir).expect("create extra skill dir");
+    fs::write(
+      extra_dir.join("SKILL.md"),
+      "---\nname: custom\ndescription: Explicit custom skill.\n---\nBody\n",
+    )
+    .expect("write custom SKILL.md");
+
+    let options = SkillOptions {
+      extra_skills: vec![extra_dir.join("SKILL.md")],
+    };
+    let scan = discover_with_options(&fixture.discovery(), &options);
+    let skill = scan.named("custom").expect("explicit skill found");
+    assert_eq!(skill.source, Source::Global);
+    assert_eq!(skill.package, None);
   }
 }

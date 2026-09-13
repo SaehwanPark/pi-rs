@@ -154,3 +154,50 @@ fn project_locations_are_read_only_when_the_project_is_trusted() {
     "the gate adds no warnings"
   );
 }
+
+#[test]
+fn package_skills_in_fixtures_are_discovered_from_home() {
+  let pkg_home = Path::new(env!("CARGO_MANIFEST_DIR"))
+    .join("tests/compat/packages/home")
+    .canonicalize()
+    .expect("packages fixture home");
+  let scan = skill::discover(&Discovery {
+    home: Some(pkg_home),
+    cwd: home().join("not-a-project"),
+    trust: Trust::Untrusted,
+  });
+
+  let skill = scan.named("skill-a").expect("fixture package skill found");
+  assert_eq!(skill.source, Source::Global);
+  assert_eq!(skill.package.as_deref(), Some("fixture-pkg-a"));
+  assert_eq!(skill.description, "First skill in fixture package A");
+}
+
+#[test]
+fn package_skills_in_project_fixtures_respect_trust_boundary() {
+  let pkg_project = Path::new(env!("CARGO_MANIFEST_DIR"))
+    .join("tests/compat/packages/project")
+    .canonicalize()
+    .expect("packages fixture project");
+
+  let untrusted = skill::discover(&Discovery {
+    home: None,
+    cwd: pkg_project.clone(),
+    trust: Trust::Untrusted,
+  });
+  assert!(
+    untrusted.named("proj-skill").is_none(),
+    "project package skills must not be read without trust"
+  );
+
+  let trusted = skill::discover(&Discovery {
+    home: None,
+    cwd: pkg_project,
+    trust: Trust::Trusted,
+  });
+  let skill = trusted
+    .named("proj-skill")
+    .expect("project package skill found");
+  assert_eq!(skill.source, Source::Project);
+  assert_eq!(skill.package.as_deref(), Some("project-pkg"));
+}

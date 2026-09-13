@@ -23,7 +23,10 @@ pub fn execute(args: SkillsArgs) -> Result<(), String> {
   } else {
     Discovery::new(cwd)
   };
-  let scan = skill::discover(&discovery);
+  let options = skill::SkillOptions {
+    extra_skills: args.skill_paths,
+  };
+  let scan = skill::discover_with_options(&discovery, &options);
 
   // The two non-listing surfaces print their one thing raw; the commentary below them is
   // still commentary, so it still goes to stderr.
@@ -50,7 +53,17 @@ pub fn execute(args: SkillsArgs) -> Result<(), String> {
       } else {
         ""
       };
-      println!("{}  {}{}", skill.source.as_str(), skill.name, hidden);
+      let pkg_info = match &skill.package {
+        Some(pkg) => format!(" (package: {pkg})"),
+        None => String::new(),
+      };
+      println!(
+        "{}  {}{}{}",
+        skill.source.as_str(),
+        skill.name,
+        pkg_info,
+        hidden
+      );
       println!("{}", skill.description);
     }
   }

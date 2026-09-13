@@ -141,6 +141,7 @@ pub const SKILLS_HELP: &str = concat!(
   "                           explicit-only are not in it.\n",
   "  --show <name>            Print one skill's body. This is the explicit invocation\n",
   "                           an explicit-only skill reserves for the user.\n",
+  "  --skill <path>           Explicit skill file or directory to load\n",
   "  --help                   Show this help.\n",
 );
 
@@ -296,6 +297,8 @@ pub struct SkillsArgs {
   /// Print one skill's body: the explicit invocation a `disable-model-invocation`
   /// skill reserves for the user.
   pub show: Option<String>,
+  /// Explicit skill files or directories passed via `--skill <path>`.
+  pub skill_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -468,6 +471,7 @@ fn parse_skills(remaining: &[OsString]) -> Result<Command, String> {
   let mut project = false;
   let mut control_prompt = false;
   let mut show: Option<String> = None;
+  let mut skill_paths = Vec::new();
   let mut index = 0;
   while index < remaining.len() {
     let flag = remaining[index]
@@ -477,6 +481,15 @@ fn parse_skills(remaining: &[OsString]) -> Result<Command, String> {
     match flag {
       "--project" => project = true,
       "--control-prompt" => control_prompt = true,
+      "--skill" => {
+        let path = remaining
+          .get(index)
+          .and_then(|value| value.to_str())
+          .filter(|value| !value.starts_with('-'))
+          .ok_or_else(|| format!("--skill needs a path\n{SKILLS_HELP}"))?;
+        index += 1;
+        skill_paths.push(PathBuf::from(path));
+      }
       "--show" => {
         let name = remaining
           .get(index)
@@ -496,6 +509,7 @@ fn parse_skills(remaining: &[OsString]) -> Result<Command, String> {
     project,
     control_prompt,
     show,
+    skill_paths,
   }))
 }
 
@@ -1439,6 +1453,7 @@ mod tests {
         project: false,
         control_prompt: false,
         show: None,
+        skill_paths: Vec::new(),
       })
     );
     assert_eq!(
@@ -1447,6 +1462,16 @@ mod tests {
         project: true,
         control_prompt: false,
         show: None,
+        skill_paths: Vec::new(),
+      })
+    );
+    assert_eq!(
+      parse(strings(&["skills", "--skill", "my-skill/SKILL.md"])).unwrap(),
+      Command::Skills(SkillsArgs {
+        project: false,
+        control_prompt: false,
+        show: None,
+        skill_paths: vec![PathBuf::from("my-skill/SKILL.md")],
       })
     );
     // The two surfaces that replace the listing, and the name --show insists on.
@@ -1465,6 +1490,7 @@ mod tests {
       }) if name == "pdf-tools"
     ));
     assert!(parse(strings(&["skills", "--show"])).is_err());
+    assert!(parse(strings(&["skills", "--skill"])).is_err());
   }
 
   #[test]
