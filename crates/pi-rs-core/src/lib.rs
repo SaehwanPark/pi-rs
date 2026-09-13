@@ -49,7 +49,8 @@ pub use config::{
 };
 pub use context::{
   CapsuleArtifact, CapsuleDecision, ContextAction, ContextCapsule, ContextDecision, ContextLevel,
-  ContextPolicy, ContextProfile, ContextState, ContextThresholds, ProfilePolicy, ReductionReason,
+  ContextPolicy, ContextProfile, ContextState, ContextThresholds, ExternalContextItem,
+  ProfilePolicy, ReductionReason,
 };
 pub use event::{
   AgentEvent, AssistantDelta, AttributedMessage, CheckpointCreated, ContextCompactionCompleted,

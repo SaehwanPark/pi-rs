@@ -655,8 +655,10 @@ Do not begin until stable baselines exist.
       producer triggers compaction during the agent loop via `CompactionStrategy::Summarize`
       or pluggable `Summarizer`, and `/compact [notes]` interactive command enables manual
       compaction with epoch tracking.
-- [ ] Fold retrieved external context into the turn: `ExternalContextRetrieved` is
-      recorded but no message path consumes it yet.
+- [x] Fold retrieved external context into the turn: `ExternalContextItem` supports
+      inline and reference payloads, emits `ExternalContextRetrieved` to the event trace,
+      and folds formatted context and citations into the model's message path via
+      `TurnLoop::run_turn_with_external_context`.
 - [x] Slash-completion for the interactive input line, plus its benchmark: `Tab` walks
       `Completions` in `pi-rs-tui::complete`, the editor owns the cycle, and the loop answers
       `/help`, `/quit`, and `/exit` itself.
