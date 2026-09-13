@@ -559,3 +559,70 @@ fn request_bodies_are_what_the_server_actually_received() {
   assert_eq!(body["tools"][0]["function"]["name"], "grep");
   assert_eq!(body["stop"][0], "\n\nuser:");
 }
+
+#[test]
+fn remote_cloud_provider_bearer_auth_and_custom_headers() {
+  let server = FakeServer::answer(complete_sse(
+    "data: {\"choices\":[{\"delta\":{\"content\":\"remote ok\"},\"index\":0}]}\n\n",
+  ));
+  unsafe {
+    std::env::set_var("TEST_WIRE_REMOTE_KEY", "sk-or-v1-secret");
+  }
+  let mut cfg = ProviderConfig::remote(
+    "openrouter",
+    "anthropic/claude-3.5-sonnet",
+    Some(server.base_url()),
+    "TEST_WIRE_REMOTE_KEY",
+    128_000,
+  );
+  cfg.headers.insert(
+    "http-referer".into(),
+    "https://github.com/SaehwanPark/pi-rs".into(),
+  );
+  cfg.headers.insert("x-title".into(), "pi-rs".into());
+  let adapter = OpenAiCompat::new(cfg).expect("adapter");
+  let (result, collector) = stream(&adapter, &request("ping remote"));
+  result.expect("completion");
+  let request_text = server.request();
+  unsafe {
+    std::env::remove_var("TEST_WIRE_REMOTE_KEY");
+  }
+
+  let lower = request_text.to_lowercase();
+  assert!(
+    lower.contains("authorization: bearer sk-or-v1-secret"),
+    "wire must carry bearer credential: {request_text}"
+  );
+  assert!(
+    lower.contains("http-referer: https://github.com/saehwanpark/pi-rs"),
+    "wire must carry custom headers: {request_text}"
+  );
+  assert!(
+    lower.contains("x-title: pi-rs"),
+    "wire must carry custom headers: {request_text}"
+  );
+  let events = collector.events();
+  assert!(
+    matches!(&events[0], ProviderEvent::TextDelta(t) if t == "remote ok"),
+    "{events:?}"
+  );
+}
+
+#[test]
+fn remote_cloud_provider_server_error_mapping() {
+  let server = FakeServer::answer(status(
+    502,
+    "Bad Gateway",
+    "<html><body>502 Bad Gateway from cloud CDN</body></html>",
+    "",
+  ));
+  let adapter = adapter(&server.base_url(), Some("sk-remote"));
+  let (result, _) = stream(&adapter, &request("ping gateway"));
+  let failure = result.unwrap_err();
+  assert_eq!(
+    failure.kind,
+    ModelFailureKind::ProviderUnavailable,
+    "gateway 502 maps to provider unavailable"
+  );
+  assert!(failure.kind.is_retryable(), "server errors are retryable");
+}

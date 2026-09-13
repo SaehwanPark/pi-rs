@@ -146,6 +146,27 @@ impl ProviderConfig {
     }
   }
 
+  /// Config for a remote cloud endpoint with an environment variable holding the credential.
+  pub fn remote(
+    id: impl Into<String>,
+    model: impl Into<String>,
+    base_url: Option<impl Into<String>>,
+    api_key_env: impl Into<String>,
+    context_window: u64,
+  ) -> Self {
+    Self {
+      id: id.into(),
+      model: model.into(),
+      base_url: base_url
+        .map(Into::into)
+        .unwrap_or_else(|| DEFAULT_BASE_URL.into()),
+      api_key: None,
+      api_key_env: Some(api_key_env.into()),
+      capabilities: ModelCapabilities::text_only(context_window),
+      ..Self::default()
+    }
+  }
+
   /// Derive adapter config from a runtime-config endpoint.
   ///
   /// The credential is resolved from the environment exactly once, here, so
@@ -328,5 +349,48 @@ mod tests {
     };
     let gaps = config().gaps(&required);
     assert_eq!(gaps, vec![CapabilityGap::Tools], "tools is the only gap");
+  }
+
+  #[test]
+  fn remote_endpoint_defaults_to_default_base_url_and_resolves_env_key() {
+    let endpoint = ModelEndpoint::remote(
+      "openai",
+      "gpt-4o",
+      None::<String>,
+      "PI_RS_TEST_REMOTE_CONFIG_KEY",
+      128_000,
+    );
+    unsafe {
+      std::env::set_var("PI_RS_TEST_REMOTE_CONFIG_KEY", "sk-live-test");
+    }
+    let derived = ProviderConfig::from_endpoint(&endpoint).unwrap();
+    assert_eq!(derived.base_url, DEFAULT_BASE_URL);
+    assert_eq!(
+      derived.chat_completions_url(),
+      "https://api.openai.com/v1/chat/completions"
+    );
+    assert_eq!(derived.credential().as_deref(), Some("sk-live-test"));
+    unsafe {
+      std::env::remove_var("PI_RS_TEST_REMOTE_CONFIG_KEY");
+    }
+  }
+
+  #[test]
+  fn remote_config_constructor_honours_custom_base_url() {
+    let cfg = ProviderConfig::remote(
+      "groq",
+      "llama-3.3-70b",
+      Some("https://api.groq.com/openai/v1"),
+      "GROQ_API_KEY",
+      131_072,
+    );
+    assert_eq!(cfg.id, "groq");
+    assert_eq!(cfg.model, "llama-3.3-70b");
+    assert_eq!(cfg.base_url, "https://api.groq.com/openai/v1");
+    assert_eq!(
+      cfg.chat_completions_url(),
+      "https://api.groq.com/openai/v1/chat/completions"
+    );
+    assert_eq!(cfg.api_key_env.as_deref(), Some("GROQ_API_KEY"));
   }
 }
