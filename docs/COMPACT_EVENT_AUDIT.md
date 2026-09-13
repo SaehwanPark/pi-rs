@@ -57,8 +57,18 @@ Pinned by two new unit tests in `crates/pi-rs-core/src/event.rs`:
 
 Both round-trip through `serde_json::from_str` and compare equal to the original event.
 
-## Follow-up (not decided here)
+## Resolution and Implementation
 
-Two schema variants have consumers in the TUI and no producer. A follow-up decides whether to wire
-emission from the compaction path that a surface owns, or to remove the variants. Until then the
-tests above keep the wire format from drifting silently.
+Issue #38 evaluated whether to emit the compaction event family or remove the variants from the schema.
+Resolution 1 was adopted: compaction producers were implemented in `crates/pi-rs-runtime/src/turn.rs`
+across three compaction mechanisms:
+
+1. **L1 Summarizing Compaction** (PR #56): emits `ContextCompactionStarted(Level::L1Ordinary)` →
+   `ContextSummary` → `ContextCompactionEpoch` → `ContextCompactionCompleted(Level::L1Ordinary)`.
+2. **L2 Semantic Phase Compaction** (PR #61): emits `ContextCompactionStarted(Level::L2Phase)` →
+   `ContextCompactionCompleted(Level::L2Phase)`.
+3. **L3 Checkpoint Compaction** (PR #59): creates impermeable barriers and advances context epoch via
+   `ContextCompactionCompleted(Level::L3Checkpoint)`.
+
+All variants are actively constructed in production, tested with round-trip serialization tests, and
+rendered in the transcript and interactive TUI.
