@@ -34,6 +34,6 @@ pub mod turn;
 pub use failover::{FailoverPolicy, Recovery};
 pub use store_trace::StoreTrace;
 pub use turn::{
-  MAX_MODEL_REQUESTS_PER_TURN, SilentProgress, Trace, TraceSink, TurnError, TurnLoop, TurnProgress,
-  TurnReport,
+  CompactionStrategy, MAX_MODEL_REQUESTS_PER_TURN, SilentProgress, Summarizer, Trace, TraceSink,
+  TurnError, TurnLoop, TurnProgress, TurnReport,
 };

@@ -18,6 +18,7 @@
 //! - **Context is never silently truncated.** An oversized request is refused, and
 //!   the refusal is recorded.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -36,6 +37,19 @@ use pi_rs_core::{
 use pi_rs_tools::{Executed, ToolRegistry};
 
 use crate::failover::{FailoverPolicy, Recovery};
+
+/// How to handle context pressure when policy recommends compaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompactionStrategy {
+  /// Drop oldest turns without summarizing (pre-emptive reduction).
+  #[default]
+  Evict,
+  /// Summarize oldest turns into a canonical summary and open a compaction epoch.
+  Summarize,
+}
+
+/// Custom summarizer function alias.
+pub type Summarizer = Arc<dyn Fn(&[Message]) -> String + Send + Sync>;
 
 /// How many model round-trips one user input may take.
 ///
@@ -272,6 +286,8 @@ pub struct TurnLoop<'a> {
   /// replaces. Stored as bounds, not the log itself: the loop cites history, it
   /// never replays it.
   history: Option<(pi_rs_core::EventSeq, pi_rs_core::EventSeq)>,
+  compaction_strategy: CompactionStrategy,
+  summarizer: Option<Summarizer>,
 }
 
 impl<'a> TurnLoop<'a> {
@@ -313,6 +329,8 @@ impl<'a> TurnLoop<'a> {
       measured_input_tokens: None,
       envelopes: Vec::new(),
       history: None,
+      compaction_strategy: CompactionStrategy::default(),
+      summarizer: None,
     }
   }
 
@@ -385,6 +403,22 @@ impl<'a> TurnLoop<'a> {
   /// Seed the visible history, for example after a session resume.
   pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
     self.messages = messages;
+    self
+  }
+
+  /// Set the compaction strategy when context policy recommends compaction.
+  pub fn with_compaction_strategy(mut self, strategy: CompactionStrategy) -> Self {
+    self.compaction_strategy = strategy;
+    self
+  }
+
+  /// Attach a custom summarizer function, enabling summarizing compaction.
+  pub fn with_summarizer(
+    mut self,
+    summarizer: impl Fn(&[Message]) -> String + Send + Sync + 'static,
+  ) -> Self {
+    self.summarizer = Some(Arc::new(summarizer));
+    self.compaction_strategy = CompactionStrategy::Summarize;
     self
   }
 
@@ -1134,6 +1168,52 @@ impl<'a> TurnLoop<'a> {
     Ok(removed as u32)
   }
 
+  /// Compact oldest messages using either an explicit summary or a synthesized one.
+  pub fn compact_with_summary_or(
+    &mut self,
+    turn_id: &TurnId,
+    target_tokens: u64,
+    explicit_summary: Option<&str>,
+  ) -> Result<u32, TurnError> {
+    if self.messages.len() <= 1 {
+      return Ok(0);
+    }
+    let mut kept = 1usize;
+    while kept < self.messages.len().saturating_sub(1) {
+      let next_kept = kept + 1;
+      let start = self.messages.len() - next_kept;
+      if estimate_messages(&self.messages[start..]) > target_tokens {
+        break;
+      }
+      kept = next_kept;
+    }
+    let kept = kept.min(self.messages.len().saturating_sub(1));
+    let removed = self.messages.len() - kept;
+    if removed == 0 {
+      return Ok(0);
+    }
+    let summary_text = match explicit_summary {
+      Some(text) => text.to_string(),
+      None => {
+        let slice = &self.messages[..removed];
+        match &self.summarizer {
+          Some(custom) => custom(slice),
+          None => structured_summary(slice),
+        }
+      }
+    };
+    self.compact(turn_id, &summary_text, kept)
+  }
+
+  /// Compact oldest messages using the configured summarizer.
+  pub fn compact_with_summary(
+    &mut self,
+    turn_id: &TurnId,
+    target_tokens: u64,
+  ) -> Result<u32, TurnError> {
+    self.compact_with_summary_or(turn_id, target_tokens, None)
+  }
+
   /// Build the model request, consulting the context policy first.
   fn build_request(&mut self, turn_id: &TurnId) -> Result<ModelRequest, TurnError> {
     let capabilities = self.provider().capabilities();
@@ -1165,17 +1245,18 @@ impl<'a> TurnLoop<'a> {
           kind: ModelFailureKind::ContextOverflow,
         }));
       }
-      // The runtime cannot summarize: that needs a model and a user decision about
-      // what to keep, and the surface owns both. It can do the tier below
-      // summarization by itself: drop the oldest model-visible turns at this safe
-      // boundary, where the fact and a recovery reference are recorded and the
-      // canonical history remains in the trace untouched.
+      // When compaction is recommended, summarizing compaction opens a durable
+      // epoch if configured. Otherwise, pre-emptive eviction sheds oldest turns.
       ContextAction::Compact {
         level,
         reason,
         target_tokens,
       } => {
-        if self.evict_oldest(target_tokens, turn_id)? == 0 {
+        let mut compacted = 0;
+        if self.compaction_strategy == CompactionStrategy::Summarize || self.summarizer.is_some() {
+          compacted = self.compact_with_summary(turn_id, target_tokens)?;
+        }
+        if compacted == 0 && self.evict_oldest(target_tokens, turn_id)? == 0 {
           // Nothing could be dropped: the newest turn alone is over the target.
           // The recommendation is the surface's again, so it stays visible.
           self.diagnostic(
@@ -1649,6 +1730,59 @@ fn estimate_message_bytes(message: &Message) -> usize {
       ContentBlock::Image { data_base64, .. } => data_base64.len(),
     })
     .sum()
+}
+
+/// Synthesize a structured factual summary of older conversation messages.
+pub fn structured_summary(messages: &[Message]) -> String {
+  let mut summary = String::from("Summary of earlier conversation:\n");
+  for msg in messages {
+    let text = msg.text();
+    let trimmed = text.trim();
+    match msg.role {
+      Role::User if !trimmed.is_empty() => {
+        summary.push_str("- User: ");
+        let preview: String = trimmed
+          .lines()
+          .next()
+          .unwrap_or(trimmed)
+          .chars()
+          .take(120)
+          .collect();
+        summary.push_str(&preview);
+        summary.push('\n');
+      }
+      Role::Assistant => {
+        for block in &msg.content {
+          match block {
+            ContentBlock::Text { text } => {
+              let t_trimmed = text.trim();
+              if !t_trimmed.is_empty() {
+                summary.push_str("- Assistant: ");
+                let preview: String = t_trimmed
+                  .lines()
+                  .next()
+                  .unwrap_or(t_trimmed)
+                  .chars()
+                  .take(120)
+                  .collect();
+                summary.push_str(&preview);
+                summary.push('\n');
+              }
+            }
+            ContentBlock::ToolCall(call) => {
+              summary.push_str(&format!("- Action: called tool `{}`\n", call.name));
+            }
+            _ => {}
+          }
+        }
+      }
+      Role::Tool => {
+        summary.push_str("- Tool: completed execution\n");
+      }
+      _ => {}
+    }
+  }
+  summary
 }
 
 #[cfg(test)]
@@ -3612,6 +3746,93 @@ mod tests {
         .as_str()
         .is_some_and(|hash| hash.len() == 64),
       "the reference names stored bytes by digest: {summary:?}"
+    );
+  }
+
+  #[test]
+  fn summarizing_compaction_producer_triggers_under_window_pressure() {
+    let mut provider = Scripted::new("pressured", vec![text("ok")]);
+    provider.capabilities.context_window = PRESSURED_WINDOW;
+    let tools = registry_with(Vec::new());
+    let policy =
+      pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, PRESSURED_WINDOW);
+    let mut trace = Recorder::default();
+
+    TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(heavy_turns(16))
+    .with_compaction_strategy(CompactionStrategy::Summarize)
+    .run_turn("go", &CancelToken::new(), &mut SilentProgress)
+    .expect("turn completes");
+
+    let kinds = trace.kinds();
+    let started = kinds.iter().position(|k| k == "context_compaction_started");
+    let summary = kinds.iter().position(|k| k == "context_summary");
+    let epoch = kinds.iter().position(|k| k == "context_compaction_epoch");
+    let completed = kinds
+      .iter()
+      .position(|k| k == "context_compaction_completed");
+
+    assert!(
+      started.is_some(),
+      "compaction started is recorded: {kinds:?}"
+    );
+    assert!(summary.is_some(), "summary message is recorded: {kinds:?}");
+    assert!(epoch.is_some(), "epoch is opened: {kinds:?}");
+    assert!(
+      completed.is_some(),
+      "compaction completed is recorded: {kinds:?}"
+    );
+
+    let epoch_payload = trace.find("context_compaction_epoch").unwrap();
+    assert_eq!(epoch_payload["context_epoch"], 1);
+
+    // The model request that ran carried the summary and the retained messages.
+    let req = &provider.requests()[0];
+    assert!(
+      req
+        .messages
+        .iter()
+        .any(|m| m.text().contains("Summary of earlier conversation")),
+      "request carries the synthesized summary"
+    );
+  }
+
+  #[test]
+  fn custom_summarizer_is_honoured_during_compaction() {
+    let mut provider = Scripted::new("pressured", vec![text("ok")]);
+    provider.capabilities.context_window = PRESSURED_WINDOW;
+    let tools = registry_with(Vec::new());
+    let policy =
+      pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, PRESSURED_WINDOW);
+    let mut trace = Recorder::default();
+
+    TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(heavy_turns(16))
+    .with_summarizer(|slice| format!("custom capsule of {} turns", slice.len()))
+    .run_turn("go", &CancelToken::new(), &mut SilentProgress)
+    .expect("turn completes");
+
+    let req = &provider.requests()[0];
+    assert!(
+      req
+        .messages
+        .iter()
+        .any(|m| m.text().contains("custom capsule")),
+      "request carries the custom summary"
     );
   }
 }

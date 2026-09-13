@@ -650,9 +650,11 @@ Do not begin until stable baselines exist.
       boundary now evicts the oldest model-visible turns to the profile's recent
       target, recorded as `ContextReduced` with the target it reached (the durable
       epoch it does not open stays in the trace untouched).
-- [-] Summarizing compaction producer: the durable compaction epoch mechanism is
-      implemented (`TurnLoop::compact` in #52); the request-size/window-pressure heuristic
-      producer triggering compaction during the agent loop is next to complete.
+- [x] Summarizing compaction producer: the durable compaction epoch mechanism is
+      implemented (`TurnLoop::compact`); request-size/window-pressure heuristic
+      producer triggers compaction during the agent loop via `CompactionStrategy::Summarize`
+      or pluggable `Summarizer`, and `/compact [notes]` interactive command enables manual
+      compaction with epoch tracking.
 - [ ] Fold retrieved external context into the turn: `ExternalContextRetrieved` is
       recorded but no message path consumes it yet.
 - [x] Slash-completion for the interactive input line, plus its benchmark: `Tab` walks
