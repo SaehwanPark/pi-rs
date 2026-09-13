@@ -16,6 +16,7 @@ pub const TOP_HELP: &str = concat!(
   "  prompts      List the prompt templates a session would offer\n",
   "  prompt       Expand one prompt template and print the prompt it becomes\n",
   "  packages     List discovered Pi packages and their contained surfaces\n",
+  "  compat       Inspect an artifact or package for Pi behavioral compatibility\n",
   "  import       Import a Pi session file into the store, reporting what could not\n",
   "               be carried\n",
   "  export       Write a session back out as a Pi session file\n",
@@ -202,6 +203,21 @@ pub const PACKAGES_HELP: &str = concat!(
   "  --help                   Show this help.\n",
 );
 
+pub const COMPAT_HELP: &str = concat!(
+  "Usage: pi-rs compat [options] <path-or-package>\n",
+  "\n",
+  "Inspect an artifact or package for Pi behavioral compatibility.\n",
+  "\n",
+  "Identifies whether the target is a Pi package manifest/directory, a skill, or a\n",
+  "prompt template, and reports supported, partial, experimental, and unsupported\n",
+  "surfaces against Pi behavioral compatibility targets.\n",
+  "\n",
+  "Options:\n",
+  "  --project                Read project package locations when resolving package names\n",
+  "  --json                   Emit machine-readable JSON compatibility report\n",
+  "  --help                   Show this help.\n",
+);
+
 pub const IMPORT_HELP: &str = concat!(
   "Usage: pi-rs import-pi <pi-session.jsonl|session-dir> [options]\n",
   "\n",
@@ -257,8 +273,20 @@ pub enum Command {
   Prompts(PromptsArgs),
   Prompt(PromptArgs),
   Packages(PackagesArgs),
+  Compat(CompatArgs),
   Import(ImportArgs),
   Export(ExportArgs),
+}
+
+/// `pi-rs compat`: inspect an artifact or package for compatibility.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CompatArgs {
+  /// The path or package name to inspect.
+  pub target: String,
+  /// Whether the project's own package locations may be read.
+  pub project: bool,
+  /// Whether to format the output as JSON.
+  pub json: bool,
 }
 
 /// `pi-rs packages`: packages discovered on disk.
@@ -464,6 +492,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
   if command == "packages" {
     return parse_packages(&remaining);
   }
+  if command == "compat" {
+    return parse_compat(&remaining);
+  }
   if command == "import-pi" || command == "import" {
     return parse_import(&remaining);
   }
@@ -652,6 +683,48 @@ fn parse_packages(remaining: &[OsString]) -> Result<Command, String> {
     };
   }
   Ok(Command::Packages(PackagesArgs { project, show }))
+}
+
+/// `pi-rs compat`: inspect an artifact or package for compatibility.
+fn parse_compat(remaining: &[OsString]) -> Result<Command, String> {
+  let mut project = false;
+  let mut json = false;
+  let mut target: Option<String> = None;
+  let mut index = 0;
+  while index < remaining.len() {
+    let arg = remaining[index]
+      .to_str()
+      .ok_or_else(|| format!("compat argument is not valid UTF-8\n{COMPAT_HELP}"))?;
+    index += 1;
+    match arg {
+      "--project" => project = true,
+      "--json" => json = true,
+      "--help" | "-h" => return Ok(Command::Help(COMPAT_HELP)),
+      other if other.starts_with('-') => {
+        return Err(format!("unknown compat argument '{other}'\n{COMPAT_HELP}"));
+      }
+      other => {
+        if let Some(existing) = &target {
+          return Err(format!(
+            "compat accepts only one target to inspect, already have '{existing}'\n{COMPAT_HELP}"
+          ));
+        }
+        target = Some(other.to_string());
+      }
+    }
+  }
+
+  let target = target.ok_or_else(|| {
+    format!(
+      "compat needs a target to inspect (file path, directory, or package name)\n{COMPAT_HELP}"
+    )
+  })?;
+
+  Ok(Command::Compat(CompatArgs {
+    target,
+    project,
+    json,
+  }))
 }
 
 /// `pi-rs run`: the answer goes to stdout, the transcript goes to stderr.
@@ -1664,11 +1737,43 @@ mod tests {
   #[test]
   fn the_new_commands_are_listed_where_commands_are_listed() {
     // A command that is not in the top-level help is a command nobody finds.
-    for command in ["prompts", "prompt"] {
+    for command in ["prompts", "prompt", "compat"] {
       assert!(
         TOP_HELP.contains(&format!("  {command} ")),
         "TOP_HELP should list `{command}`: {TOP_HELP}"
       );
     }
+  }
+
+  #[test]
+  fn parse_compat_parses_target_and_flags() {
+    assert_eq!(
+      parse(strings(&["compat", "my-pkg"])).unwrap(),
+      Command::Compat(CompatArgs {
+        target: "my-pkg".to_string(),
+        project: false,
+        json: false,
+      })
+    );
+
+    assert_eq!(
+      parse(strings(&["compat", "--project", "--json", "./path/to/pkg"])).unwrap(),
+      Command::Compat(CompatArgs {
+        target: "./path/to/pkg".to_string(),
+        project: true,
+        json: true,
+      })
+    );
+
+    assert_eq!(
+      parse(strings(&["compat", "--help"])).unwrap(),
+      Command::Help(COMPAT_HELP)
+    );
+
+    let err = match parse(strings(&["compat"])) {
+      Err(msg) => msg,
+      Ok(cmd) => panic!("expected error, got {cmd:?}"),
+    };
+    assert!(err.contains("compat needs a target to inspect"));
   }
 }

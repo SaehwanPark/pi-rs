@@ -1,4 +1,5 @@
 mod cli;
+mod compat;
 mod export_pi;
 mod import_pi;
 mod interactive;
@@ -26,6 +27,7 @@ fn main() {
     cli::Command::Prompts(args) => report(prompts::list(args)),
     cli::Command::Prompt(args) => report(prompts::expand(args)),
     cli::Command::Packages(args) => report(packages::execute(args)),
+    cli::Command::Compat(args) => report(compat::execute(args)),
     cli::Command::Import(args) => report(import_pi::execute(args)),
     cli::Command::Export(args) => report(export_pi::execute(args)),
   }

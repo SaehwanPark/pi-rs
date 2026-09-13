@@ -16,6 +16,7 @@
 //! file is evidence about that file. It does not become runtime state, an event, or a
 //! capability unless something in the runtime deliberately adopts it.
 
+pub mod compat;
 pub mod frontmatter;
 pub mod package;
 pub mod prompt;
