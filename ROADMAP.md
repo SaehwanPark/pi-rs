@@ -251,7 +251,7 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [x] Implement Pi-style skill discovery.
 - [x] Implement `SKILL.md` loading.
 - [x] Implement prompt-template discovery.
-- [ ] Add package-local skill support.
+- [x] Add package-local skill support.
 - [x] Add project-local skill support.
 - [ ] Add compatibility fixtures.
 
@@ -260,8 +260,10 @@ families Pi documents — per-user and per-project — including the rule that a
 counts as a skill in `.pi/` locations and is ignored in the shared `.agents/` ones, the
 ancestor walk that stops at the git root, and the frontmatter subset (`name`,
 `description`, `license`, `compatibility`, `allowed-tools`, `disable-model-invocation`)
-with quoted scalars and `|`/`>` block scalars. Project locations are gated on trust, and
-frontmatter declares the trust question as an input rather than answering it.
+with quoted scalars and `|`/`>` block scalars. Package-local skills from discovered
+packages (global and project, gated on trust) and explicit `--skill` paths are supported.
+Project locations are gated on trust, and frontmatter declares the trust question as an
+input rather than answering it.
 
 Prompt-template discovery (`pi-rs-compat::prompt`, surfaced by `pi-rs prompts`) reads
 Pi's two template locations non-recursively, takes the command name from the filename, and
@@ -274,8 +276,8 @@ Open in this area, in order:
 
 - [x] Load `SKILL.md` bodies and honour `disable-model-invocation` when activating.
 - [x] Present loaded skills to the model as a skill-control prompt listing/template.
-- [ ] Add the remaining Pi skill sources: package `skills/`, `package.json` entries, the
-      `skills` array in settings, and `--skill` paths.
+- [x] Add package-local skills (`manifest.skill_paths`, conventional `skills/` and `SKILL.md`),
+      and `--skill` CLI paths. (Settings array remains deferred).
 - [x] Invoke a prompt template from inside a session (`/name`), and wire `pi-rs run` to
       accept one; `pi-rs prompt` expands a template today, nothing sends it.
 - [x] Split one typed string into template arguments the way Pi's editor does, quotes

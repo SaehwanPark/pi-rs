@@ -130,3 +130,46 @@ fn show_prints_one_body_and_reaches_even_the_skill_the_model_may_not() {
   assert!(stdout.is_empty(), "{stdout}");
   assert!(stderr.contains("no skill named"), "{stderr}");
 }
+
+#[test]
+fn skills_command_lists_package_skills_with_package_attribution() {
+  let pkg_home = Path::new(env!("CARGO_MANIFEST_DIR"))
+    .join("tests/compat/packages/home")
+    .canonicalize()
+    .expect("pkg home");
+  let temp = tempfile::TempDir::new().expect("temp project");
+  let (stdout, _stderr) = skills(&["skills"], &pkg_home, temp.path());
+  assert!(
+    stdout.contains("global  skill-a (package: fixture-pkg-a)"),
+    "{stdout}"
+  );
+  assert!(
+    stdout.contains("First skill in fixture package A"),
+    "{stdout}"
+  );
+}
+
+#[test]
+fn skills_command_supports_explicit_skill_path() {
+  let home = fixture_home();
+  let temp = tempfile::TempDir::new().expect("temp project");
+  let custom = temp.path().join("my-skill");
+  std::fs::create_dir_all(&custom).expect("create dir");
+  std::fs::write(
+    custom.join("SKILL.md"),
+    "---\nname: my-skill\ndescription: Custom loaded skill.\n---\n",
+  )
+  .expect("write custom skill");
+
+  let (stdout, _stderr) = skills(
+    &[
+      "skills",
+      "--skill",
+      &custom.join("SKILL.md").to_string_lossy(),
+    ],
+    &home,
+    temp.path(),
+  );
+  assert!(stdout.contains("global  my-skill"), "{stdout}");
+  assert!(stdout.contains("Custom loaded skill."), "{stdout}");
+}

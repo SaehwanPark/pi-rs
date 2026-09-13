@@ -94,7 +94,7 @@ when there is nothing to offer — and only global locations reach a session, be
 workspace's own skill files need a trust decision `run` does not have; `--project` with
 the `skills` command stays how one is read.
 
-Not yet: package-local skills, the `skills` array in settings, and `--skill` paths.
+Package-local skills from discovered packages and `--skill <path>` CLI options are supported. The `skills` array in settings is deferred.
 
 ## 6. Prompt templates
 
