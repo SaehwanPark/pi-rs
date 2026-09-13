@@ -1,0 +1,6 @@
+{
+  "name": "fixture-pkg-ext",
+  "version": "0.5.0",
+  "description": "Package with extension entry point.",
+  "extensions": ["dist/index.js"]
+}

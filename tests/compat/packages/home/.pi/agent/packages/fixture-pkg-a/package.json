@@ -1,0 +1,9 @@
+{
+  "name": "fixture-pkg-a",
+  "version": "1.0.0",
+  "description": "First fixture package with skills and prompts.",
+  "pi": {
+    "skills": ["skills/"],
+    "prompts": ["prompts/review.md"]
+  }
+}

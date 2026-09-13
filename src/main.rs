@@ -2,6 +2,7 @@ mod cli;
 mod export_pi;
 mod import_pi;
 mod interactive;
+mod packages;
 mod prompts;
 mod run;
 mod skills;
@@ -24,6 +25,7 @@ fn main() {
     cli::Command::Skills(args) => report(skills::execute(args)),
     cli::Command::Prompts(args) => report(prompts::list(args)),
     cli::Command::Prompt(args) => report(prompts::expand(args)),
+    cli::Command::Packages(args) => report(packages::execute(args)),
     cli::Command::Import(args) => report(import_pi::execute(args)),
     cli::Command::Export(args) => report(export_pi::execute(args)),
   }

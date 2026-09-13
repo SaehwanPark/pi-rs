@@ -127,3 +127,113 @@ fn missing_file_produces_an_unreadable_warning() {
     p.warnings[0]
   );
 }
+
+// ---------------------------------------------------------------------------
+// Package discovery driven by committed fixture directories
+// ---------------------------------------------------------------------------
+
+use pi_rs_compat::scan::{Discovery, Source, Trust};
+
+fn fixture_home() -> PathBuf {
+  Path::new(env!("CARGO_MANIFEST_DIR"))
+    .join("tests/compat/packages/home")
+    .canonicalize()
+    .expect("fixture home")
+}
+
+fn fixture_project() -> PathBuf {
+  Path::new(env!("CARGO_MANIFEST_DIR"))
+    .join("tests/compat/packages/project")
+    .canonicalize()
+    .expect("fixture project")
+}
+
+#[test]
+fn fixture_discovery_untrusted_finds_only_home_packages() {
+  let discovery = Discovery {
+    home: Some(fixture_home()),
+    cwd: fixture_project(),
+    trust: Trust::Untrusted,
+  };
+  let scan = package::discover(&discovery);
+
+  let names: Vec<&str> = scan.packages.iter().map(|p| p.name.as_str()).collect();
+  assert_eq!(names, ["fixture-pkg-a", "fixture-pkg-ext"]);
+  assert!(scan.named("project-pkg").is_none());
+
+  // Warned about missing-manifest subdirectory
+  assert!(
+    scan
+      .warnings
+      .iter()
+      .any(|w| matches!(w, Warning::MissingManifest { .. }))
+  );
+}
+
+#[test]
+fn fixture_discovery_trusted_finds_home_and_project_packages() {
+  let discovery = Discovery {
+    home: Some(fixture_home()),
+    cwd: fixture_project(),
+    trust: Trust::Trusted,
+  };
+  let scan = package::discover(&discovery);
+
+  let names: Vec<&str> = scan.packages.iter().map(|p| p.name.as_str()).collect();
+  assert_eq!(names, ["fixture-pkg-a", "fixture-pkg-ext", "project-pkg"]);
+
+  let proj = scan.named("project-pkg").expect("project pkg found");
+  assert_eq!(proj.source, Source::Project);
+  assert_eq!(proj.version.as_deref(), Some("2.1.0"));
+}
+
+#[test]
+fn fixture_package_exposes_contained_skills_and_prompts() {
+  let discovery = Discovery {
+    home: Some(fixture_home()),
+    cwd: fixture_project(),
+    trust: Trust::Untrusted,
+  };
+  let scan = package::discover(&discovery);
+  let pkg = scan.named("fixture-pkg-a").expect("found pkg a");
+
+  let skills = pkg.skill_locations();
+  assert_eq!(skills.len(), 1);
+  assert!(skills[0].ends_with("skills"));
+
+  let prompts = pkg.prompt_locations();
+  assert_eq!(prompts.len(), 1);
+  assert!(prompts[0].ends_with("prompts/review.md"));
+
+  let surfaces = pkg.surfaces();
+  assert_eq!(
+    surfaces,
+    vec![
+      ("skills", package::SurfaceStatus::Supported),
+      ("prompts", package::SurfaceStatus::Supported),
+      ("extensions", package::SurfaceStatus::NotPresent),
+    ]
+  );
+}
+
+#[test]
+fn fixture_package_reports_extensions_as_unsupported_surface() {
+  let discovery = Discovery {
+    home: Some(fixture_home()),
+    cwd: fixture_project(),
+    trust: Trust::Untrusted,
+  };
+  let scan = package::discover(&discovery);
+  let pkg = scan.named("fixture-pkg-ext").expect("found pkg ext");
+
+  assert!(pkg.has_extensions());
+  let surfaces = pkg.surfaces();
+  assert_eq!(
+    surfaces,
+    vec![
+      ("skills", package::SurfaceStatus::NotPresent),
+      ("prompts", package::SurfaceStatus::NotPresent),
+      ("extensions", package::SurfaceStatus::Unsupported),
+    ]
+  );
+}

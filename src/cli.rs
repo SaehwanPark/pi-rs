@@ -15,6 +15,7 @@ pub const TOP_HELP: &str = concat!(
   "  skills       List the skills that would be offered to a model\n",
   "  prompts      List the prompt templates a session would offer\n",
   "  prompt       Expand one prompt template and print the prompt it becomes\n",
+  "  packages     List discovered Pi packages and their contained surfaces\n",
   "  import       Import a Pi session file into the store, reporting what could not\n",
   "               be carried\n",
   "  export       Write a session back out as a Pi session file\n",
@@ -181,6 +182,21 @@ pub const PROMPT_HELP: &str = concat!(
   "  --help                   Show this help.\n",
 );
 
+pub const PACKAGES_HELP: &str = concat!(
+  "Usage: pi-rs packages [--project] [--show <name>]\n",
+  "\n",
+  "Lists the packages discovered on disk, one per pair of lines: source, name,\n",
+  "and version, then description. The listing goes to stdout; every package that\n",
+  "was skipped or carried warnings, and why, goes to stderr.\n",
+  "\n",
+  "Reads $HOME/.pi/agent/packages, $HOME/.pi/packages, and --project's\n",
+  "<ancestor>/.pi/packages up to the git root.\n",
+  "\n",
+  "  --project                Read the project's own package locations\n",
+  "  --show <name>            Show detailed surfaces and diagnostics for one package\n",
+  "  --help                   Show this help.\n",
+);
+
 pub const IMPORT_HELP: &str = concat!(
   "Usage: pi-rs import-pi <pi-session.jsonl|session-dir> [options]\n",
   "\n",
@@ -235,8 +251,18 @@ pub enum Command {
   Skills(SkillsArgs),
   Prompts(PromptsArgs),
   Prompt(PromptArgs),
+  Packages(PackagesArgs),
   Import(ImportArgs),
   Export(ExportArgs),
+}
+
+/// `pi-rs packages`: packages discovered on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PackagesArgs {
+  /// Whether the project's own package locations may be read.
+  pub project: bool,
+  /// Inspect one package's detailed surfaces and diagnostics.
+  pub show: Option<String>,
 }
 
 /// `pi-rs prompts`: the templates a session would offer.
@@ -420,6 +446,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
   if command == "prompt" {
     return parse_prompt(&remaining);
   }
+  if command == "packages" {
+    return parse_packages(&remaining);
+  }
   if command == "import-pi" || command == "import" {
     return parse_import(&remaining);
   }
@@ -527,6 +556,38 @@ fn parse_prompt(remaining: &[OsString]) -> Result<Command, String> {
     arguments,
     project,
   }))
+}
+
+/// `pi-rs packages`: list the packages.
+fn parse_packages(remaining: &[OsString]) -> Result<Command, String> {
+  let mut project = false;
+  let mut show: Option<String> = None;
+  let mut index = 0;
+  while index < remaining.len() {
+    let flag = remaining[index]
+      .to_str()
+      .ok_or_else(|| format!("packages argument is not valid UTF-8\n{PACKAGES_HELP}"))?;
+    index += 1;
+    match flag {
+      "--project" => project = true,
+      "--show" => {
+        let name = remaining
+          .get(index)
+          .and_then(|value| value.to_str())
+          .filter(|value| !value.starts_with('-'))
+          .ok_or_else(|| format!("--show needs a package name\n{PACKAGES_HELP}"))?;
+        index += 1;
+        show = Some(name.to_string());
+      }
+      "--help" | "-h" => return Ok(Command::Help(PACKAGES_HELP)),
+      other => {
+        return Err(format!(
+          "unknown packages argument '{other}'\n{PACKAGES_HELP}"
+        ));
+      }
+    };
+  }
+  Ok(Command::Packages(PackagesArgs { project, show }))
 }
 
 /// `pi-rs run`: the answer goes to stdout, the transcript goes to stderr.
