@@ -44,6 +44,11 @@ impl CancelToken {
   pub fn is_cancelled(&self) -> bool {
     self.0.load(Ordering::SeqCst)
   }
+
+  /// Borrow the underlying [`AtomicBool`] for signal-safe cancellation.
+  pub fn raw_flag(&self) -> &AtomicBool {
+    &self.0
+  }
 }
 
 /// Requested reasoning depth.

@@ -488,6 +488,7 @@ name = "pi-rs"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "libc",
  "pi-rs-compat",
  "pi-rs-core",
  "pi-rs-provider",
