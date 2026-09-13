@@ -474,6 +474,65 @@ pub struct CapsuleArtifact {
   pub note: String,
 }
 
+/// External context item retrieved for a turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalContextItem {
+  pub source: crate::trace::ExternalContextSource,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub citation: Option<String>,
+  #[serde(default)]
+  pub text: String,
+  pub inline: bool,
+}
+
+impl ExternalContextItem {
+  pub fn inline(
+    source: crate::trace::ExternalContextSource,
+    text: impl Into<String>,
+    citation: Option<String>,
+  ) -> Self {
+    Self {
+      source,
+      citation,
+      text: text.into(),
+      inline: true,
+    }
+  }
+
+  pub fn reference(source: crate::trace::ExternalContextSource, citation: Option<String>) -> Self {
+    Self {
+      source,
+      citation,
+      text: String::new(),
+      inline: false,
+    }
+  }
+
+  /// Format as model-visible text.
+  pub fn format_for_model(&self) -> String {
+    if self.inline {
+      match &self.citation {
+        Some(cit) => format!(
+          "[External context from {} ({cit})]\n{}\n[/External context]",
+          self.source, self.text
+        ),
+        None => format!(
+          "[External context from {}]\n{}\n[/External context]",
+          self.source, self.text
+        ),
+      }
+    } else {
+      match &self.citation {
+        Some(cit) => format!(
+          "[External context reference: {} (citation: {cit})]",
+          self.source
+        ),
+        None => format!("[External context reference: {}]", self.source),
+      }
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

@@ -258,6 +258,23 @@ impl SessionHandle<'_> {
     self.runtime.run_turn(prompt, cancel, &mut self.progress)
   }
 
+  /// Run one user turn with external context folded into the message path and recorded
+  /// in the event trace.
+  #[allow(dead_code)]
+  pub fn turn_with_external_context(
+    &mut self,
+    prompt: &str,
+    external_context: &[pi_rs_core::ExternalContextItem],
+    cancel: &CancelToken,
+  ) -> Result<TurnReport, TurnError> {
+    self.runtime.run_turn_with_external_context(
+      prompt,
+      external_context,
+      cancel,
+      &mut self.progress,
+    )
+  }
+
   /// Compact earlier conversation history into a durable summary epoch.
   pub fn compact(&mut self, summary: Option<&str>) -> Result<u32, TurnError> {
     let turn_id = TurnId::new();

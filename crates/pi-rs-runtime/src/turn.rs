@@ -26,13 +26,14 @@ use pi_rs_core::{
   AgentEvent, AssistantDelta, AttributedMessage, BlobRef, CancelToken, CapabilityGap, ContentBlock,
   ContextAction, ContextCompactionCompleted, ContextCompactionEpoch, ContextCompactionStarted,
   ContextLevel, ContextPolicy, ContextReduced, ContextState, Diagnostic, DiagnosticLevel,
-  EpochReason, EventEnvelope, EventMeta, EventSink, FailurePhase, Message, ModelCapabilities,
-  ModelEpochStarted, ModelFailover, ModelFailure, ModelFailureKind, ModelProvider, ModelRef,
-  ModelRequest, ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta,
-  ReasoningProvenance, ReductionReason, Role, SessionEndReason, SessionEnded, SessionId,
-  SessionStarted, SinkError, ThinkingLevel, ToolCallBlock, ToolCompleted, ToolExecutionState,
-  ToolFailed, ToolProgress, ToolRequested, ToolResultBlock, ToolStarted, ToolUnknown, TraceId,
-  TurnCompleted, TurnId, TurnStatus, UserMessage,
+  EpochReason, EventEnvelope, EventMeta, EventSink, ExternalContextItem, ExternalContextRetrieved,
+  FailurePhase, Message, ModelCapabilities, ModelEpochStarted, ModelFailover, ModelFailure,
+  ModelFailureKind, ModelProvider, ModelRef, ModelRequest, ModelRequestCompleted,
+  ModelRequestStarted, ModelRetry, ReasoningDelta, ReasoningProvenance, ReductionReason, Role,
+  SessionEndReason, SessionEnded, SessionId, SessionStarted, SinkError, ThinkingLevel,
+  ToolCallBlock, ToolCompleted, ToolExecutionState, ToolFailed, ToolProgress, ToolRequested,
+  ToolResultBlock, ToolStarted, ToolUnknown, TraceId, TurnCompleted, TurnId, TurnStatus,
+  UserMessage,
 };
 use pi_rs_tools::{Executed, ToolRegistry};
 
@@ -452,12 +453,41 @@ impl<'a> TurnLoop<'a> {
     cancel: &CancelToken,
     progress: &mut dyn TurnProgress,
   ) -> Result<TurnReport, TurnError> {
+    self.run_turn_with_external_context(input, &[], cancel, progress)
+  }
+
+  /// Run one user turn with external context folded into the message path and recorded
+  /// in the event trace.
+  pub fn run_turn_with_external_context(
+    &mut self,
+    input: &str,
+    external_context: &[ExternalContextItem],
+    cancel: &CancelToken,
+    progress: &mut dyn TurnProgress,
+  ) -> Result<TurnReport, TurnError> {
     let turn_id = TurnId::new();
     let clock = Instant::now();
     let mut report = TurnReport::new(turn_id.clone(), self.epoch_index());
     self.requests.store(0, Ordering::SeqCst);
 
     self.ensure_session_started()?;
+
+    for item in external_context {
+      let bytes = item.text.len() as u64;
+      self.emit(
+        Some(turn_id.clone()),
+        AgentEvent::ExternalContextRetrieved(ExternalContextRetrieved {
+          source: item.source.clone(),
+          citation: item.citation.clone(),
+          bytes,
+          inline: item.inline,
+        }),
+      )?;
+      let context_text = item.format_for_model();
+      let msg = Message::user(context_text);
+      self.messages.push(msg);
+    }
+
     let user = Message::user(input);
     self.emit_message(
       Some(turn_id.clone()),
@@ -3833,6 +3863,64 @@ mod tests {
         .iter()
         .any(|m| m.text().contains("custom capsule")),
       "request carries the custom summary"
+    );
+  }
+
+  #[test]
+  fn external_context_retrieved_is_recorded_and_folded_into_turn() {
+    let provider = Scripted::new("primary", vec![text("read external context successfully")]);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, 64_000);
+    let mut trace = Recorder::default();
+
+    let external_source = pi_rs_core::trace::ExternalContextSource {
+      provider: "rkb-rs".into(),
+      resource_id: "doc-123".into(),
+      provenance: "rkb-rs/citation".into(),
+    };
+
+    let item = ExternalContextItem::inline(
+      external_source,
+      "Key knowledge: pi-rs is written in Rust 2024.",
+      Some("RFC-001".into()),
+    );
+
+    TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn_with_external_context(
+      "what is the key knowledge?",
+      &[item],
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .expect("turn completes");
+
+    let kinds = trace.kinds();
+    assert!(
+      kinds.contains(&"external_context_retrieved".to_string()),
+      "trace records external_context_retrieved event: {kinds:?}"
+    );
+
+    let ext_payload = trace.find("external_context_retrieved").unwrap();
+    assert_eq!(ext_payload["source"]["provider"], "rkb-rs");
+    assert_eq!(ext_payload["source"]["resource_id"], "doc-123");
+    assert_eq!(ext_payload["citation"], "RFC-001");
+    assert_eq!(ext_payload["inline"], true);
+
+    let req = &provider.requests()[0];
+    assert!(
+      req.messages.iter().any(|m| m
+        .text()
+        .contains("External context from rkb-rs/citation:rkb-rs:doc-123 (RFC-001)")
+        && m.text().contains("pi-rs is written in Rust 2024")),
+      "model request carries the folded external context: {:?}",
+      req.messages
     );
   }
 }
