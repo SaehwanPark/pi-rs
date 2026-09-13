@@ -284,6 +284,17 @@ impl SessionHandle<'_> {
       .compact_with_summary_or(&turn_id, target_tokens, summary)
   }
 
+  /// Perform L2 semantic phase compaction across a task boundary.
+  pub fn compact_phase(
+    &mut self,
+    phase: &str,
+    summary: Option<&str>,
+    force: bool,
+  ) -> Result<u32, TurnError> {
+    let turn_id = TurnId::new();
+    self.runtime.compact_phase(&turn_id, phase, summary, force)
+  }
+
   /// Return current statuses of all configured MCP servers.
   pub fn mcp_statuses(&self) -> Vec<pi_rs_mcp::McpServerStatus> {
     self.mcp_manager.statuses()

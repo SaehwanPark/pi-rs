@@ -354,11 +354,11 @@ Open in this area, in order:
 
 ### L2 semantic phase compaction
 
-- [ ] Implement phase-boundary request.
-- [ ] Add `/compact-phase`.
-- [ ] Allow model-facing semantic compaction recommendation.
-- [ ] Restrict execution to safe idle boundaries.
-- [ ] Add cooldown/rearm gate.
+- [x] Implement phase-boundary request (`TurnLoop::compact_phase` in `crates/pi-rs-runtime/src/turn.rs` creates structured phase summary epoch).
+- [x] Add `/compact-phase` (interactive slash command with Tab completion and optional `--force` override).
+- [x] Allow model-facing semantic compaction recommendation (`ContextAction::Compact` with `ContextLevel::L2Phase` routes to phase compaction).
+- [x] Restrict execution to safe idle boundaries (phase compaction executed between turn requests or via interactive command when idle).
+- [x] Add cooldown/rearm gate (5-second default cooldown interval between phase compactions, bypassable via `force: true` / `--force`).
 
 ### L3 checkpoint/reset
 

@@ -1438,6 +1438,102 @@ impl<'a> TurnLoop<'a> {
     self.compact_with_summary_or(turn_id, target_tokens, None)
   }
 
+  /// Perform L2 semantic phase compaction across a task boundary.
+  ///
+  /// Restricts execution to safe boundaries, enforces a cooldown / rearm gate
+  /// (bypassed when `force` is true), emits `ContextCompactionStarted` with level `L2Phase`,
+  /// writes a structured phase summary message, records `ContextCompactionEpoch`,
+  /// and emits `ContextCompactionCompleted` with level `L2Phase`.
+  pub fn compact_phase(
+    &mut self,
+    turn_id: &TurnId,
+    phase: &str,
+    explicit_summary: Option<&str>,
+    force: bool,
+  ) -> Result<u32, TurnError> {
+    if self.messages.len() <= 1 {
+      return Ok(0);
+    }
+
+    // Cooldown gate: 5 seconds cooldown unless force is specified
+    if !force {
+      if let Some(last) = self.last_compaction {
+        if last.elapsed() < Duration::from_secs(5) {
+          self.diagnostic(
+            Some(turn_id.clone()),
+            DiagnosticLevel::Info,
+            format!("phase compaction '{phase}' deferred: cooldown active (use force to override)"),
+          )?;
+          return Ok(0);
+        }
+      }
+    }
+
+    let kept = 1usize;
+    let removed = self.messages.len() - kept;
+    if removed == 0 {
+      return Ok(0);
+    }
+
+    let replaces_from = self.first_cited_seq();
+    let replaces_through = self.last_cited_seq();
+    self.context_epoch += 1;
+
+    self.emit(
+      Some(turn_id.clone()),
+      AgentEvent::ContextCompactionStarted(ContextCompactionStarted {
+        level: ContextLevel::L2Phase,
+        reason: format!("semantic phase: {phase}"),
+      }),
+    )?;
+
+    let base_summary = match explicit_summary {
+      Some(text) => text.to_string(),
+      None => {
+        let slice = &self.messages[..removed];
+        match &self.summarizer {
+          Some(custom) => custom(slice),
+          None => structured_summary(slice),
+        }
+      }
+    };
+    let summary_text = format!("[Phase Compaction: {phase}]\n{base_summary}");
+    let summary_message = Message::user(summary_text.clone());
+
+    self.emit_message(
+      Some(turn_id.clone()),
+      AgentEvent::ContextSummary,
+      &summary_message,
+    )?;
+
+    let summary_ref = self.trace.put_payload(summary_text.as_bytes())?;
+    self.emit(
+      Some(turn_id.clone()),
+      AgentEvent::ContextCompactionEpoch(ContextCompactionEpoch {
+        context_epoch: self.context_epoch,
+        summary: summary_ref,
+        replaces_from,
+        replaces_through,
+      }),
+    )?;
+
+    self.messages.drain(..removed);
+    self.messages.push(summary_message);
+    self.last_compaction = Some(Instant::now());
+
+    self.emit(
+      Some(turn_id.clone()),
+      AgentEvent::ContextCompactionCompleted(ContextCompactionCompleted {
+        level: ContextLevel::L2Phase,
+        removed_messages: removed as u32,
+        retained_messages: kept as u32,
+        context_epoch: self.context_epoch,
+      }),
+    )?;
+
+    Ok(removed as u32)
+  }
+
   /// Synthesize a structured ContextCapsule from messages and context state.
   pub fn synthesize_capsule(&self, state: &ContextState, reason: &str) -> ContextCapsule {
     if let Some(custom) = &self.checkpointer {
@@ -1611,7 +1707,11 @@ impl<'a> TurnLoop<'a> {
         target_tokens,
       } => {
         let mut compacted = 0;
-        if self.compaction_strategy == CompactionStrategy::Summarize || self.summarizer.is_some() {
+        if level == ContextLevel::L2Phase {
+          compacted = self.compact_phase(turn_id, &reason, None, false)?;
+        } else if self.compaction_strategy == CompactionStrategy::Summarize
+          || self.summarizer.is_some()
+        {
           compacted = self.compact_with_summary(turn_id, target_tokens)?;
         }
         if compacted == 0 && self.evict_oldest(target_tokens, turn_id)? == 0 {
@@ -4464,5 +4564,97 @@ mod tests {
     assert!(res.is_ok());
     let report = res.unwrap();
     assert!(matches!(report.status, TurnStatus::Cancelled));
+  }
+
+  #[test]
+  fn compact_phase_emits_l2_events_and_retains_latest_message() {
+    let provider = Scripted::new("phase", vec![text("phase ok")]);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, 32_768);
+    let mut trace = Recorder::default();
+
+    let mut turn_loop = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![
+      Message::user("step 1: design spec"),
+      Message::assistant("spec completed"),
+      Message::user("step 2: implement code"),
+      Message::assistant("code implemented"),
+      Message::user("step 3: write tests"),
+    ]);
+
+    let turn_id = TurnId::new();
+    let removed = turn_loop
+      .compact_phase(&turn_id, "implementation complete", None, true)
+      .expect("compact phase succeeds");
+
+    assert_eq!(removed, 4);
+    assert_eq!(turn_loop.messages().len(), 2); // 1 retained + 1 phase summary message
+    assert!(
+      turn_loop.messages()[1]
+        .text()
+        .contains("[Phase Compaction: implementation complete]")
+    );
+
+    let kinds = trace.kinds();
+    assert!(kinds.contains(&"context_compaction_started".to_string()));
+    assert!(kinds.contains(&"context_compaction_completed".to_string()));
+
+    let started = trace.find("context_compaction_started").unwrap();
+    assert_eq!(started["level"], "l2_phase");
+    assert_eq!(started["reason"], "semantic phase: implementation complete");
+
+    let completed = trace.find("context_compaction_completed").unwrap();
+    assert_eq!(completed["level"], "l2_phase");
+    assert_eq!(completed["removed_messages"], 4);
+    assert_eq!(completed["retained_messages"], 1);
+  }
+
+  #[test]
+  fn compact_phase_cooldown_and_force_gate() {
+    let provider = Scripted::new("phase", vec![text("ok")]);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, 32_768);
+    let mut trace = Recorder::default();
+
+    let mut turn_loop = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![
+      Message::user("m1"),
+      Message::assistant("m2"),
+      Message::user("m3"),
+    ]);
+
+    let turn_id = TurnId::new();
+    let removed = turn_loop
+      .compact_phase(&turn_id, "phase 1", None, true)
+      .expect("first phase succeeds");
+    assert_eq!(removed, 2);
+
+    // Immediate second phase compaction without force is deferred by cooldown
+    turn_loop.messages_mut().push(Message::user("m4"));
+    turn_loop.messages_mut().push(Message::assistant("m5"));
+    let removed2 = turn_loop
+      .compact_phase(&turn_id, "phase 2", None, false)
+      .expect("second phase without force");
+    assert_eq!(removed2, 0);
+
+    // With force: true, cooldown is bypassed
+    let removed3 = turn_loop
+      .compact_phase(&turn_id, "phase 2", None, true)
+      .expect("second phase with force");
+    assert_eq!(removed3, 3);
   }
 }
