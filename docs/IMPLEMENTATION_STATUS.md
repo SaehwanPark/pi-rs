@@ -199,8 +199,10 @@ that the import is a session rather than a transcription.
 7. CLI-level fault injection after a durable session is opened is deferred; the
    runtime sink-failure seam directly proves cancellation and terminal failure.
 8. Approved `exec` is intentionally not an OS sandbox, and outward-pointing
-   symlinks require operating-system isolation if they are in scope. Windows CI
-   coverage also remains deferred; current CI targets Ubuntu and macOS.
+   symlinks require operating-system isolation if they are in scope. Platform-specific
+   primitives (`std::os::unix::fs::symlink`, `libc::SIGINT`) and integration test commands
+   (`exec.txt` creation) are guarded with `#[cfg(unix)]` and `#[cfg(windows)]` for Windows
+   build and execution compatibility; full Windows CI matrix coverage remains tracked.
 9. A temporal terminal-streaming benchmark is deferred beyond deterministic
    multi-chunk ordering tests.
 10. An import carries a Pi conversation into both records a session has — trace journal and

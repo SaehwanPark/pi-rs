@@ -102,6 +102,11 @@ fn one_turn_streams_and_persists_tools_messages_and_trace() {
   let temp = TempDir::new().unwrap();
   let workspace = temp.path().join("workspace");
   fs::create_dir(&workspace).unwrap();
+  #[cfg(windows)]
+  let exec_cmd = r#"{"command":"<nul set /p=executed>exec.txt"}"#;
+  #[cfg(not(windows))]
+  let exec_cmd = r#"{"command":"printf executed > exec.txt"}"#;
+
   let server = FakeServer::answer(vec![
     tool_response(
       "call_write",
@@ -109,12 +114,7 @@ fn one_turn_streams_and_persists_tools_messages_and_trace() {
       r#"{"path":"model.txt","contents":"from tool\n"}"#,
       Some("choose a file"),
     ),
-    tool_response(
-      "call_exec",
-      "exec",
-      r#"{"command":"printf executed > exec.txt"}"#,
-      None,
-    ),
+    tool_response("call_exec", "exec", exec_cmd, None),
     text_response("completed"),
   ]);
   let config = write_config(temp.path(), &server.base_url(), true);
