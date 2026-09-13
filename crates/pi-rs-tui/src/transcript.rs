@@ -589,7 +589,7 @@ pub fn completion_label(state: ToolExecutionState, mutating: bool) -> &'static s
 /// space; later facts take ` · `. Emitting the separator unconditionally is how a
 /// line reads `[reduced]  · first fact`, with the ghost gap of a delimiter that had
 /// nothing to delimit.
-fn fact(line: &mut RenderLine, role: Role, text: &str) {
+pub(crate) fn fact(line: &mut RenderLine, role: Role, text: &str) {
   if line.segments.len() > 1 {
     line.push(SEPARATOR, Role::Muted);
   }

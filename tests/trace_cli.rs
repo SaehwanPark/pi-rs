@@ -839,11 +839,12 @@ fn a_bounded_line_renders_its_preview_and_names_where_the_bytes_went() {
   let lines: Vec<&str> = text.lines().collect();
   assert_eq!(lines.len(), 1, "a bounded line is still one line: {text}");
   assert!(lines[0].contains("generated/glue.c"), "{text}");
-  // The surface truncates a long argument value to keep one request on one line, so
-  // the reference itself is cut off here; what must survive is that bytes were stored
-  // out and how many. The whole marker, reference included, is in the line.
   assert!(
     lines[0].contains("[stored 40960 bytes"),
     "the reader must see that the contents were stored out, not absent: {text}"
+  );
+  assert!(
+    lines[0].contains(&reference),
+    "the reader must see the stored-out reference path on the recorded line: {text}"
   );
 }
