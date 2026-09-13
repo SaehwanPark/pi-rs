@@ -306,7 +306,11 @@ Open in this area, in order:
       `pi-rs packages [--project] [--show <name>]` CLI command; `tests/compat_packages.rs`:
       9 passing fixture-driven tests; `tests/packages_cli.rs`: 6 passing CLI tests).
 - [ ] Implement package install path.
-- [ ] Add `pi-rs compat` prototype.
+- [x] Add `pi-rs compat` prototype (`crates/pi-rs-compat/src/compat.rs`: `inspect_target` inspects
+      package manifests, skills, prompts, and extension files with static analysis of `registerTool`,
+      `registerCommand`, context hooks, and internal imports; `pi-rs compat [options] <path-or-package>`
+      with `--project` and `--json` support; `tests/compat_cli.rs`: 8 passing integration tests;
+      `crates/pi-rs-compat/src/compat.rs`: 5 passing unit tests).
 
 ### Sessions
 

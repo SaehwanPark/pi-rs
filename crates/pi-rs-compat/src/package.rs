@@ -70,6 +70,8 @@ pub struct Manifest {
   /// prompt template files and are integrated by the caller with the standard prompt
   /// discovery rules.
   pub prompt_paths: Vec<String>,
+  /// Entry point paths declared in `extensions`, relative to the package directory.
+  pub extension_paths: Vec<String>,
 }
 
 /// A surface or condition worth reporting to the operator.
@@ -226,6 +228,23 @@ impl Package {
     let prompts_dir = self.path.join("prompts");
     if prompts_dir.is_dir() {
       return vec![prompts_dir];
+    }
+    Vec::new()
+  }
+
+  /// Locations of extension entry points declared within this package.
+  pub fn extension_locations(&self) -> Vec<PathBuf> {
+    if !self.manifest.extension_paths.is_empty() {
+      return self
+        .manifest
+        .extension_paths
+        .iter()
+        .map(|rel| self.path.join(rel))
+        .collect();
+    }
+    let extensions_dir = self.path.join("extensions");
+    if extensions_dir.is_dir() {
+      return vec![extensions_dir];
     }
     Vec::new()
   }
@@ -756,36 +775,6 @@ impl<'a> Parser<'a> {
     ValueKind::Unknown
   }
 
-  /// Count array entries without retaining them, for the UnsupportedSurface count.
-  fn count_array_entries(&mut self) -> Result<usize, String> {
-    self.expect_byte(b'[')?;
-    self.skip_whitespace();
-    if self.peek() == Some(b']') {
-      self.advance();
-      return Ok(0);
-    }
-    let mut count = 0usize;
-    loop {
-      self.skip_value()?;
-      count += 1;
-      self.skip_whitespace();
-      match self.peek() {
-        Some(b',') => self.advance(),
-        Some(b']') => {
-          self.advance();
-          return Ok(count);
-        }
-        Some(b) => {
-          return Err(format!(
-            "expected ',' or ']' at position {}, found '{}'",
-            self.pos, b as char
-          ));
-        }
-        None => return Err("unterminated array".to_string()),
-      }
-    }
-  }
-
   /// Parse the `pi` namespace object: `{ "skills": [...], "prompts": [...], ... }`.
   fn parse_pi_namespace(
     &mut self,
@@ -877,7 +866,10 @@ impl<'a> Parser<'a> {
           // Node/TypeScript extension entry points: not supported until Phase 8.
           let kind = self.value_kind();
           let count = if kind == ValueKind::Array {
-            self.count_array_entries()?
+            let paths = self.parse_string_array()?;
+            let count = paths.len();
+            manifest.extension_paths = paths;
+            count
           } else {
             self.skip_value()?;
             0

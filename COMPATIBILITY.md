@@ -349,22 +349,30 @@ Tests should cover both:
 
 ## 15. Compatibility command
 
-A future command should inspect an artifact or package:
+Inspects an artifact or package candidate against Pi compatibility targets:
 
 ```bash
-pi-rs compat <path-or-package>
+pi-rs compat [options] <path-or-package>
 ```
 
-Possible output:
+Options:
+- `--project`: include project package locations when resolving package names;
+- `--json`: emit machine-readable JSON report.
+
+Example output:
 
 ```text
-Compatibility target: Pi <version-range>
+Compatibility target: Pi 0.50.x+
+Target: with-extension (package)
 
-✓ skill discovery
-✓ prompt templates
-✓ tool registration
-△ context hook
-✗ unsupported internal import
+✓ package manifest (with-extension@1.0.0)
+✓ skill discovery (1 skill(s) found)
+✓ prompt templates (1 prompt template(s) found)
+✓ tool registration (registerTool API detected)
+✓ command registration (registerCommand API detected)
+△ context hook (context lifecycle hook detected)
+✗ unsupported internal import (internal Pi module import detected)
+✗ extensions (TypeScript host required in Phase 8)
 ```
 
 ## 16. Version policy

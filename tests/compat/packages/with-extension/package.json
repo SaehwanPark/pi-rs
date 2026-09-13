@@ -1,0 +1,10 @@
+{
+  "name": "with-extension",
+  "version": "1.0.0",
+  "description": "Package with extension source file demonstrating tool and command registration.",
+  "pi": {
+    "skills": ["skills/"],
+    "prompts": ["prompts/"]
+  },
+  "extensions": ["src/index.js"]
+}
