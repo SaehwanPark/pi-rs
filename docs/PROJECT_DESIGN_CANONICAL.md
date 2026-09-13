@@ -727,7 +727,11 @@ Useful boundaries include:
 - issue resolved;
 - release completed;
 - deployment completed;
-- research episode finished.
+- research episode finished;
+- context budget pressure reaching checkpoint thresholds (`ContextAction::SuggestCheckpoint`).
+
+Compaction policy interaction:
+A checkpoint capsule forms an impermeable barrier for ordinary compaction (L1/L2). Compaction operates only on messages accumulated after the most recent checkpoint and never attempts to summarize across or rewrite an established checkpoint capsule. When a checkpoint is created, the working message history is reset to the capsule's structured model representation, advancing the context epoch (`ContextCompactionCompleted(Level::L3Checkpoint)`). On session resume, context hydration initializes with the active checkpoint capsule followed by subsequent turn messages.
 
 Session-changing actions should remain reviewable.
 

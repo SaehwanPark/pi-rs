@@ -527,3 +527,69 @@ fn write_config_with(root: &Path, base_url: &str, change: impl Fn(&mut RuntimeCo
   fs::write(&path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
   path
 }
+
+#[test]
+fn session_resumes_across_checkpoint_barrier_with_capsule() {
+  let temp = TempDir::new().unwrap();
+  let workspace = temp.path().join("workspace");
+  fs::create_dir(&workspace).unwrap();
+  let server = FakeServer::answer(vec![
+    answer("initial turn answered"),
+    answer("post-checkpoint turn answered"),
+  ]);
+  let config = write_config(temp.path(), &server.base_url());
+  let surface = SurfaceArgs::default();
+  let mut saved_session_id = None;
+
+  open_session(&config, &workspace, &surface, None, |session| {
+    session
+      .turn("turn 1: initialize workspace")
+      .map_err(|error| turn_error(&error))?;
+    let mut capsule = pi_rs_core::ContextCapsule::new("Goal: build compiler");
+    capsule.completed_work.push("Lexer done".into());
+    capsule.current_state = "Parser in progress".into();
+    let created = session
+      .checkpoint(Some(capsule))
+      .map_err(|error| turn_error(&error))?;
+    assert_eq!(created.capsule_version, 1);
+    let cps = session.list_checkpoints().unwrap();
+    assert_eq!(cps.len(), 1);
+    assert_eq!(cps[0].1.objective, "Goal: build compiler");
+    saved_session_id = Some(session.session_id().to_string());
+    session.close().map_err(session_error)
+  })
+  .unwrap();
+
+  let session_str = saved_session_id.expect("session_id saved");
+
+  // Now resume the session in a second open_session call
+  open_session(
+    &config,
+    &workspace,
+    &surface,
+    Some(&session_str),
+    |session| {
+      session
+        .turn("turn 2: continue parser")
+        .map_err(|error| turn_error(&error))?;
+      session.close().map_err(session_error)
+    },
+  )
+  .unwrap();
+
+  let requests = server.requests();
+  assert_eq!(requests.len(), 2);
+  let second_req = &requests[1];
+  assert!(
+    second_req.contains("[Session Checkpoint Capsule]"),
+    "second request carries the resumed capsule in context: {second_req}"
+  );
+  assert!(
+    second_req.contains("Goal: build compiler"),
+    "second request carries the capsule objective"
+  );
+  assert!(
+    second_req.contains("turn 2: continue parser"),
+    "second request carries new turn input"
+  );
+}

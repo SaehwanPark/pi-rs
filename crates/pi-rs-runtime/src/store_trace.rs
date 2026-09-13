@@ -68,6 +68,20 @@ impl Trace for StoreTrace {
       .map_err(store_error)
   }
 
+  fn create_checkpoint(
+    &mut self,
+    capsule: &pi_rs_core::ContextCapsule,
+  ) -> Result<Option<(pi_rs_core::CheckpointId, String)>, SinkError> {
+    let record = self.session.checkpoint(capsule).map_err(store_error)?;
+    Ok(Some((record.checkpoint_id, record.capsule_path)))
+  }
+
+  fn list_checkpoints(
+    &self,
+  ) -> Result<Vec<(pi_rs_core::CheckpointId, pi_rs_core::ContextCapsule)>, SinkError> {
+    self.session.list_checkpoints().map_err(store_error)
+  }
+
   fn flush(&mut self) -> Result<(), SinkError> {
     self.session.flush().map_err(store_error)
   }

@@ -19,7 +19,28 @@
 //! Thresholds shrink for constrained windows and deliberately do **not** grow
 //! for large advertised windows: a provider offering a huge window has not
 //! claimed that a huge working context is desirable.
-
+//!
+//! ### Checkpoint Barrier and Compaction Policy Interplay
+//!
+//! An L3 Episode Checkpoint produces a durable structured [`ContextCapsule`] and
+//! establishes a [`crate::session::SessionRecord::CheckpointBarrier`] in the session log.
+//! When a checkpoint is created:
+//! 1. **History Sealed**: All conversation events prior to the barrier are sealed into
+//!    the archive and trace journal. They are never modified or re-summarized.
+//! 2. **Working Set Reset**: The model-visible working context is reset to the structured
+//!    capsule representation ([`ContextCapsule::format_for_model`]) plus any post-barrier
+//!    retained tail.
+//! 3. **Pressure Relieved**: Active token count drops from the pre-checkpoint level
+//!    (exceeding `checkpoint_tokens`) back to the compact footprint of the capsule
+//!    (~300-800 tokens), relieving both L1 and L3 pressure thresholds.
+//! 4. **Epoch Incremented & Cooldown Armed**: The compaction epoch increments, and the L3
+//!    compaction cooldown timer resets, preventing checkpoint thrashing.
+//! 5. **Subsequent L1 Compactions Bounded**: Subsequent L1 ordinary compactions operate
+//!    strictly on the post-checkpoint epoch.
+//! 6. **Bounded Resume**: On session resume, the store loads only the latest
+//!    capsule and post-checkpoint events, keeping resume latency bounded regardless of
+//!    lifetime session length.
+//!
 use serde::{Deserialize, Serialize};
 
 /// The four reduction levels.
@@ -461,6 +482,74 @@ pub struct ContextCapsule {
 /// Current capsule schema version.
 pub const CAPSULE_SCHEMA_VERSION: u32 = 1;
 
+impl ContextCapsule {
+  /// Create a fresh capsule with the given objective and schema version.
+  pub fn new(objective: impl Into<String>) -> Self {
+    Self {
+      version: CAPSULE_SCHEMA_VERSION,
+      objective: objective.into(),
+      completed_work: Vec::new(),
+      decisions: Vec::new(),
+      constraints: Vec::new(),
+      current_state: String::new(),
+      artifacts: Vec::new(),
+      unresolved: Vec::new(),
+      next_actions: Vec::new(),
+    }
+  }
+
+  /// Format as model-visible text block representing the structured context capsule.
+  pub fn format_for_model(&self) -> String {
+    let mut out = String::from("[Session Checkpoint Capsule]\n");
+    out.push_str(&format!("objective: {}\n", self.objective.trim()));
+    if !self.completed_work.is_empty() {
+      out.push_str("completed:\n");
+      for item in &self.completed_work {
+        out.push_str(&format!("  - {}\n", item.trim()));
+      }
+    }
+    if !self.decisions.is_empty() {
+      out.push_str("decisions:\n");
+      for d in &self.decisions {
+        out.push_str(&format!(
+          "  - {}: {}\n",
+          d.decision.trim(),
+          d.rationale.trim()
+        ));
+      }
+    }
+    if !self.constraints.is_empty() {
+      out.push_str("constraints:\n");
+      for c in &self.constraints {
+        out.push_str(&format!("  - {}\n", c.trim()));
+      }
+    }
+    if !self.current_state.trim().is_empty() {
+      out.push_str(&format!("current_state: {}\n", self.current_state.trim()));
+    }
+    if !self.artifacts.is_empty() {
+      out.push_str("important_artifacts:\n");
+      for a in &self.artifacts {
+        out.push_str(&format!("  - {}: {}\n", a.path.trim(), a.note.trim()));
+      }
+    }
+    if !self.unresolved.is_empty() {
+      out.push_str("unresolved:\n");
+      for u in &self.unresolved {
+        out.push_str(&format!("  - {}\n", u.trim()));
+      }
+    }
+    if !self.next_actions.is_empty() {
+      out.push_str("next_actions:\n");
+      for n in &self.next_actions {
+        out.push_str(&format!("  - {}\n", n.trim()));
+      }
+    }
+    out.push_str("[/Session Checkpoint Capsule]");
+    out
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapsuleDecision {
   pub decision: String,
@@ -728,5 +817,35 @@ mod tests {
     }
     assert_eq!(ContextProfile::parse("moderate"), None);
     assert_eq!(ContextProfile::default(), ContextProfile::Balanced);
+  }
+
+  #[test]
+  fn capsule_format_for_model_includes_structured_sections() {
+    let mut capsule = ContextCapsule::new("build MVP");
+    capsule.completed_work.push("Phase 0 and 1".into());
+    capsule.decisions.push(CapsuleDecision {
+      decision: "use Rust 2024".into(),
+      rationale: "modern stable edition".into(),
+    });
+    capsule.constraints.push("100 col line limit".into());
+    capsule.current_state = "Phase 4 underway".into();
+    capsule.artifacts.push(CapsuleArtifact {
+      path: "crates/pi-rs-core".into(),
+      note: "core contracts".into(),
+    });
+    capsule.unresolved.push("extension host".into());
+    capsule.next_actions.push("checkpoint runtime".into());
+
+    let formatted = capsule.format_for_model();
+    assert!(formatted.contains("[Session Checkpoint Capsule]"));
+    assert!(formatted.contains("objective: build MVP"));
+    assert!(formatted.contains("completed:\n  - Phase 0 and 1"));
+    assert!(formatted.contains("decisions:\n  - use Rust 2024: modern stable edition"));
+    assert!(formatted.contains("constraints:\n  - 100 col line limit"));
+    assert!(formatted.contains("current_state: Phase 4 underway"));
+    assert!(formatted.contains("important_artifacts:\n  - crates/pi-rs-core: core contracts"));
+    assert!(formatted.contains("unresolved:\n  - extension host"));
+    assert!(formatted.contains("next_actions:\n  - checkpoint runtime"));
+    assert!(formatted.contains("[/Session Checkpoint Capsule]"));
   }
 }

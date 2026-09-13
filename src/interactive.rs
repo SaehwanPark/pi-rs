@@ -79,7 +79,7 @@ use crate::{
 const PROMPT_PREFIX: &str = "> ";
 
 /// The slash commands this loop answers itself, and what Tab completes to.
-const COMMANDS: [&str; 5] = ["help", "quit", "exit", "compact", "mcp"];
+const COMMANDS: [&str; 6] = ["help", "quit", "exit", "compact", "checkpoints", "mcp"];
 
 /// Action requested via the `/mcp` command.
 #[derive(Debug, PartialEq, Eq)]
@@ -106,6 +106,8 @@ enum Submitted {
   Quit,
   /// Compact conversation history into a durable summary epoch.
   Compact(Option<String>),
+  /// List episode checkpoint capsules for this session.
+  Checkpoints,
   /// Inspect or control configured MCP servers.
   Mcp(McpAction),
   /// A loaded prompt template, with the argument string exactly as typed after the
@@ -127,6 +129,7 @@ fn route(text: &str, templates: &prompt::Scan) -> Submitted {
     Input::Command { name, ref rest, .. } => match name.as_str() {
       "help" => Submitted::Help,
       "quit" | "exit" => Submitted::Quit,
+      "checkpoints" | "checkpoint" => Submitted::Checkpoints,
       "compact" => {
         let trimmed = rest.trim();
         let summary = if trimmed.is_empty() {
@@ -518,6 +521,7 @@ impl Loop {
         let mut lines = vec![
           "/help       this list".to_string(),
           "/compact    summarize earlier context and open a durable compaction epoch".to_string(),
+          "/checkpoints list episode checkpoint capsules for the session".to_string(),
           "/mcp        list or control MCP servers (/mcp enable <name>, /mcp disable <name>)"
             .to_string(),
           "/quit, /exit  end the session (ctrl-c on an empty draft does the same)".to_string(),
@@ -545,6 +549,37 @@ impl Loop {
           }
         }
         Ok(Submitted::Compact(custom))
+      }
+      Submitted::Checkpoints => {
+        match session.list_checkpoints() {
+          Ok(checkpoints) if checkpoints.is_empty() => {
+            self.write_note(&[
+              "no checkpoints recorded for this session".to_string(),
+              "checkpoints are created automatically under context pressure or via runtime"
+                .to_string(),
+            ])?;
+          }
+          Ok(checkpoints) => {
+            let mut lines = vec![format!("Recorded checkpoints ({}):", checkpoints.len())];
+            for (id, capsule) in checkpoints {
+              lines.push(format!("  - {id}: {}", capsule.objective));
+              if !capsule.completed_work.is_empty() {
+                lines.push(format!(
+                  "    completed: {} items",
+                  capsule.completed_work.len()
+                ));
+              }
+              if !capsule.artifacts.is_empty() {
+                lines.push(format!("    artifacts: {} files", capsule.artifacts.len()));
+              }
+            }
+            self.write_note(&lines)?;
+          }
+          Err(err) => {
+            self.write_note(&[format!("cannot list checkpoints: {err}")])?;
+          }
+        }
+        Ok(Submitted::Checkpoints)
       }
       Submitted::Mcp(action) => {
         match &action {
@@ -1063,6 +1098,14 @@ mod tests {
       Submitted::Compact(Some(s)) if s == "focus on tests"
     ));
     assert!(matches!(
+      route("/checkpoints", &none),
+      Submitted::Checkpoints
+    ));
+    assert!(matches!(
+      route("/checkpoint", &none),
+      Submitted::Checkpoints
+    ));
+    assert!(matches!(
       route("/mcp", &none),
       Submitted::Mcp(McpAction::List)
     ));
@@ -1096,6 +1139,16 @@ mod tests {
     }
     assert_eq!(surface.editor.apply(Intent::Complete), Outcome::Changed);
     assert_eq!(surface.editor.text(), "/compact ");
+  }
+
+  #[test]
+  fn checkpoints_command_is_completed_by_tab() {
+    let mut surface = Loop::new("local/vulcan".to_string(), 80);
+    for ch in "/check".chars() {
+      surface.editor.apply(Intent::Insert(ch));
+    }
+    assert_eq!(surface.editor.apply(Intent::Complete), Outcome::Changed);
+    assert_eq!(surface.editor.text(), "/checkpoints ");
   }
 
   #[test]

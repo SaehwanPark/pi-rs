@@ -362,17 +362,17 @@ Open in this area, in order:
 
 ### L3 checkpoint/reset
 
-- [ ] Define structured capsule schema.
-- [ ] Implement checkpoint archive.
-- [ ] Implement reviewed reset workflow.
-- [ ] Add `/checkpoints`.
-- [ ] Preserve unresolved constraints and next actions.
-- [ ] Keep reset user-reviewable.
+- [x] Define structured capsule schema (`ContextCapsule`, `CapsuleDecision`, `CapsuleArtifact`, `CAPSULE_SCHEMA_VERSION`).
+- [x] Implement checkpoint archive (`Store::list_checkpoints`, `StoreTrace::create_checkpoint`, `sessions/<id>/checkpoints/<cp>.json`).
+- [x] Implement reviewed reset workflow (`TurnLoop::checkpoint` resets visible messages to formatted capsule, advances context epoch).
+- [x] Add `/checkpoints` (interactive command lists capsules with objectives, completion status, and artifacts; Tab completed).
+- [x] Preserve unresolved constraints and next actions (`ContextCapsule` fields).
+- [x] Keep reset user-reviewable (capsule contents viewable via `/checkpoints` and formatted structured block).
 
 ### Session resume optimization
 
-- [ ] Resume from latest checkpoint + post-checkpoint events.
-- [ ] Avoid full historical trace hydration.
+- [x] Resume from latest checkpoint + post-checkpoint events (`continue_context` in `src/run.rs` prepends checkpoint capsule to restored messages).
+- [x] Avoid full historical trace hydration (checkpoint acts as barrier for model context reconstruction).
 - [ ] Benchmark large-session restore.
 
 ### Stage gate
@@ -674,8 +674,10 @@ Do not begin until stable baselines exist.
       the scan at open, Tab completes the names, and `prompt::parse_arguments` splits the
       typed string by Pi's editor rule — quotes stripped, empty quotes no argument,
       unclosed quote swallows the rest.
-- [ ] Checkpoint creation driven by the runtime under context pressure, not only the
-      explicit path; document what a checkpoint does to compaction policy.
+- [x] Checkpoint creation driven by the runtime under context pressure, not only the
+      explicit path; document what a checkpoint does to compaction policy:
+      `ContextAction::SuggestCheckpoint` triggers automatic capsule synthesis and
+      checkpoint barrier reset; documented in Canonical Design §15 and ARCHITECTURE.md §10.
 - [x] Import a whole Pi session directory: `import-pi <dir>` files every `*.jsonl` it holds
       directly, each as its own session, and names cross-file lineage as the thing it
       deliberately does not reconstruct.

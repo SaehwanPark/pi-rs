@@ -23,17 +23,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use pi_rs_core::{
-  AgentEvent, AssistantDelta, AttributedMessage, BlobRef, CancelToken, CapabilityGap, ContentBlock,
-  ContextAction, ContextCompactionCompleted, ContextCompactionEpoch, ContextCompactionStarted,
-  ContextLevel, ContextPolicy, ContextReduced, ContextState, Diagnostic, DiagnosticLevel,
-  EpochReason, EventEnvelope, EventMeta, EventSink, ExternalContextItem, ExternalContextRetrieved,
-  FailurePhase, Message, ModelCapabilities, ModelEpochStarted, ModelFailover, ModelFailure,
-  ModelFailureKind, ModelProvider, ModelRef, ModelRequest, ModelRequestCompleted,
-  ModelRequestStarted, ModelRetry, ReasoningDelta, ReasoningProvenance, ReductionReason, Role,
-  SessionEndReason, SessionEnded, SessionId, SessionStarted, SinkError, ThinkingLevel,
-  ToolCallBlock, ToolCompleted, ToolExecutionState, ToolFailed, ToolProgress, ToolRequested,
-  ToolResultBlock, ToolStarted, ToolUnknown, TraceId, TurnCompleted, TurnId, TurnStatus,
-  UserMessage,
+  AgentEvent, AssistantDelta, AttributedMessage, BlobRef, CAPSULE_SCHEMA_VERSION, CancelToken,
+  CapabilityGap, CapsuleArtifact, CapsuleDecision, CheckpointCreated, CheckpointId, ContentBlock,
+  ContextAction, ContextCapsule, ContextCompactionCompleted, ContextCompactionEpoch,
+  ContextCompactionStarted, ContextLevel, ContextPolicy, ContextReduced, ContextState, Diagnostic,
+  DiagnosticLevel, EpochReason, EventEnvelope, EventMeta, EventSink, ExternalContextItem,
+  ExternalContextRetrieved, FailurePhase, Message, ModelCapabilities, ModelEpochStarted,
+  ModelFailover, ModelFailure, ModelFailureKind, ModelProvider, ModelRef, ModelRequest,
+  ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta, ReasoningProvenance,
+  ReductionReason, Role, SessionEndReason, SessionEnded, SessionId, SessionStarted, SinkError,
+  ThinkingLevel, ToolCallBlock, ToolCompleted, ToolExecutionState, ToolFailed, ToolProgress,
+  ToolRequested, ToolResultBlock, ToolStarted, ToolUnknown, TraceId, TurnCompleted, TurnId,
+  TurnStatus, UserMessage,
 };
 use pi_rs_tools::{Executed, ToolRegistry};
 
@@ -51,6 +52,19 @@ pub enum CompactionStrategy {
 
 /// Custom summarizer function alias.
 pub type Summarizer = Arc<dyn Fn(&[Message]) -> String + Send + Sync>;
+
+/// How to handle context pressure when policy suggests a checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CheckpointStrategy {
+  /// Automatically synthesize a context capsule and create a durable checkpoint.
+  #[default]
+  Auto,
+  /// Do not automatically create checkpoints (diagnostics only).
+  Disabled,
+}
+
+/// Custom checkpointer function alias.
+pub type Checkpointer = Arc<dyn Fn(&[Message], &ContextState) -> ContextCapsule + Send + Sync>;
 
 /// How many model round-trips one user input may take.
 ///
@@ -100,6 +114,20 @@ pub trait Trace: Send {
     Ok(None)
   }
 
+  /// Persist a checkpoint capsule and barrier, returning the checkpoint ID and relative path if supported.
+  fn create_checkpoint(
+    &mut self,
+    capsule: &ContextCapsule,
+  ) -> Result<Option<(CheckpointId, String)>, SinkError> {
+    let _ = capsule;
+    Ok(None)
+  }
+
+  /// List checkpoint capsules recorded for this session if supported.
+  fn list_checkpoints(&self) -> Result<Vec<(CheckpointId, ContextCapsule)>, SinkError> {
+    Ok(Vec::new())
+  }
+
   /// Push buffered events to their final destination.
   fn flush(&mut self) -> Result<(), SinkError> {
     Ok(())
@@ -117,6 +145,17 @@ impl<T: Trace + ?Sized> Trace for &mut T {
 
   fn put_payload(&mut self, bytes: &[u8]) -> Result<Option<BlobRef>, SinkError> {
     <T as Trace>::put_payload(self, bytes)
+  }
+
+  fn create_checkpoint(
+    &mut self,
+    capsule: &ContextCapsule,
+  ) -> Result<Option<(CheckpointId, String)>, SinkError> {
+    <T as Trace>::create_checkpoint(self, capsule)
+  }
+
+  fn list_checkpoints(&self) -> Result<Vec<(CheckpointId, ContextCapsule)>, SinkError> {
+    (**self).list_checkpoints()
   }
 
   fn flush(&mut self) -> Result<(), SinkError> {
@@ -289,6 +328,8 @@ pub struct TurnLoop<'a> {
   history: Option<(pi_rs_core::EventSeq, pi_rs_core::EventSeq)>,
   compaction_strategy: CompactionStrategy,
   summarizer: Option<Summarizer>,
+  checkpoint_strategy: CheckpointStrategy,
+  checkpointer: Option<Checkpointer>,
 }
 
 impl<'a> TurnLoop<'a> {
@@ -332,6 +373,8 @@ impl<'a> TurnLoop<'a> {
       history: None,
       compaction_strategy: CompactionStrategy::default(),
       summarizer: None,
+      checkpoint_strategy: CheckpointStrategy::default(),
+      checkpointer: None,
     }
   }
 
@@ -423,9 +466,35 @@ impl<'a> TurnLoop<'a> {
     self
   }
 
+  /// Set the checkpoint strategy when context policy suggests checkpointing.
+  pub fn with_checkpoint_strategy(mut self, strategy: CheckpointStrategy) -> Self {
+    self.checkpoint_strategy = strategy;
+    self
+  }
+
+  /// Attach a custom checkpointer function for synthesizing context capsules.
+  pub fn with_checkpointer(
+    mut self,
+    checkpointer: impl Fn(&[Message], &ContextState) -> ContextCapsule + Send + Sync + 'static,
+  ) -> Self {
+    self.checkpointer = Some(Arc::new(checkpointer));
+    self.checkpoint_strategy = CheckpointStrategy::Auto;
+    self
+  }
+
   /// The model that owns generation right now.
   pub fn active_model(&self) -> ModelRef {
     self.epochs[self.epochs.len() - 1].model.clone()
+  }
+
+  /// Session identifier for this loop.
+  pub fn session_id(&self) -> &SessionId {
+    &self.session_id
+  }
+
+  /// List checkpoint capsules recorded for this session.
+  pub fn list_checkpoints(&self) -> Result<Vec<(CheckpointId, ContextCapsule)>, TurnError> {
+    self.trace.list_checkpoints().map_err(Into::into)
   }
 
   /// `true` once a failover has occurred.
@@ -1244,6 +1313,140 @@ impl<'a> TurnLoop<'a> {
     self.compact_with_summary_or(turn_id, target_tokens, None)
   }
 
+  /// Synthesize a structured ContextCapsule from messages and context state.
+  pub fn synthesize_capsule(&self, state: &ContextState, reason: &str) -> ContextCapsule {
+    if let Some(custom) = &self.checkpointer {
+      return custom(&self.messages, state);
+    }
+    let mut objective = String::from("Perform assigned task");
+    let mut completed_work = Vec::new();
+    let mut artifacts = Vec::new();
+    let mut decisions = Vec::new();
+    let mut constraints = Vec::new();
+    let unresolved = Vec::new();
+    let next_actions = vec!["Continue session from checkpoint".to_string()];
+
+    for msg in &self.messages {
+      if msg.role == Role::User && !msg.text().trim().is_empty() {
+        let text = msg.text();
+        let first_line = text.lines().next().unwrap_or(&text).trim();
+        if !first_line.is_empty() && !first_line.starts_with('[') {
+          objective = first_line.chars().take(120).collect();
+          break;
+        }
+      }
+    }
+
+    for msg in &self.messages {
+      if msg.role == Role::Assistant {
+        for block in &msg.content {
+          match block {
+            ContentBlock::ToolCall(call) => {
+              let note = format!("Executed tool `{}`", call.name);
+              if !completed_work.contains(&note) {
+                completed_work.push(note);
+              }
+              if let Some(path_val) = call.arguments.get("path").and_then(|p| p.as_str()) {
+                let path = path_val.to_string();
+                if !artifacts.iter().any(|a: &CapsuleArtifact| a.path == path) {
+                  artifacts.push(CapsuleArtifact {
+                    path,
+                    note: format!("referenced by `{}`", call.name),
+                  });
+                }
+              }
+            }
+            ContentBlock::Text { text } => {
+              let trimmed = text.trim();
+              if trimmed.starts_with("Decision:") {
+                decisions.push(CapsuleDecision {
+                  decision: trimmed.chars().take(80).collect(),
+                  rationale: "recorded during turn".into(),
+                });
+              }
+            }
+            _ => {}
+          }
+        }
+      }
+    }
+
+    if let Some(sys) = &self.system {
+      if sys.contains("constraint") || sys.contains("must") {
+        constraints.push("Follow system prompt instructions".into());
+      }
+    }
+
+    let current_state = format!(
+      "Context pressure ({} tokens) in epoch {}; reason: {reason}",
+      state.effective_tokens(),
+      state.context_epoch
+    );
+
+    ContextCapsule {
+      version: CAPSULE_SCHEMA_VERSION,
+      objective,
+      completed_work,
+      decisions,
+      constraints,
+      current_state,
+      artifacts,
+      unresolved,
+      next_actions,
+    }
+  }
+
+  /// Create a checkpoint capsule from current session state, store it, emit
+  /// `CheckpointCreated`, and reset visible messages to the capsule representation.
+  pub fn checkpoint(
+    &mut self,
+    turn_id: &TurnId,
+    capsule: ContextCapsule,
+  ) -> Result<CheckpointCreated, TurnError> {
+    let summarized_events = self.messages.len() as u64;
+    let (checkpoint_id, path) = match self.trace.create_checkpoint(&capsule)? {
+      Some((id, p)) => (id, p),
+      None => {
+        let id = CheckpointId::new();
+        let p = format!("checkpoints/{id}.json");
+        (id, p)
+      }
+    };
+
+    let event = CheckpointCreated {
+      checkpoint_id,
+      capsule_version: capsule.version,
+      summarized_events,
+      path,
+    };
+
+    self.emit(
+      Some(turn_id.clone()),
+      AgentEvent::CheckpointCreated(event.clone()),
+    )?;
+
+    // Reset visible messages: replace summarized history with the capsule's model representation
+    let capsule_msg = Message::user(capsule.format_for_model());
+    let removed = self.messages.len();
+    self.messages.clear();
+    self.messages.push(capsule_msg);
+
+    self.context_epoch += 1;
+    self.last_compaction = Some(Instant::now());
+
+    self.emit(
+      Some(turn_id.clone()),
+      AgentEvent::ContextCompactionCompleted(ContextCompactionCompleted {
+        level: ContextLevel::L3Checkpoint,
+        removed_messages: removed as u32,
+        retained_messages: 1,
+        context_epoch: self.context_epoch,
+      }),
+    )?;
+
+    Ok(event)
+  }
+
   /// Build the model request, consulting the context policy first.
   fn build_request(&mut self, turn_id: &TurnId) -> Result<ModelRequest, TurnError> {
     let capabilities = self.provider().capabilities();
@@ -1296,10 +1499,37 @@ impl<'a> TurnLoop<'a> {
           )?;
         }
       }
-      ContextAction::Warn { .. }
-      | ContextAction::Keep
-      | ContextAction::ReducePayload { .. }
-      | ContextAction::SuggestCheckpoint { .. } => {}
+      ContextAction::SuggestCheckpoint { reason } => {
+        if self.checkpoint_strategy == CheckpointStrategy::Auto {
+          let capsule = self.synthesize_capsule(&state, &reason);
+          match self.checkpoint(turn_id, capsule) {
+            Ok(created) => {
+              self.diagnostic(
+                Some(turn_id.clone()),
+                DiagnosticLevel::Info,
+                format!(
+                  "runtime created checkpoint {} under context pressure: {reason}",
+                  created.checkpoint_id
+                ),
+              )?;
+            }
+            Err(error) => {
+              self.diagnostic(
+                Some(turn_id.clone()),
+                DiagnosticLevel::Warn,
+                format!("checkpoint failed under context pressure: {error:?}"),
+              )?;
+            }
+          }
+        } else {
+          self.diagnostic(
+            Some(turn_id.clone()),
+            DiagnosticLevel::Warn,
+            format!("context suggests checkpoint: {reason}"),
+          )?;
+        }
+      }
+      ContextAction::Warn { .. } | ContextAction::Keep | ContextAction::ReducePayload { .. } => {}
     }
 
     // Tool schemas are exposed only when the active model can honour them: a model
@@ -3921,6 +4151,88 @@ mod tests {
         && m.text().contains("pi-rs is written in Rust 2024")),
       "model request carries the folded external context: {:?}",
       req.messages
+    );
+  }
+
+  #[test]
+  fn checkpoint_creation_driven_by_runtime_under_context_pressure() {
+    let mut provider = Scripted::new("pressured", vec![text("ok")]);
+    provider.capabilities.context_window = PRESSURED_WINDOW;
+    let tools = registry_with(Vec::new());
+    let mut policy =
+      pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, PRESSURED_WINDOW);
+    policy.thresholds.checkpoint_tokens = 1_000;
+    let mut trace = Recorder::default();
+
+    TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(heavy_turns(10))
+    .run_turn("start turn", &CancelToken::new(), &mut SilentProgress)
+    .expect("turn completes");
+
+    let kinds = trace.kinds();
+    assert!(
+      kinds.contains(&"checkpoint_created".to_string()),
+      "trace records checkpoint_created event: {kinds:?}"
+    );
+    assert!(
+      kinds.contains(&"context_compaction_completed".to_string()),
+      "trace records context_compaction_completed event: {kinds:?}"
+    );
+
+    let cp_payload = trace.find("checkpoint_created").unwrap();
+    assert_eq!(cp_payload["capsule_version"], 1);
+
+    let req = &provider.requests()[0];
+    assert!(
+      req
+        .messages
+        .iter()
+        .any(|m| m.text().contains("[Session Checkpoint Capsule]")),
+      "model request carries the formatted checkpoint capsule"
+    );
+  }
+
+  #[test]
+  fn custom_checkpointer_is_honoured_under_context_pressure() {
+    let mut provider = Scripted::new("pressured", vec![text("ok")]);
+    provider.capabilities.context_window = PRESSURED_WINDOW;
+    let tools = registry_with(Vec::new());
+    let mut policy =
+      pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, PRESSURED_WINDOW);
+    policy.thresholds.checkpoint_tokens = 1_000;
+    let mut trace = Recorder::default();
+
+    TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(heavy_turns(10))
+    .with_checkpointer(|_msgs, _state| {
+      let mut cap = ContextCapsule::new("custom objective from hook");
+      cap.current_state = "custom state hook".into();
+      cap
+    })
+    .run_turn("start turn", &CancelToken::new(), &mut SilentProgress)
+    .expect("turn completes");
+
+    let req = &provider.requests()[0];
+    assert!(
+      req
+        .messages
+        .iter()
+        .any(|m| m.text().contains("objective: custom objective from hook")),
+      "model request carries the custom checkpointer output"
     );
   }
 }
