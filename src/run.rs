@@ -194,9 +194,12 @@ pub(crate) fn open_session(
     // configuration surface: the policy comes from the primary's own capabilities.
     runtime = runtime.with_backup(backup);
   }
+  let mut mcp_manager = pi_rs_mcp::McpManager::new(config.mcp_servers.clone());
   let mut session = SessionHandle {
     runtime,
     progress,
+    tools: &tools,
+    mcp_manager: &mut mcp_manager,
     transcript_error: None,
   };
   turns(&mut session)
@@ -212,6 +215,8 @@ pub(crate) fn open_session(
 pub struct SessionHandle<'a> {
   runtime: TurnLoop<'a>,
   progress: CliProgress<'a>,
+  tools: &'a ToolRegistry,
+  mcp_manager: &'a mut pi_rs_mcp::McpManager,
   /// A transcript write failure must not decide whether the session closes: the
   /// durable record is the product, so the failure is carried out and reported
   /// after the session has ended.
@@ -260,6 +265,28 @@ impl SessionHandle<'_> {
     self
       .runtime
       .compact_with_summary_or(&turn_id, target_tokens, summary)
+  }
+
+  /// Return current statuses of all configured MCP servers.
+  pub fn mcp_statuses(&self) -> Vec<pi_rs_mcp::McpServerStatus> {
+    self.mcp_manager.statuses()
+  }
+
+  /// Enable and connect a configured MCP server, registering its tools into the session.
+  pub fn mcp_enable(&mut self, name: &str) -> Result<usize, pi_rs_mcp::McpError> {
+    let tools = self.mcp_manager.enable_server(name)?;
+    let count = tools.len();
+    for tool in tools {
+      self.tools.register_shared(Box::new(tool));
+    }
+    Ok(count)
+  }
+
+  /// Disable and disconnect a configured MCP server, removing its tools from the session.
+  pub fn mcp_disable(&mut self, name: &str) -> Result<usize, pi_rs_mcp::McpError> {
+    self.mcp_manager.disable_server(name)?;
+    let prefix = format!("mcp__{name}__");
+    Ok(self.tools.unregister_prefix(&prefix))
   }
 
   /// Flush the transcript, end the session as a user exit, and report what the

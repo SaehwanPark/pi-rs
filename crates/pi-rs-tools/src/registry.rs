@@ -10,6 +10,7 @@
 //! state itself. The runtime owns durability; the registry owns decisions.
 
 use std::collections::BTreeMap;
+use std::sync::RwLock;
 
 use pi_rs_core::{
   CancelToken, ReplayDecision, Tool, ToolChunk, ToolExecutionState, ToolMetadata, ToolOutcome,
@@ -145,7 +146,7 @@ impl Executed {
 /// The set of tools the runtime provides.
 pub struct ToolRegistry {
   runtime: Runtime,
-  tools: BTreeMap<String, Box<dyn Tool>>,
+  tools: RwLock<BTreeMap<String, Box<dyn Tool>>>,
   allow: Vec<String>,
   deny: Vec<String>,
   /// How a mutating call is answered when the caller does not supply a gate.
@@ -160,7 +161,7 @@ impl ToolRegistry {
   pub fn new(workspace: Workspace) -> Self {
     Self {
       runtime: Runtime::new(workspace),
-      tools: BTreeMap::new(),
+      tools: RwLock::new(BTreeMap::new()),
       allow: Vec::new(),
       deny: Vec::new(),
       default_gate: DefaultGate::Deny,
@@ -187,8 +188,37 @@ impl ToolRegistry {
   /// built-in without the runtime needing a second resolution rule.
   pub fn register(&mut self, tool: Box<dyn Tool>) -> &mut Self {
     let name = tool.metadata().name;
-    self.tools.insert(name, tool);
+    self.tools.write().unwrap().insert(name, tool);
     self
+  }
+
+  /// Register a tool into the registry via a shared reference.
+  ///
+  /// This enables dynamic mid-session tool registration (e.g. on-demand MCP activation)
+  /// without requiring exclusive ownership of the registry.
+  pub fn register_shared(&self, tool: Box<dyn Tool>) {
+    let name = tool.metadata().name;
+    self.tools.write().unwrap().insert(name, tool);
+  }
+
+  /// Unregister a tool by name via a shared reference.
+  pub fn unregister_shared(&self, name: &str) -> bool {
+    self.tools.write().unwrap().remove(name).is_some()
+  }
+
+  /// Unregister all tools whose names start with the given prefix.
+  pub fn unregister_prefix(&self, prefix: &str) -> usize {
+    let mut tools = self.tools.write().unwrap();
+    let matching: Vec<String> = tools
+      .keys()
+      .filter(|name| name.starts_with(prefix))
+      .cloned()
+      .collect();
+    let count = matching.len();
+    for name in matching {
+      tools.remove(&name);
+    }
+    count
   }
 
   /// Register the built-in set.
@@ -205,15 +235,15 @@ impl ToolRegistry {
   }
 
   pub fn len(&self) -> usize {
-    self.tools.len()
+    self.tools.read().unwrap().len()
   }
 
   pub fn is_empty(&self) -> bool {
-    self.tools.is_empty()
+    self.tools.read().unwrap().is_empty()
   }
 
   pub fn names(&self) -> Vec<String> {
-    self.tools.keys().cloned().collect()
+    self.tools.read().unwrap().keys().cloned().collect()
   }
 
   /// Whether the policy lets this tool be offered and called at all.
@@ -231,6 +261,8 @@ impl ToolRegistry {
   pub fn allowed_names(&self) -> Vec<String> {
     self
       .tools
+      .read()
+      .unwrap()
       .keys()
       .filter(|name| self.is_allowed(name))
       .cloned()
@@ -241,6 +273,8 @@ impl ToolRegistry {
   pub fn specs(&self) -> Vec<pi_rs_core::ToolSpec> {
     self
       .tools
+      .read()
+      .unwrap()
       .iter()
       .filter(|(name, _)| self.is_allowed(name))
       .map(|(_, tool)| spec_of(tool.as_ref()))
@@ -251,6 +285,8 @@ impl ToolRegistry {
   pub fn metadata(&self) -> Vec<ToolMetadata> {
     self
       .tools
+      .read()
+      .unwrap()
       .iter()
       .filter(|(name, _)| self.is_allowed(name))
       .map(|(_, tool)| tool.metadata())
@@ -258,13 +294,20 @@ impl ToolRegistry {
   }
 
   pub fn metadata_for(&self, name: &str) -> Option<ToolMetadata> {
-    self.tools.get(name).map(|tool| tool.metadata())
+    self
+      .tools
+      .read()
+      .unwrap()
+      .get(name)
+      .map(|tool| tool.metadata())
   }
 
   /// Whether any permitted tool can change state.
   pub fn has_mutating_tools(&self) -> bool {
     self
       .tools
+      .read()
+      .unwrap()
       .iter()
       .any(|(name, tool)| self.is_allowed(name) && !tool.metadata().read_only)
   }
@@ -355,26 +398,32 @@ impl ToolRegistry {
         cancelled: true,
       });
     }
-    let Some(tool) = self.tools.get(&request.name) else {
-      return Ok(Executed::refused(
-        request.clone(),
-        unknown_tool(&request.name, &self.allowed_names()),
-      ));
+    let (metadata, arguments_schema) = {
+      let tools = self.tools.read().unwrap();
+      let Some(tool) = tools.get(&request.name) else {
+        return Ok(Executed::refused(
+          request.clone(),
+          unknown_tool(&request.name, &self.allowed_names()),
+        ));
+      };
+      (tool.metadata(), tool.arguments_schema())
     };
-    let metadata = tool.metadata();
     if !self.is_allowed(&metadata.name) {
       return Ok(Executed::refused(
         request.clone(),
         format!("tool '{}' is denied by policy", metadata.name),
       ));
     }
-    if let Err(message) =
-      validate_arguments(&metadata, &request.arguments, &tool.arguments_schema())
-    {
+    if let Err(message) = validate_arguments(&metadata, &request.arguments, &arguments_schema) {
       return Ok(Executed::refused(request.clone(), message));
     }
-    if let Err(error) = tool.preflight(request) {
-      return Ok(Executed::refused(request.clone(), error.message));
+    {
+      let tools = self.tools.read().unwrap();
+      if let Some(tool) = tools.get(&request.name) {
+        if let Err(error) = tool.preflight(request) {
+          return Ok(Executed::refused(request.clone(), error.message));
+        }
+      }
     }
     if !metadata.read_only {
       // `Ask` refuses here as well: nothing in this type can deliver a prompt, so
@@ -392,7 +441,11 @@ impl ToolRegistry {
       inner: progress,
       forwarded: false,
     };
-    let result = tool.execute(request, &mut sink);
+    let result = {
+      let tools = self.tools.read().unwrap();
+      let tool = tools.get(&request.name).expect("tool exists");
+      tool.execute(request, &mut sink)
+    };
 
     match result {
       Ok(mut outcome) => {

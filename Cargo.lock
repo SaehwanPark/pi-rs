@@ -491,6 +491,7 @@ dependencies = [
  "libc",
  "pi-rs-compat",
  "pi-rs-core",
+ "pi-rs-mcp",
  "pi-rs-provider",
  "pi-rs-runtime",
  "pi-rs-store",
@@ -514,6 +515,17 @@ dependencies = [
  "getrandom 0.3.4",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "pi-rs-mcp"
+version = "0.1.0"
+dependencies = [
+ "pi-rs-core",
+ "pi-rs-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -44,7 +44,8 @@ pub use capability::{
   ReasoningExposure,
 };
 pub use config::{
-  ConfigError, ContextOverrides, ModelEndpoint, RuntimeConfig, ToolPolicy, UiConfig,
+  ConfigError, ContextOverrides, McpServerConfig, ModelEndpoint, RuntimeConfig, ToolPolicy,
+  UiConfig,
 };
 pub use context::{
   CapsuleArtifact, CapsuleDecision, ContextAction, ContextCapsule, ContextDecision, ContextLevel,

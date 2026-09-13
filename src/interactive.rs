@@ -79,7 +79,16 @@ use crate::{
 const PROMPT_PREFIX: &str = "> ";
 
 /// The slash commands this loop answers itself, and what Tab completes to.
-const COMMANDS: [&str; 4] = ["help", "quit", "exit", "compact"];
+const COMMANDS: [&str; 5] = ["help", "quit", "exit", "compact", "mcp"];
+
+/// Action requested via the `/mcp` command.
+#[derive(Debug, PartialEq, Eq)]
+pub enum McpAction {
+  List,
+  Enable(String),
+  Disable(String),
+  Help,
+}
 
 /// Where a submitted line goes: the runtime, or a command this loop owns.
 ///
@@ -97,6 +106,8 @@ enum Submitted {
   Quit,
   /// Compact conversation history into a durable summary epoch.
   Compact(Option<String>),
+  /// Inspect or control configured MCP servers.
+  Mcp(McpAction),
   /// A loaded prompt template, with the argument string exactly as typed after the
   /// name. What the model receives is the expansion, not these parts.
   Template { name: String, arguments: String },
@@ -124,6 +135,29 @@ fn route(text: &str, templates: &prompt::Scan) -> Submitted {
           Some(trimmed.to_string())
         };
         Submitted::Compact(summary)
+      }
+      "mcp" => {
+        let trimmed = rest.trim();
+        let action = if trimmed.is_empty() || trimmed == "list" {
+          McpAction::List
+        } else if let Some(server) = trimmed.strip_prefix("enable") {
+          let server = server.trim();
+          if server.is_empty() {
+            McpAction::Help
+          } else {
+            McpAction::Enable(server.to_string())
+          }
+        } else if let Some(server) = trimmed.strip_prefix("disable") {
+          let server = server.trim();
+          if server.is_empty() {
+            McpAction::Help
+          } else {
+            McpAction::Disable(server.to_string())
+          }
+        } else {
+          McpAction::Help
+        };
+        Submitted::Mcp(action)
       }
       _ if templates.named(&name).is_some() => Submitted::Template {
         name: name.clone(),
@@ -484,6 +518,8 @@ impl Loop {
         let mut lines = vec![
           "/help       this list".to_string(),
           "/compact    summarize earlier context and open a durable compaction epoch".to_string(),
+          "/mcp        list or control MCP servers (/mcp enable <name>, /mcp disable <name>)"
+            .to_string(),
           "/quit, /exit  end the session (ctrl-c on an empty draft does the same)".to_string(),
           "tab         complete the command the caret sits on".to_string(),
         ];
@@ -509,6 +545,67 @@ impl Loop {
           }
         }
         Ok(Submitted::Compact(custom))
+      }
+      Submitted::Mcp(action) => {
+        match &action {
+          McpAction::List => {
+            let statuses = session.mcp_statuses();
+            if statuses.is_empty() {
+              self.write_note(&[
+                "no MCP servers configured (add to config under mcp_servers)".to_string(),
+              ])?;
+            } else {
+              let mut lines = vec!["Configured MCP servers:".to_string()];
+              for s in statuses {
+                let state_str = if s.active {
+                  format!("active ({} tools)", s.tool_count)
+                } else {
+                  "inactive".to_string()
+                };
+                let latency_str = s
+                  .first_use_latency_ms
+                  .map(|ms| format!(", {ms}ms"))
+                  .unwrap_or_default();
+                lines.push(format!(
+                  "  - {} ({}): {state_str}{latency_str}",
+                  s.name, s.command
+                ));
+              }
+              self.write_note(&lines)?;
+            }
+          }
+          McpAction::Enable(name) => match session.mcp_enable(name) {
+            Ok(count) => {
+              self.write_note(&[format!(
+                "enabled MCP server '{name}', registered {count} tool{}",
+                if count == 1 { "" } else { "s" }
+              )])?;
+            }
+            Err(err) => {
+              self.write_note(&[format!("failed to enable MCP server '{name}': {err}")])?;
+            }
+          },
+          McpAction::Disable(name) => match session.mcp_disable(name) {
+            Ok(count) => {
+              self.write_note(&[format!(
+                "disabled MCP server '{name}', unregistered {count} tool{}",
+                if count == 1 { "" } else { "s" }
+              )])?;
+            }
+            Err(err) => {
+              self.write_note(&[format!("failed to disable MCP server '{name}': {err}")])?;
+            }
+          },
+          McpAction::Help => {
+            self.write_note(&[
+              "Usage: /mcp [list | enable <name> | disable <name>]".to_string(),
+              "  /mcp              list configured servers and their status".to_string(),
+              "  /mcp enable <name>   activate server and discover its tools".to_string(),
+              "  /mcp disable <name>  deactivate server and remove its tools".to_string(),
+            ])?;
+          }
+        }
+        Ok(Submitted::Mcp(action))
       }
       Submitted::Template { name, arguments } => {
         // Expansion is pure string work and finishes before the turn needs the
@@ -965,6 +1062,26 @@ mod tests {
       route("/compact focus on tests", &none),
       Submitted::Compact(Some(s)) if s == "focus on tests"
     ));
+    assert!(matches!(
+      route("/mcp", &none),
+      Submitted::Mcp(McpAction::List)
+    ));
+    assert!(matches!(
+      route("/mcp list", &none),
+      Submitted::Mcp(McpAction::List)
+    ));
+    assert!(matches!(
+      route("/mcp enable rkb", &none),
+      Submitted::Mcp(McpAction::Enable(s)) if s == "rkb"
+    ));
+    assert!(matches!(
+      route("/mcp disable rkb", &none),
+      Submitted::Mcp(McpAction::Disable(s)) if s == "rkb"
+    ));
+    assert!(matches!(
+      route("/mcp unknown", &none),
+      Submitted::Mcp(McpAction::Help)
+    ));
     match route("/nope", &none) {
       Submitted::Unknown(name) => assert_eq!(name, "nope"),
       _ => panic!("a command shape with no command is an unknown, not a prompt"),
@@ -979,6 +1096,16 @@ mod tests {
     }
     assert_eq!(surface.editor.apply(Intent::Complete), Outcome::Changed);
     assert_eq!(surface.editor.text(), "/compact ");
+  }
+
+  #[test]
+  fn mcp_command_is_completed_by_tab() {
+    let mut surface = Loop::new("local/vulcan".to_string(), 80);
+    for ch in "/mc".chars() {
+      surface.editor.apply(Intent::Insert(ch));
+    }
+    assert_eq!(surface.editor.apply(Intent::Complete), Outcome::Changed);
+    assert_eq!(surface.editor.text(), "/mcp ");
   }
 
   #[test]
