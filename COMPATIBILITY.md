@@ -286,6 +286,50 @@ unrecognised entry type, an entry off the active path — is reported with the p
 reason, and a missing header, duplicate id, dangling parent, or cycle is an error rather
 than something to paper over.
 
+### 10.2 Exporting a Pi session
+
+`pi-rs export <session-id> [--out <path>]` writes one `pi-rs` session back out in Pi's JSONL shape.
+The emitted shape is derived from what `pi-rs import-pi` accepts:
+
+- A version 3 header (`type: "session"`, `id`, `cwd`, `timestamp`);
+- Linear message entries linked sequentially with `parentId`;
+- Assistant reply text and tool calls folded from streamed deltas into Pi message blocks.
+
+Anything the canonical trace holds that Pi's shape cannot carry is explicitly surfaced on
+stderr as a dropped item rather than silently discarded or falsified.
+
+### 10.3 Non-round-trippable metadata
+
+See [`docs/SESSION_COMPATIBILITY.md`](docs/SESSION_COMPATIBILITY.md) for the complete bidirectional
+fidelity matrix and design invariants.
+
+Summary of metadata that cannot round-trip between Pi and `pi-rs`:
+
+1. **Reasoning provenance**: `pi-rs` models 4 distinct provenance tiers (`Native`, `ProviderSummary`,
+   `DeclaredRationale`, `ReconstructedRationale`). Pi has untyped `thinking` blocks with no
+   provenance concept. Export reports dropped provenance on stderr; import never invents native
+   provenance for unlabelled foreign thinking.
+2. **Multi-branch DAGs vs linear turns**: Pi records branching trees (`id`/`parentId`). `pi-rs`
+   imports only the active path from the newest-written entry to root; off-path forks are dropped
+   and reported by type on stderr.
+3. **Model epochs & failovers**: `pi-rs` tracks typed model epochs (`ModelEpochStarted`) and
+   reasons for failover. Pi stores only string `model` fields per assistant message.
+4. **Tool lifecycle & safety invariants**: `pi-rs` tracks 5 execution states (`Requested`, `Started`,
+   `Completed`, `Failed`, `Unknown`) and `read_only` safety flags in `trace.jsonl`. Pi records only
+   coarse messages.
+5. **Payload externalization & blob stores**: Payloads exceeding 8 KiB reside in `blobs/sha256/...`
+   in `pi-rs`. Pi has no session blob store; export emits the inline preview.
+6. **Context reductions & redactions**: `ContextReduced` token/byte statistics and durable redaction
+   counts exist only in `pi-rs` canonical traces.
+7. **Diagnostics & checkpoints**: Operational events (`Diagnostic`, `Checkpoint`, `SessionEnded`)
+   have no counterpart in Pi message logs and stay in `pi-rs` traces.
+8. **Compaction summaries**: Pi compaction summaries are marked as diagnostic boundaries on import,
+   preventing duplicate turn replay.
+9. **UI / Extension entries**: Pi `label`, `custom`, and `custom_message` records are dropped on
+   import with explicit stderr warnings.
+10. **Provider billing & cache usage**: Pi's `usage.cacheRead`, `usage.cacheWrite`, and `cost` are
+    omitted since `pi-rs` tracks only token quantities.
+
 ## 11. Themes and UI
 
 Basic theme semantics may be supported.
