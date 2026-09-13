@@ -46,13 +46,11 @@
 //! away from the runtime, and the session and the buffer outlive the turn that was
 //! stopped.
 //!
-//! What is deliberately *not* decided here is how a `Ctrl-C` that arrives while the
-//! screen is handed over gets observed at all. The settings that make a key readable
-//! are the same settings that stop the terminal translating a newline, so during a
-//! turn that `Ctrl-C` is a `SIGINT` and not a key event; observing it needs a signal
-//! handler or a termios mode `crossterm` does not expose. Until one of those exists,
-//! the loop acts on an interrupt while it is reading events, which is to say when a
-//! turn has already ended.
+//! While a turn runs, raw mode is temporarily suspended so runtime output translates
+//! newlines cleanly. During that window, an in-flight `Ctrl-C` is delivered as `SIGINT`.
+//! [`interrupt::TurnInterruptGuard`] installs a signal handler that atomically flags
+//! the session's [`CancelToken`], cleanly interrupting model streaming or tool execution
+//! without destroying the process or corrupting the session.
 
 use std::io::{self, Write};
 use std::ops::Range;
@@ -544,7 +542,11 @@ impl Loop {
     // terminal's own translation of them away. From here until the matching enable,
     // the terminal is the one the runtime's writers expect.
     terminal::disable_raw_mode().map_err(terminal_failure)?;
-    let result = session.turn_with(prompt, &self.cancel);
+    let outcome = {
+      let _guard = interrupt::TurnInterruptGuard::install(&self.cancel);
+      let result = session.turn_with(prompt, &self.cancel);
+      after_turn(result)
+    };
     // Done with this token, whether the turn answered, was stopped, or failed: the
     // next one starts with a fresh token, so a spent one is never reused.
     self.cancel = CancelToken::new();
@@ -552,7 +554,6 @@ impl Loop {
     // rather than keep saying what the config said when the session opened.
     self.model = session.model().to_string();
     take_line().map_err(terminal_failure)?;
-    let outcome = after_turn(result);
     // The loop's own line about a cancellation, written while the terminal still
     // translates it into a row of its own.
     if let AfterTurn::Cancelled(note) = &outcome {
@@ -809,6 +810,77 @@ fn terminal_failure(error: io::Error) -> String {
   format!("cannot use the terminal: {error}")
 }
 
+#[cfg(unix)]
+pub(crate) mod interrupt {
+  use pi_rs_core::CancelToken;
+  use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+
+  static ACTIVE_FLAG: AtomicPtr<AtomicBool> = AtomicPtr::new(std::ptr::null_mut());
+
+  pub(crate) extern "C" fn sigint_handler(_: libc::c_int) {
+    let ptr = ACTIVE_FLAG.load(Ordering::SeqCst);
+    if !ptr.is_null() {
+      // SAFETY: Storing into a valid AtomicBool is async-signal-safe.
+      // The pointer is guaranteed valid for the lifetime of TurnInterruptGuard.
+      unsafe {
+        (*ptr).store(true, Ordering::SeqCst);
+      }
+    }
+  }
+
+  /// RAII guard that installs a SIGINT handler during a turn.
+  pub struct TurnInterruptGuard {
+    old_flag: *mut AtomicBool,
+    old_action: libc::sigaction,
+  }
+
+  impl TurnInterruptGuard {
+    pub fn install(cancel: &CancelToken) -> Self {
+      let flag_ptr = cancel.raw_flag() as *const AtomicBool as *mut AtomicBool;
+      let old_flag = ACTIVE_FLAG.swap(flag_ptr, Ordering::SeqCst);
+
+      let mut new_action: libc::sigaction = unsafe { std::mem::zeroed() };
+      new_action.sa_sigaction = sigint_handler as *const () as usize;
+      new_action.sa_flags = 0;
+      unsafe {
+        libc::sigemptyset(&mut new_action.sa_mask);
+      }
+
+      let mut old_action: libc::sigaction = unsafe { std::mem::zeroed() };
+      unsafe {
+        libc::sigaction(libc::SIGINT, &new_action, &mut old_action);
+      }
+
+      Self {
+        old_flag,
+        old_action,
+      }
+    }
+  }
+
+  impl Drop for TurnInterruptGuard {
+    fn drop(&mut self) {
+      ACTIVE_FLAG.store(self.old_flag, Ordering::SeqCst);
+      unsafe {
+        libc::sigaction(libc::SIGINT, &self.old_action, std::ptr::null_mut());
+      }
+    }
+  }
+}
+
+#[cfg(not(unix))]
+pub(crate) mod interrupt {
+  use pi_rs_core::CancelToken;
+
+  pub struct TurnInterruptGuard;
+
+  impl TurnInterruptGuard {
+    pub fn install(_cancel: &CancelToken) -> Self {
+      Self
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -1041,6 +1113,45 @@ mod tests {
     let observer = surface.cancel.clone();
     observer.cancel();
     assert!(surface.cancel.is_cancelled());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn turn_interrupt_guard_cancels_token_on_sigint() {
+    let cancel = CancelToken::new();
+    assert!(!cancel.is_cancelled());
+    {
+      let _guard = interrupt::TurnInterruptGuard::install(&cancel);
+      interrupt::sigint_handler(libc::SIGINT);
+      assert!(
+        cancel.is_cancelled(),
+        "SIGINT should trigger the installed cancel token"
+      );
+    }
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn turn_interrupt_guard_restores_previous_sigaction_on_drop() {
+    let cancel1 = CancelToken::new();
+    let cancel2 = CancelToken::new();
+    {
+      let _guard1 = interrupt::TurnInterruptGuard::install(&cancel1);
+      {
+        let _guard2 = interrupt::TurnInterruptGuard::install(&cancel2);
+        interrupt::sigint_handler(libc::SIGINT);
+        assert!(cancel2.is_cancelled(), "inner guard receives SIGINT");
+        assert!(
+          !cancel1.is_cancelled(),
+          "outer guard is not cancelled while inner is active"
+        );
+      }
+      interrupt::sigint_handler(libc::SIGINT);
+      assert!(
+        cancel1.is_cancelled(),
+        "outer guard receives SIGINT after inner drops"
+      );
+    }
   }
 
   #[test]

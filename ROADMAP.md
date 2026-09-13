@@ -84,7 +84,9 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
       one turn per submit on a single open session, so context carries across turns).
       Turn interruption is still its own item below.
 - [x] Implement streamed assistant rendering for the one-shot command.
-- [ ] Implement cancel/interrupt.
+- [x] Implement cancel/interrupt (`interrupt::TurnInterruptGuard` catches `SIGINT` during in-flight
+      turns and flags `CancelToken`, safely aborting model streaming or tool calls without
+      session corruption).
 - [x] Implement compact status line (the projection in `pi-rs-tui::statusline` is rendered
       by the interactive session frame, tested across narrow fallback and idle/working states).
 - [x] Render the streamed transcript through a semantic layer (`pi-rs-tui`: roles,
