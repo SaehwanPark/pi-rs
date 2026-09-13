@@ -152,3 +152,50 @@ fn expansion_reaches_the_whole_document_not_just_the_first_line() {
     "{expanded}"
   );
 }
+
+#[test]
+fn package_prompts_in_fixtures_are_discovered_from_home() {
+  let pkg_home = Path::new(env!("CARGO_MANIFEST_DIR"))
+    .join("tests/compat/packages/home")
+    .canonicalize()
+    .expect("packages fixture home");
+  let scan = prompt::discover(&Discovery {
+    home: Some(pkg_home),
+    cwd: home().join("not-a-project"),
+    trust: Trust::Untrusted,
+  });
+
+  let template = scan.named("review").expect("fixture package prompt found");
+  assert_eq!(template.source, Source::Global);
+  assert_eq!(template.package.as_deref(), Some("fixture-pkg-a"));
+  assert_eq!(template.description, "Review prompt in package A");
+}
+
+#[test]
+fn package_prompts_in_project_fixtures_respect_trust_boundary() {
+  let pkg_project = Path::new(env!("CARGO_MANIFEST_DIR"))
+    .join("tests/compat/packages/project")
+    .canonicalize()
+    .expect("packages fixture project");
+
+  let untrusted = prompt::discover(&Discovery {
+    home: None,
+    cwd: pkg_project.clone(),
+    trust: Trust::Untrusted,
+  });
+  assert!(
+    untrusted.named("proj-prompt").is_none(),
+    "project package prompts must not be read without trust"
+  );
+
+  let trusted = prompt::discover(&Discovery {
+    home: None,
+    cwd: pkg_project,
+    trust: Trust::Trusted,
+  });
+  let template = trusted
+    .named("proj-prompt")
+    .expect("project package prompt found");
+  assert_eq!(template.source, Source::Project);
+  assert_eq!(template.package.as_deref(), Some("project-pkg"));
+}

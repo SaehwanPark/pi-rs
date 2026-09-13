@@ -1158,6 +1158,7 @@ mod tests {
           path: std::path::PathBuf::from(format!("/prompts/{name}.md")),
           source: pi_rs_compat::scan::Source::Global,
           body: format!("run the {name} on $@"),
+          package: None,
         })
         .collect(),
       warnings: Vec::new(),

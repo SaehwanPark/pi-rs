@@ -133,8 +133,8 @@ before the name, so `pi-rs prompt lint --strict` passes `--strict` to the templa
 is split by Pi's editor rule (`parseCommandArgs`) — bash-style quotes whose quirks are
 reproduced, not smoothed — and the expansion is sent as the turn.
 
-Not yet: package `prompts/` directories, `pi.prompts` entries, the `prompts` array in
-settings, `--prompt-template` paths, and `--no-prompt-templates`.
+Package `prompts/` directories, `pi.prompts` entries, `--prompt-template` paths,
+and `--no-prompt-templates` are supported. The `prompts` array in settings is deferred.
 
 ## 7. Packages
 
