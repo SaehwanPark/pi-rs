@@ -460,7 +460,7 @@ Open in this area, in order:
 - [x] Preserve committed tool results across failover.
 - [x] Detect `Unknown` tool completion (`ToolExecutionState::Unknown` and `AgentEvent::ToolUnknown`).
 - [x] Prevent blind replay of mutating operations (cancelled/uncertain mutating calls coerced to `Unknown`).
-- [ ] Add reconciliation path for uncertain state.
+- [x] Add reconciliation path for uncertain state (`ReconciliationStatus` on `Tool` trait, `ToolRegistry::reconcile`, and `TurnEngine::reconcile_tool_call` disambiguate `write`/`edit` side effects into `Committed`, `Unmodified`, `Diverged`, or `RequiresManualInspection`; verified in `crates/pi-rs-tools/tests/registry.rs`).
 
 ### Recovery policy
 

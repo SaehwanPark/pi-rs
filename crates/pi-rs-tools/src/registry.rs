@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use std::sync::RwLock;
 
 use pi_rs_core::{
-  CancelToken, ReplayDecision, Tool, ToolChunk, ToolExecutionState, ToolMetadata, ToolOutcome,
-  ToolProgress, ToolRequest,
+  CancelToken, ReplayDecision, Tool, ToolChunk, ToolError, ToolExecutionState, ToolMetadata,
+  ToolOutcome, ToolProgress, ToolRequest,
 };
 use serde_json::Value;
 
@@ -310,6 +310,18 @@ impl ToolRegistry {
       .unwrap()
       .iter()
       .any(|(name, tool)| self.is_allowed(name) && !tool.metadata().read_only)
+  }
+
+  /// Reconcile an uncertain or interrupted tool call against environment state.
+  pub fn reconcile(
+    &self,
+    request: &ToolRequest,
+  ) -> Result<pi_rs_core::ReconciliationStatus, ToolError> {
+    let tools = self.tools.read().unwrap();
+    let Some(tool) = tools.get(&request.name) else {
+      return Err(ToolError::new(format!("unknown tool '{}'", request.name)));
+    };
+    tool.reconcile(request)
   }
 
   /// Execute one call under the policy.

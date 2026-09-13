@@ -91,6 +91,47 @@ pub enum ReplayDecision {
   Never,
 }
 
+/// Result of reconciling an uncertain or interrupted tool call against environment state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciliationStatus {
+  /// The intended side effect was already committed.
+  /// (e.g. file exists with exact requested contents, edit replacement already in place).
+  Committed { details: String },
+  /// The environment is clean / unmodified by this call.
+  /// (e.g. target file does not exist, or matches pre-operation state).
+  Unmodified { details: String },
+  /// The environment was modified, but does not match the expected state.
+  /// (e.g. target file exists with unexpected contents, or partial change).
+  Diverged { details: String },
+  /// The tool cannot determine whether the side effect took place automatically.
+  /// (e.g. arbitrary `exec` command).
+  RequiresManualInspection { details: String },
+}
+
+impl ReconciliationStatus {
+  pub fn is_committed(&self) -> bool {
+    matches!(self, Self::Committed { .. })
+  }
+
+  pub fn is_unmodified(&self) -> bool {
+    matches!(self, Self::Unmodified { .. })
+  }
+
+  pub fn can_safe_replay(&self, metadata: &ToolMetadata) -> bool {
+    self.is_unmodified() && metadata.idempotent
+  }
+
+  pub fn summary(&self) -> &str {
+    match self {
+      Self::Committed { details } => details,
+      Self::Unmodified { details } => details,
+      Self::Diverged { details } => details,
+      Self::RequiresManualInspection { details } => details,
+    }
+  }
+}
+
 /// Static description of a tool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolMetadata {
@@ -320,6 +361,23 @@ pub trait Tool: Send + Sync {
     request: &ToolRequest,
     progress: &mut dyn ToolProgress,
   ) -> Result<ToolOutcome, ToolError>;
+
+  /// Reconcile an uncertain or interrupted call by inspecting current environment state.
+  ///
+  /// Tools that know how to check their own side effects (such as `write` checking
+  /// if the file exists with the requested contents, or `edit` checking if the
+  /// patch was applied) implement this to disambiguate `ToolExecutionState::Unknown`.
+  fn reconcile(&self, _request: &ToolRequest) -> Result<ReconciliationStatus, ToolError> {
+    if self.metadata().read_only {
+      Ok(ReconciliationStatus::Unmodified {
+        details: "read-only tool produces no observable side effects".to_string(),
+      })
+    } else {
+      Ok(ReconciliationStatus::RequiresManualInspection {
+        details: "automatic side-effect reconciliation is not supported for this tool".to_string(),
+      })
+    }
+  }
 }
 
 #[cfg(test)]

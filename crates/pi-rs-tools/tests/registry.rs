@@ -9,8 +9,8 @@ use std::{fs, path::Path};
 
 use pi_rs_core::ToolExecutionState as State;
 use pi_rs_core::{
-  CancelToken, CancelToken as Cancel, ReplayDecision, ToolCallId, ToolChunk, ToolMetadata,
-  ToolOutcome, ToolPolicy, ToolProgress, ToolRequest, ToolSpec,
+  CancelToken, CancelToken as Cancel, ReconciliationStatus, ReplayDecision, ToolCallId, ToolChunk,
+  ToolMetadata, ToolOutcome, ToolPolicy, ToolProgress, ToolRequest, ToolSpec,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -510,4 +510,102 @@ fn a_cancel_token_shared_with_a_long_command_stops_it_early() {
   );
   assert!(after.cancelled);
   assert!(!after.outcome.text.contains("not_run"), "must not have run");
+}
+
+#[test]
+fn reconciliation_path_disambiguates_uncertain_write_state() {
+  let dir = fixture();
+  let reg = registry(&dir);
+  let req = request(
+    "write",
+    json!({
+      "path": "target.txt",
+      "contents": "expected content"
+    }),
+  );
+
+  // Before any execution, the file does not exist -> Unmodified
+  let status_before = reg.reconcile(&req).unwrap();
+  assert!(
+    status_before.is_unmodified(),
+    "file does not exist before write"
+  );
+
+  // After writing matching content -> Committed
+  fs::write(dir.path().join("target.txt"), "expected content").unwrap();
+  let status_committed = reg.reconcile(&req).unwrap();
+  assert!(
+    status_committed.is_committed(),
+    "matching content is committed"
+  );
+
+  // If content was modified differently -> Diverged
+  fs::write(dir.path().join("target.txt"), "corrupted partial content").unwrap();
+  let status_diverged = reg.reconcile(&req).unwrap();
+  assert!(
+    matches!(status_diverged, ReconciliationStatus::Diverged { .. }),
+    "divergent content is detected as diverged"
+  );
+}
+
+#[test]
+fn reconciliation_path_disambiguates_uncertain_edit_state() {
+  let dir = fixture();
+  let reg = registry(&dir);
+  let file_path = dir.path().join("edit_target.txt");
+  fs::write(&file_path, "original text here").unwrap();
+
+  let req = request(
+    "edit",
+    json!({
+      "path": "edit_target.txt",
+      "find": "original",
+      "replace": "updated"
+    }),
+  );
+
+  // Before edit is applied -> Unmodified
+  let status_before = reg.reconcile(&req).unwrap();
+  assert!(
+    status_before.is_unmodified(),
+    "original text remains intact"
+  );
+
+  // After edit is applied -> Committed
+  fs::write(&file_path, "updated text here").unwrap();
+  let status_after = reg.reconcile(&req).unwrap();
+  assert!(
+    status_after.is_committed(),
+    "updated text exists and original is gone"
+  );
+}
+
+#[test]
+fn reconciliation_path_marks_exec_as_requiring_manual_inspection() {
+  let dir = fixture();
+  let reg = registry(&dir);
+  let req = request("exec", json!({"command": "echo hello"}));
+
+  let status = reg.reconcile(&req).unwrap();
+  assert!(
+    matches!(
+      status,
+      ReconciliationStatus::RequiresManualInspection { .. }
+    ),
+    "exec has unbounded side effects"
+  );
+}
+
+#[test]
+fn reconciliation_path_marks_read_only_tools_as_unmodified() {
+  let dir = fixture();
+  let reg = registry(&dir);
+  let req = request("read", json!({"path": "does_not_matter.txt"}));
+
+  let status = reg.reconcile(&req).unwrap();
+  assert!(
+    status.is_unmodified(),
+    "read-only tools produce no side effects"
+  );
+  assert!(status.can_safe_replay(&reg.metadata_for("read").unwrap()));
 }

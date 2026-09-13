@@ -32,7 +32,7 @@ pub mod store_trace;
 pub mod turn;
 
 pub use failover::{FailoverPolicy, Recovery};
-pub use pi_rs_core::ExternalContextItem;
+pub use pi_rs_core::{ExternalContextItem, ReconciliationStatus};
 pub use store_trace::StoreTrace;
 pub use turn::{
   CheckpointStrategy, Checkpointer, CompactionStrategy, MAX_MODEL_REQUESTS_PER_TURN,
