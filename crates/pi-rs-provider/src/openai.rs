@@ -57,6 +57,23 @@ impl OpenAiCompat {
     Self::new(ProviderConfig::local(id, model, base_url, context_window))
   }
 
+  /// Remote cloud endpoint with an environment variable holding credentials.
+  pub fn remote(
+    id: impl Into<String>,
+    model: impl Into<String>,
+    base_url: Option<impl Into<String>>,
+    api_key_env: impl Into<String>,
+    context_window: u64,
+  ) -> Result<Self, BuildError> {
+    Self::new(ProviderConfig::remote(
+      id,
+      model,
+      base_url,
+      api_key_env,
+      context_window,
+    ))
+  }
+
   pub fn config(&self) -> &ProviderConfig {
     &self.config
   }

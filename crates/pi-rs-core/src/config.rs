@@ -25,6 +25,9 @@ use crate::{
 /// Configuration schema version.
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 
+/// Default base URL for remote OpenAI-compatible cloud endpoints.
+pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+
 /// One configured model endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelEndpoint {
@@ -58,6 +61,33 @@ impl ModelEndpoint {
       model: model.into(),
       base_url: Some(base_url.into()),
       api_key_env: None,
+      api_key: None,
+      capabilities: ModelCapabilities {
+        tools: true,
+        exposed_reasoning: ReasoningExposure::Native,
+        ..ModelCapabilities::text_only(context_window)
+      },
+      max_output_tokens: None,
+    }
+  }
+
+  /// Remote cloud endpoint with an environment variable holding credentials.
+  pub fn remote(
+    provider: impl Into<String>,
+    model: impl Into<String>,
+    base_url: Option<impl Into<String>>,
+    api_key_env: impl Into<String>,
+    context_window: u64,
+  ) -> Self {
+    Self {
+      provider: provider.into(),
+      model: model.into(),
+      base_url: Some(
+        base_url
+          .map(Into::into)
+          .unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.into()),
+      ),
+      api_key_env: Some(api_key_env.into()),
       api_key: None,
       capabilities: ModelCapabilities {
         tools: true,
