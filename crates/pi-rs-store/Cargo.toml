@@ -15,3 +15,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[[bench]]
+name = "restore"
+harness = false
