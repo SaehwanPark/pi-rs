@@ -282,8 +282,8 @@ Open in this area, in order:
       accept one; `pi-rs prompt` expands a template today, nothing sends it.
 - [x] Split one typed string into template arguments the way Pi's editor does, quotes
       included.
-- [ ] Add the remaining Pi prompt sources: package `prompts/`, `pi.prompts` entries, the
-      `prompts` array in settings, `--prompt-template`, and `--no-prompt-templates`.
+- [x] Add package-local prompts (`manifest.prompt_paths`, conventional `prompts/`),
+      `--prompt-template`, and `--no-prompt-templates`. (Settings array remains deferred).
 - [ ] Decide trust somewhere other than the file reader, then pass its answer in.
 - [ ] Add the compatibility fixture suite (`tests/compat/` holds skill and prompt fixtures
       today; packages, sessions, and extensions do not exist yet).

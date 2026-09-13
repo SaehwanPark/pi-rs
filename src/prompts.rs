@@ -22,10 +22,23 @@ use crate::cli::{PromptArgs, PromptsArgs};
 /// List the templates a session would offer, and report the ones that were skipped.
 pub fn list(args: PromptsArgs) -> Result<(), String> {
   let discovery = discovery(args.project)?;
-  let scan = prompt::discover(&discovery);
+  let options = prompt::PromptOptions {
+    extra_templates: args.template_paths,
+    no_prompt_templates: args.no_prompt_templates,
+  };
+  let scan = prompt::discover_with_options(&discovery, &options);
 
   for template in &scan.templates {
-    let mut line = format!("{}  {}", template.source.as_str(), template.name);
+    let pkg_info = match &template.package {
+      Some(pkg) => format!(" (package: {pkg})"),
+      None => String::new(),
+    };
+    let mut line = format!(
+      "{}  {}{}",
+      template.source.as_str(),
+      template.name,
+      pkg_info
+    );
     if let Some(hint) = &template.argument_hint {
       line.push_str(&format!("  {hint}"));
     }
@@ -47,7 +60,11 @@ pub fn list(args: PromptsArgs) -> Result<(), String> {
 /// Expand one template and print the prompt it becomes.
 pub fn expand(args: PromptArgs) -> Result<(), String> {
   let discovery = discovery(args.project)?;
-  let scan = prompt::discover(&discovery);
+  let options = prompt::PromptOptions {
+    extra_templates: args.template_paths,
+    no_prompt_templates: args.no_prompt_templates,
+  };
+  let scan = prompt::discover_with_options(&discovery, &options);
   report(&scan, &discovery);
   let template = scan.named(&args.name).ok_or_else(|| {
     format!(

@@ -160,6 +160,8 @@ pub const PROMPTS_HELP: &str = concat!(
   "may be:\n",
   "\n",
   "  --project                Read the project's own prompt locations\n",
+  "  --prompt-template <path> Explicit prompt template file or directory to load\n",
+  "  --no-prompt-templates    Do not discover prompt templates from standard locations\n",
   "  --help                   Show this help.\n",
   "\n",
   "See also: pi-rs prompt <name>, which expands one of these templates.",
@@ -180,6 +182,8 @@ pub const PROMPT_HELP: &str = concat!(
   "  ${@:N} and ${@:N:L}      a slice of the argument list, 1-indexed\n",
   "\n",
   "  --project                Read the project's own prompt locations\n",
+  "  --prompt-template <path> Explicit prompt template file or directory to load\n",
+  "  --no-prompt-templates    Do not discover prompt templates from standard locations\n",
   "  --help                   Show this help.\n",
 );
 
@@ -272,6 +276,10 @@ pub struct PromptsArgs {
   /// Whether the project's own locations may be read, for the same reason as skills:
   /// a template is text that ends up in front of the model.
   pub project: bool,
+  /// Explicit prompt template files or directories passed via `--prompt-template <path>`.
+  pub template_paths: Vec<PathBuf>,
+  /// Disable discovering prompt templates from standard locations.
+  pub no_prompt_templates: bool,
 }
 
 /// `pi-rs prompt <name> [args...]`: expand one template.
@@ -282,6 +290,10 @@ pub struct PromptArgs {
   /// a template's own arguments must not be mistaken for this command's flags.
   pub arguments: Vec<String>,
   pub project: bool,
+  /// Explicit prompt template files or directories passed via `--prompt-template <path>`.
+  pub template_paths: Vec<PathBuf>,
+  /// Disable discovering prompt templates from standard locations.
+  pub no_prompt_templates: bool,
 }
 
 /// `pi-rs skills`: what a model would be offered, and what was declined.
@@ -516,12 +528,26 @@ fn parse_skills(remaining: &[OsString]) -> Result<Command, String> {
 /// `pi-rs prompts`: list the templates.
 fn parse_prompts(remaining: &[OsString]) -> Result<Command, String> {
   let mut project = false;
-  for arg in remaining {
-    let flag = arg
+  let mut template_paths = Vec::new();
+  let mut no_prompt_templates = false;
+  let mut index = 0;
+  while index < remaining.len() {
+    let flag = remaining[index]
       .to_str()
       .ok_or_else(|| format!("prompts argument is not valid UTF-8\n{PROMPTS_HELP}"))?;
+    index += 1;
     match flag {
       "--project" => project = true,
+      "--no-prompt-templates" => no_prompt_templates = true,
+      "--prompt-template" => {
+        let path = remaining
+          .get(index)
+          .and_then(|value| value.to_str())
+          .filter(|value| !value.starts_with('-'))
+          .ok_or_else(|| format!("--prompt-template needs a path\n{PROMPTS_HELP}"))?;
+        index += 1;
+        template_paths.push(PathBuf::from(path));
+      }
       "--help" | "-h" => return Ok(Command::Help(PROMPTS_HELP)),
       other => {
         return Err(format!(
@@ -530,23 +556,45 @@ fn parse_prompts(remaining: &[OsString]) -> Result<Command, String> {
       }
     };
   }
-  Ok(Command::Prompts(PromptsArgs { project }))
+  Ok(Command::Prompts(PromptsArgs {
+    project,
+    template_paths,
+    no_prompt_templates,
+  }))
 }
 
 /// `pi-rs prompt <name> [args...]`: expand one template. Flags stop at the name, so
 /// `pi-rs prompt review --strict` hands `--strict` to the template.
 fn parse_prompt(remaining: &[OsString]) -> Result<Command, String> {
   let mut project = false;
+  let mut template_paths = Vec::new();
+  let mut no_prompt_templates = false;
   let mut name: Option<String> = None;
   let mut arguments: Vec<String> = Vec::new();
-  for arg in remaining {
-    let text = arg
+  let mut index = 0;
+  while index < remaining.len() {
+    let text = remaining[index]
       .to_str()
       .ok_or_else(|| format!("prompt argument is not valid UTF-8\n{PROMPT_HELP}"))?;
+    index += 1;
     if name.is_none() {
       match text {
         "--project" => {
           project = true;
+          continue;
+        }
+        "--no-prompt-templates" => {
+          no_prompt_templates = true;
+          continue;
+        }
+        "--prompt-template" => {
+          let path = remaining
+            .get(index)
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.starts_with('-'))
+            .ok_or_else(|| format!("--prompt-template needs a path\n{PROMPT_HELP}"))?;
+          index += 1;
+          template_paths.push(PathBuf::from(path));
           continue;
         }
         "--help" | "-h" => return Ok(Command::Help(PROMPT_HELP)),
@@ -569,6 +617,8 @@ fn parse_prompt(remaining: &[OsString]) -> Result<Command, String> {
     name,
     arguments,
     project,
+    template_paths,
+    no_prompt_templates,
   }))
 }
 
@@ -1515,11 +1565,33 @@ mod tests {
   fn prompts_reads_the_trust_flag_and_nothing_else() {
     assert_eq!(
       parse(strings(&["prompts"])).unwrap(),
-      Command::Prompts(PromptsArgs { project: false })
+      Command::Prompts(PromptsArgs {
+        project: false,
+        template_paths: Vec::new(),
+        no_prompt_templates: false,
+      })
     );
     assert_eq!(
       parse(strings(&["prompts", "--project"])).unwrap(),
-      Command::Prompts(PromptsArgs { project: true })
+      Command::Prompts(PromptsArgs {
+        project: true,
+        template_paths: Vec::new(),
+        no_prompt_templates: false,
+      })
+    );
+    assert_eq!(
+      parse(strings(&[
+        "prompts",
+        "--prompt-template",
+        "foo.md",
+        "--no-prompt-templates"
+      ]))
+      .unwrap(),
+      Command::Prompts(PromptsArgs {
+        project: false,
+        template_paths: vec![PathBuf::from("foo.md")],
+        no_prompt_templates: true,
+      })
     );
     assert!(
       matches!(
@@ -1538,6 +1610,8 @@ mod tests {
         name: "review".to_string(),
         arguments: vec![],
         project: false,
+        template_paths: Vec::new(),
+        no_prompt_templates: false,
       })
     );
     // Options stop at the name: after it, everything is template text, including a
@@ -1547,6 +1621,8 @@ mod tests {
       parse(strings(&[
         "prompt",
         "--project",
+        "--prompt-template",
+        "custom.md",
         "lint",
         "--strict",
         "src/"
@@ -1556,6 +1632,8 @@ mod tests {
         name: "lint".to_string(),
         arguments: vec!["--strict".to_string(), "src/".to_string()],
         project: true,
+        template_paths: vec![PathBuf::from("custom.md")],
+        no_prompt_templates: false,
       })
     );
   }

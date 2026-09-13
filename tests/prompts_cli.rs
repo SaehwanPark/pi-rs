@@ -149,3 +149,57 @@ fn nothing_found_says_so_on_stderr_and_leaves_stdout_empty() {
   assert_eq!(stdout, "");
   assert!(stderr.contains("no prompt templates found"), "{stderr}");
 }
+
+#[test]
+fn prompts_command_lists_package_prompts_with_package_attribution() {
+  let pkg_home = Path::new(env!("CARGO_MANIFEST_DIR"))
+    .join("tests/compat/packages/home")
+    .canonicalize()
+    .expect("pkg home");
+  let temp = tempfile::TempDir::new().expect("temp project");
+  let (stdout, stderr, ok) = run(&["prompts"], &pkg_home, temp.path());
+  assert!(ok, "{stderr}");
+  assert!(
+    stdout.contains("global  review (package: fixture-pkg-a)"),
+    "{stdout}"
+  );
+  assert!(stdout.contains("Review prompt in package A"), "{stdout}");
+}
+
+#[test]
+fn prompt_command_expands_package_template() {
+  let pkg_home = Path::new(env!("CARGO_MANIFEST_DIR"))
+    .join("tests/compat/packages/home")
+    .canonicalize()
+    .expect("pkg home");
+  let temp = tempfile::TempDir::new().expect("temp project");
+  let (stdout, stderr, ok) = run(&["prompt", "review"], &pkg_home, temp.path());
+  assert!(ok, "{stderr}");
+  assert!(stdout.contains("Review this code carefully."), "{stdout}");
+}
+
+#[test]
+fn prompt_command_supports_explicit_template_and_no_templates() {
+  let (_root, home, project) = fixture();
+  let custom = project.join("custom.md");
+  fs::write(&custom, "Custom $1 template\n").expect("write custom template");
+
+  let (stdout, stderr, ok) = run(
+    &[
+      "prompt",
+      "--prompt-template",
+      &custom.to_string_lossy(),
+      "custom",
+      "test",
+    ],
+    &home,
+    &project,
+  );
+  assert!(ok, "{stderr}");
+  assert_eq!(stdout, "Custom test template\n");
+
+  let (stdout, stderr, ok) = run(&["prompts", "--no-prompt-templates"], &home, &project);
+  assert!(ok, "{stderr}");
+  assert!(stderr.contains("no prompt templates found"), "{stderr}");
+  assert_eq!(stdout, "");
+}

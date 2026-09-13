@@ -60,6 +60,8 @@ pub struct Template {
   /// prompt, so a surface that writes the expansion decides for itself how the output
   /// ends.
   pub body: String,
+  /// Name of the package that declared or contained this template, if loaded from a package.
+  pub package: Option<String>,
 }
 
 /// A candidate that was not loaded, and why.
@@ -95,18 +97,58 @@ impl Scan {
   }
 }
 
+/// Options for prompt template discovery, including explicit template paths.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PromptOptions {
+  /// Explicit prompt template paths provided via `--prompt-template <path>`.
+  pub extra_templates: Vec<PathBuf>,
+  /// Disable discovering prompt templates from standard locations.
+  pub no_prompt_templates: bool,
+}
+
 /// Scan the documented locations.
 pub fn discover(discovery: &scan::Discovery) -> Scan {
+  discover_with_options(discovery, &PromptOptions::default())
+}
+
+/// Scan the documented locations plus explicit options.
+pub fn discover_with_options(discovery: &scan::Discovery, options: &PromptOptions) -> Scan {
   let mut scan = Scan::default();
   let mut names = Vec::<String>::new();
+
+  // 1. Explicit templates take highest priority
+  for path in &options.extra_templates {
+    load_explicit(path, Source::Global, &mut scan, &mut names);
+  }
+
+  // If standard discovery is disabled, return explicit ones (if any)
+  if options.no_prompt_templates {
+    scan
+      .templates
+      .sort_by(|a, b| a.source.cmp(&b.source).then(a.name.cmp(&b.name)));
+    return scan;
+  }
+
+  // 2. Global standalone prompts ($HOME/.pi/agent/prompts)
   if let Some(home) = &discovery.home {
     location(
       home.join(".pi/agent/prompts"),
       Source::Global,
       &mut scan,
       &mut names,
+      None,
     );
   }
+
+  // 3. Global package prompts
+  let package_scan = crate::package::discover(discovery);
+  for pkg in &package_scan.packages {
+    if pkg.source == Source::Global {
+      package_prompts(pkg, &mut scan, &mut names);
+    }
+  }
+
+  // 4. Project standalone prompts (trusted only)
   if discovery.trust == Trust::Trusted {
     for project in scan::project_dirs(&discovery.cwd) {
       location(
@@ -114,18 +156,104 @@ pub fn discover(discovery: &scan::Discovery) -> Scan {
         Source::Project,
         &mut scan,
         &mut names,
+        None,
       );
     }
+
+    // 5. Project package prompts (trusted only)
+    for pkg in &package_scan.packages {
+      if pkg.source == Source::Project {
+        package_prompts(pkg, &mut scan, &mut names);
+      }
+    }
   }
+
   scan
     .templates
     .sort_by(|a, b| a.source.cmp(&b.source).then(a.name.cmp(&b.name)));
   scan
 }
 
+fn package_prompts(pkg: &crate::package::Package, scan: &mut Scan, names: &mut Vec<String>) {
+  for loc in pkg.prompt_locations() {
+    let kind = loc.metadata().ok();
+    if scan::is_dir(&kind) {
+      location(loc, pkg.source, scan, names, Some(&pkg.name));
+    } else if scan::is_file(&kind) {
+      let name = loc
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+      add_file(&loc, pkg.source, &name, Some(&pkg.name), scan, names);
+    } else {
+      scan.warnings.push(Warning::Unreadable {
+        path: loc,
+        reason: "declared package prompt path does not exist".to_string(),
+      });
+    }
+  }
+}
+
+fn load_explicit(path: &Path, source: Source, scan: &mut Scan, names: &mut Vec<String>) {
+  let kind = path.metadata().ok();
+  if scan::is_dir(&kind) {
+    location(path.to_path_buf(), source, scan, names, None);
+  } else if scan::is_file(&kind) {
+    let name = path
+      .file_stem()
+      .map(|stem| stem.to_string_lossy().into_owned())
+      .unwrap_or_default();
+    add_file(path, source, &name, None, scan, names);
+  } else {
+    scan.warnings.push(Warning::Unreadable {
+      path: path.to_path_buf(),
+      reason: "file or directory does not exist".to_string(),
+    });
+  }
+}
+
+fn add_file(
+  path: &Path,
+  source: Source,
+  name: &str,
+  package: Option<&str>,
+  scan: &mut Scan,
+  names: &mut Vec<String>,
+) {
+  let template = match load(path, source, name, package) {
+    Ok(template) => template,
+    Err(warning) => {
+      scan.warnings.push(warning);
+      return;
+    }
+  };
+  if names.contains(&template.name) {
+    let kept = scan
+      .templates
+      .iter()
+      .find(|kept| kept.name == template.name)
+      .map(|kept| kept.path.clone())
+      .unwrap_or_default();
+    scan.warnings.push(Warning::Duplicate {
+      name: template.name,
+      kept,
+      ignored: path.to_path_buf(),
+    });
+    return;
+  }
+  names.push(template.name.clone());
+  scan.templates.push(template);
+}
+
 /// One location, read non-recursively. Subdirectories and non-Markdown files are not
 /// templates and Pi skips them without comment, so this does too.
-fn location(root: PathBuf, source: Source, scan: &mut Scan, names: &mut Vec<String>) {
+fn location(
+  root: PathBuf,
+  source: Source,
+  scan: &mut Scan,
+  names: &mut Vec<String>,
+  package: Option<&str>,
+) {
   let entries = match fs::read_dir(&root) {
     Ok(entries) => entries,
     Err(_) => return,
@@ -153,34 +281,17 @@ fn location(root: PathBuf, source: Source, scan: &mut Scan, names: &mut Vec<Stri
       .file_stem()
       .map(|stem| stem.to_string_lossy().into_owned())
       .unwrap_or_default();
-    let template = match load(&path, source, &name) {
-      Ok(template) => template,
-      Err(warning) => {
-        scan.warnings.push(warning);
-        continue;
-      }
-    };
-    if names.contains(&template.name) {
-      let kept = scan
-        .templates
-        .iter()
-        .find(|kept| kept.name == template.name)
-        .map(|kept| kept.path.clone())
-        .unwrap_or_default();
-      scan.warnings.push(Warning::Duplicate {
-        name: template.name,
-        kept,
-        ignored: path,
-      });
-      continue;
-    }
-    names.push(template.name.clone());
-    scan.templates.push(template);
+    add_file(&path, source, &name, package, scan, names);
   }
 }
 
 /// Read one file as a template.
-fn load(path: &Path, source: Source, name: &str) -> Result<Template, Warning> {
+fn load(
+  path: &Path,
+  source: Source,
+  name: &str,
+  package: Option<&str>,
+) -> Result<Template, Warning> {
   let text = fs::read_to_string(path).map_err(|error| Warning::Unreadable {
     path: path.to_path_buf(),
     reason: error.to_string(),
@@ -227,6 +338,7 @@ fn load(path: &Path, source: Source, name: &str) -> Result<Template, Warning> {
     path: path.to_path_buf(),
     source,
     body,
+    package: package.map(str::to_string),
   })
 }
 
@@ -571,5 +683,117 @@ mod tests {
     // space between them splits — the quotes group, they do not glue anything.
     assert_eq!(parse_arguments(r#""he""llo""#), ["hello"]);
     assert_eq!(parse_arguments(r#""he" "llo""#), ["he", "llo"]);
+  }
+
+  #[test]
+  fn package_prompts_are_discovered_from_global_packages() {
+    let fixture = Fixture::new();
+    let pkg_dir = fixture.home.join(".pi/packages/pack-a");
+    fs::create_dir_all(pkg_dir.join("prompts")).expect("create pkg prompts dir");
+    fs::write(
+      pkg_dir.join("package.json"),
+      r#"{"name": "pack-a", "pi": {"prompts": ["prompts/review.md"]}}"#,
+    )
+    .expect("write package.json");
+    fs::write(
+      pkg_dir.join("prompts/review.md"),
+      "---\ndescription: Pack A review\n---\nReview package code.\n",
+    )
+    .expect("write review.md");
+
+    let scan = discover(&Discovery {
+      home: Some(fixture.home),
+      cwd: fixture.project,
+      trust: Trust::Untrusted,
+    });
+    let template = scan.named("review").expect("pkg prompt found");
+    assert_eq!(template.source, Source::Global);
+    assert_eq!(template.package.as_deref(), Some("pack-a"));
+    assert_eq!(template.description, "Pack A review");
+  }
+
+  #[test]
+  fn project_package_prompts_respect_trust_boundary() {
+    let fixture = Fixture::new();
+    let pkg_dir = fixture.project.join(".pi/packages/proj-pack");
+    fs::create_dir_all(pkg_dir.join("prompts")).expect("create proj pkg dir");
+    fs::write(
+      pkg_dir.join("package.json"),
+      r#"{"name": "proj-pack", "version": "1.0.0"}"#,
+    )
+    .expect("write package.json");
+    fs::write(
+      pkg_dir.join("prompts/check.md"),
+      "---\ndescription: Project conventional prompt\n---\nRun check.\n",
+    )
+    .expect("write check.md");
+
+    let untrusted = discover(&Discovery {
+      home: None,
+      cwd: fixture.project.clone(),
+      trust: Trust::Untrusted,
+    });
+    assert!(
+      untrusted.named("check").is_none(),
+      "untrusted project package prompts must not be read"
+    );
+
+    let trusted = discover(&Discovery {
+      home: None,
+      cwd: fixture.project,
+      trust: Trust::Trusted,
+    });
+    let template = trusted
+      .named("check")
+      .expect("trusted package prompt found");
+    assert_eq!(template.source, Source::Project);
+    assert_eq!(template.package.as_deref(), Some("proj-pack"));
+  }
+
+  #[test]
+  fn explicit_prompt_template_option_takes_precedence() {
+    let fixture = Fixture::new();
+    let extra_file = fixture.project.join("custom-template.md");
+    fs::write(&extra_file, "Custom prompt body with $1\n").expect("write custom template");
+
+    let options = PromptOptions {
+      extra_templates: vec![extra_file],
+      no_prompt_templates: false,
+    };
+    let scan = discover_with_options(
+      &Discovery {
+        home: Some(fixture.home),
+        cwd: fixture.project,
+        trust: Trust::Untrusted,
+      },
+      &options,
+    );
+    let template = scan
+      .named("custom-template")
+      .expect("explicit template found");
+    assert_eq!(template.source, Source::Global);
+    assert_eq!(template.package, None);
+  }
+
+  #[test]
+  fn no_prompt_templates_disables_standard_discovery() {
+    let fixture = Fixture::new();
+    fixture.write(true, "standard.md", "Standard prompt\n");
+    let options = PromptOptions {
+      extra_templates: Vec::new(),
+      no_prompt_templates: true,
+    };
+    let scan = discover_with_options(
+      &Discovery {
+        home: Some(fixture.home),
+        cwd: fixture.project,
+        trust: Trust::Untrusted,
+      },
+      &options,
+    );
+    assert!(
+      scan.templates.is_empty(),
+      "no standard templates when disabled"
+    );
   }
 }
