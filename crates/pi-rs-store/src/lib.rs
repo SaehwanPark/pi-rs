@@ -60,7 +60,7 @@ pub use journal::{TraceJournal, requires_durable_write};
 pub use jsonl::{LineWriter, ReadReport, read_first_line, read_jsonl, read_jsonl_tail};
 pub use layout::StateLayout;
 pub use retention::{DEFAULT_KEEP_NEWEST, RetentionReport, session_started_ms};
-pub use session_log::{RestoredSession, SessionLog};
+pub use session_log::{RestoredSession, SessionLog, restore};
 pub use store::{DEFAULT_INLINE_THRESHOLD_BYTES, Payload, Session, Store, WritePolicy};
 pub use tmp::TempDir;
 
