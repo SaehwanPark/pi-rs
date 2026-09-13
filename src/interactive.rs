@@ -79,7 +79,16 @@ use crate::{
 const PROMPT_PREFIX: &str = "> ";
 
 /// The slash commands this loop answers itself, and what Tab completes to.
-const COMMANDS: [&str; 6] = ["help", "quit", "exit", "compact", "checkpoints", "mcp"];
+const COMMANDS: [&str; 8] = [
+  "help",
+  "quit",
+  "exit",
+  "compact",
+  "checkpoints",
+  "failover",
+  "switch-back",
+  "mcp",
+];
 
 /// Action requested via the `/mcp` command.
 #[derive(Debug, PartialEq, Eq)]
@@ -108,6 +117,10 @@ enum Submitted {
   Compact(Option<String>),
   /// List episode checkpoint capsules for this session.
   Checkpoints,
+  /// Manually switch generation to the configured backup model.
+  Failover,
+  /// Manually switch generation back to the primary model.
+  SwitchBack,
   /// Inspect or control configured MCP servers.
   Mcp(McpAction),
   /// A loaded prompt template, with the argument string exactly as typed after the
@@ -130,6 +143,8 @@ fn route(text: &str, templates: &prompt::Scan) -> Submitted {
       "help" => Submitted::Help,
       "quit" | "exit" => Submitted::Quit,
       "checkpoints" | "checkpoint" => Submitted::Checkpoints,
+      "failover" => Submitted::Failover,
+      "switch-back" | "switchback" => Submitted::SwitchBack,
       "compact" => {
         let trimmed = rest.trim();
         let summary = if trimmed.is_empty() {
@@ -522,6 +537,8 @@ impl Loop {
           "/help       this list".to_string(),
           "/compact    summarize earlier context and open a durable compaction epoch".to_string(),
           "/checkpoints list episode checkpoint capsules for the session".to_string(),
+          "/failover   switch generation to the backup model".to_string(),
+          "/switch-back switch generation back to the primary model".to_string(),
           "/mcp        list or control MCP servers (/mcp enable <name>, /mcp disable <name>)"
             .to_string(),
           "/quit, /exit  end the session (ctrl-c on an empty draft does the same)".to_string(),
@@ -580,6 +597,34 @@ impl Loop {
           }
         }
         Ok(Submitted::Checkpoints)
+      }
+      Submitted::Failover => {
+        match session.failover_manual() {
+          Ok(epoch) => {
+            self.write_note(&[format!(
+              "switched to backup model {} (epoch {})",
+              epoch.model, epoch.index
+            )])?;
+          }
+          Err(err) => {
+            self.write_note(&[format!("failover refused: {err}")])?;
+          }
+        }
+        Ok(Submitted::Failover)
+      }
+      Submitted::SwitchBack => {
+        match session.switch_back_manual() {
+          Ok(epoch) => {
+            self.write_note(&[format!(
+              "switched back to primary model {} (epoch {})",
+              epoch.model, epoch.index
+            )])?;
+          }
+          Err(err) => {
+            self.write_note(&[format!("switch-back refused: {err}")])?;
+          }
+        }
+        Ok(Submitted::SwitchBack)
       }
       Submitted::Mcp(action) => {
         match &action {
@@ -1125,6 +1170,12 @@ mod tests {
       route("/mcp unknown", &none),
       Submitted::Mcp(McpAction::Help)
     ));
+    assert!(matches!(route("/failover", &none), Submitted::Failover));
+    assert!(matches!(
+      route("/switch-back", &none),
+      Submitted::SwitchBack
+    ));
+    assert!(matches!(route("/switchback", &none), Submitted::SwitchBack));
     match route("/nope", &none) {
       Submitted::Unknown(name) => assert_eq!(name, "nope"),
       _ => panic!("a command shape with no command is an unknown, not a prompt"),
@@ -1149,6 +1200,26 @@ mod tests {
     }
     assert_eq!(surface.editor.apply(Intent::Complete), Outcome::Changed);
     assert_eq!(surface.editor.text(), "/checkpoints ");
+  }
+
+  #[test]
+  fn failover_command_is_completed_by_tab() {
+    let mut surface = Loop::new("local/vulcan".to_string(), 80);
+    for ch in "/fail".chars() {
+      surface.editor.apply(Intent::Insert(ch));
+    }
+    assert_eq!(surface.editor.apply(Intent::Complete), Outcome::Changed);
+    assert_eq!(surface.editor.text(), "/failover ");
+  }
+
+  #[test]
+  fn switch_back_command_is_completed_by_tab() {
+    let mut surface = Loop::new("local/vulcan".to_string(), 80);
+    for ch in "/switch".chars() {
+      surface.editor.apply(Intent::Insert(ch));
+    }
+    assert_eq!(surface.editor.apply(Intent::Complete), Outcome::Changed);
+    assert_eq!(surface.editor.text(), "/switch-back ");
   }
 
   #[test]

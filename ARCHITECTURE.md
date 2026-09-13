@@ -422,6 +422,11 @@ backup's window was smaller.
 
 After failover, the backup remains active until the user explicitly changes model.
 
+Interactive session control:
+- `/failover` triggers manual switch to backup model with `EpochReason::ManualSwitch`.
+- `/switch-back` triggers manual return to primary model with `EpochReason::ManualSwitchBack`.
+- Retries on qualifying availability failures apply exponential backoff (or server `retry-after`) and remain interruptible via `CancelToken`.
+
 Do not auto-ping-pong.
 
 ## 13. Model epochs

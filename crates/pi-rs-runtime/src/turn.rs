@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pi_rs_core::{
   AgentEvent, AssistantDelta, AttributedMessage, BlobRef, CAPSULE_SCHEMA_VERSION, CancelToken,
@@ -28,13 +28,13 @@ use pi_rs_core::{
   ContextAction, ContextCapsule, ContextCompactionCompleted, ContextCompactionEpoch,
   ContextCompactionStarted, ContextLevel, ContextPolicy, ContextReduced, ContextState, Diagnostic,
   DiagnosticLevel, EpochReason, EventEnvelope, EventMeta, EventSink, ExternalContextItem,
-  ExternalContextRetrieved, FailurePhase, Message, ModelCapabilities, ModelEpochStarted,
-  ModelFailover, ModelFailure, ModelFailureKind, ModelProvider, ModelRef, ModelRequest,
-  ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta, ReasoningProvenance,
-  ReductionReason, Role, SessionEndReason, SessionEnded, SessionId, SessionStarted, SinkError,
-  ThinkingLevel, ToolCallBlock, ToolCompleted, ToolExecutionState, ToolFailed, ToolProgress,
-  ToolRequested, ToolResultBlock, ToolStarted, ToolUnknown, TraceId, TurnCompleted, TurnId,
-  TurnStatus, UserMessage,
+  ExternalContextRetrieved, FailurePhase, Message, ModelCapabilities, ModelEpoch,
+  ModelEpochStarted, ModelFailover, ModelFailure, ModelFailureKind, ModelProvider, ModelRef,
+  ModelRequest, ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta,
+  ReasoningProvenance, ReductionReason, Role, SessionEndReason, SessionEnded, SessionId,
+  SessionStarted, SinkError, ThinkingLevel, ToolCallBlock, ToolCompleted, ToolExecutionState,
+  ToolFailed, ToolProgress, ToolRequested, ToolResultBlock, ToolStarted, ToolUnknown, TraceId,
+  TurnCompleted, TurnId, TurnStatus, UserMessage,
 };
 use pi_rs_tools::{Executed, ToolRegistry};
 
@@ -497,9 +497,105 @@ impl<'a> TurnLoop<'a> {
     self.trace.list_checkpoints().map_err(Into::into)
   }
 
-  /// `true` once a failover has occurred.
+  /// `true` if the session is currently generating with the backup model.
   pub fn failed_over(&self) -> bool {
-    self.epochs.len() > 1
+    let active = self.active_model();
+    self.backup.is_some_and(|b| b.model() == &active)
+  }
+
+  /// The backup model reference, if configured.
+  pub fn backup_model(&self) -> Option<ModelRef> {
+    self.backup.map(|b| b.model().clone())
+  }
+
+  /// The primary model reference.
+  pub fn primary_model(&self) -> ModelRef {
+    self.primary.model().clone()
+  }
+
+  /// Manually switch active generation to the configured backup model.
+  pub fn failover_manual(&mut self) -> Result<ModelEpoch, TurnError> {
+    let Some(backup) = self.backup else {
+      return Err(TurnError::Sink("no backup model configured".to_string()));
+    };
+    if self.active_model() == *backup.model() {
+      return Err(TurnError::Sink(format!(
+        "backup model {} is already active",
+        backup.model()
+      )));
+    }
+    let required = self.primary.capabilities();
+    let backup_caps = backup.capabilities();
+    let gaps = backup_caps.gaps(&required);
+    if ModelCapabilities::has_hard_gap(&gaps) {
+      let gap_str = gaps
+        .iter()
+        .map(|g| g.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+      return Err(TurnError::Sink(format!(
+        "failover to {} refused: hard capability shortfall ({gap_str})",
+        backup.model()
+      )));
+    }
+    let epoch = Epoch {
+      index: self.epoch_index() + 1,
+      model: backup.model().clone(),
+      capabilities: backup_caps.clone(),
+      reason: EpochReason::ManualSwitch,
+    };
+    let model_epoch = ModelEpoch {
+      index: epoch.index,
+      model: epoch.model.clone(),
+      capabilities: epoch.capabilities.clone(),
+      reason: epoch.reason.clone(),
+      started_by_event: None,
+    };
+    self.emit(
+      None,
+      AgentEvent::ModelEpochStarted(ModelEpochStarted {
+        epoch: epoch.index,
+        model: epoch.model.clone(),
+        reason: epoch.reason.clone(),
+        capabilities: epoch.capabilities.clone(),
+      }),
+    )?;
+    self.epochs.push(epoch);
+    Ok(model_epoch)
+  }
+
+  /// Manually switch active generation back to the primary model.
+  pub fn switch_back_manual(&mut self) -> Result<ModelEpoch, TurnError> {
+    if self.active_model() == *self.primary.model() {
+      return Err(TurnError::Sink(format!(
+        "primary model {} is already active",
+        self.primary.model()
+      )));
+    }
+    let epoch = Epoch {
+      index: self.epoch_index() + 1,
+      model: self.primary.model().clone(),
+      capabilities: self.primary.capabilities(),
+      reason: EpochReason::ManualSwitchBack,
+    };
+    let model_epoch = ModelEpoch {
+      index: epoch.index,
+      model: epoch.model.clone(),
+      capabilities: epoch.capabilities.clone(),
+      reason: epoch.reason.clone(),
+      started_by_event: None,
+    };
+    self.emit(
+      None,
+      AgentEvent::ModelEpochStarted(ModelEpochStarted {
+        epoch: epoch.index,
+        model: epoch.model.clone(),
+        reason: epoch.reason.clone(),
+        capabilities: epoch.capabilities.clone(),
+      }),
+    )?;
+    self.epochs.push(epoch);
+    Ok(model_epoch)
   }
 
   /// Model-visible history so far.
@@ -980,23 +1076,52 @@ impl<'a> TurnLoop<'a> {
         .recover(turn_id.clone(), &failure, cancel)
         .map_err(TurnFailure::from)?
       {
-        Action::Retry | Action::Takeover => continue,
+        Action::Retry => {
+          let delay_ms = failure.retry_after_ms.unwrap_or_else(|| {
+            let exp = 100u64.saturating_mul(1u64 << (attempts_on_model.saturating_sub(1).min(5)));
+            exp.min(2_000)
+          });
+          if !Self::sleep_with_cancel(Duration::from_millis(delay_ms), cancel) {
+            return Err(TurnFailure::Cancelled);
+          }
+          continue;
+        }
+        Action::Takeover => continue,
         Action::Stop => return Err(TurnFailure::Fatal(failure)),
       }
     }
   }
 
+  /// Sleep for the given duration while respecting cancellation.
+  fn sleep_with_cancel(duration: Duration, cancel: &CancelToken) -> bool {
+    if cancel.is_cancelled() {
+      return false;
+    }
+    let start = Instant::now();
+    while start.elapsed() < duration {
+      if cancel.is_cancelled() {
+        return false;
+      }
+      let remaining = duration.saturating_sub(start.elapsed());
+      let step = remaining.min(Duration::from_millis(20));
+      std::thread::sleep(step);
+    }
+    !cancel.is_cancelled()
+  }
+
   /// The provider for the active epoch.
   ///
-  /// After a takeover only the backup may serve requests: the architecture says
-  /// stay on the backup until the user says otherwise, so the primary is never
-  /// silently re-activated mid-session.
+  /// Matches the provider with the active model reference. Once switched,
+  /// the active model remains until explicitly changed by the user or
+  /// automatically transitioned by recovery.
   fn provider(&self) -> &'a dyn ModelProvider {
-    if self.epochs.len() > 1 {
-      self.backup.unwrap_or(self.primary)
-    } else {
-      self.primary
+    let active = self.active_model();
+    if let Some(backup) = self.backup {
+      if backup.model() == &active {
+        return backup;
+      }
     }
+    self.primary
   }
 
   /// Apply the failover policy's decision to a failure.
@@ -4234,5 +4359,110 @@ mod tests {
         .any(|m| m.text().contains("objective: custom objective from hook")),
       "model request carries the custom checkpointer output"
     );
+  }
+
+  #[test]
+  fn manual_failover_transitions_epoch_and_activates_backup() {
+    let primary = Scripted::new("primary", vec![text("primary ok")]);
+    let backup = Scripted::new("backup", vec![text("backup ok")]);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, 32_768);
+    let mut trace = Recorder::default();
+
+    let mut turn_loop = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_backup(&backup);
+
+    assert_eq!(turn_loop.active_model(), *primary.model());
+    assert!(!turn_loop.failed_over());
+
+    let epoch = turn_loop
+      .failover_manual()
+      .expect("manual failover succeeds");
+    assert_eq!(epoch.index, 1);
+    assert_eq!(epoch.model, *backup.model());
+    assert_eq!(epoch.reason, EpochReason::ManualSwitch);
+    assert_eq!(turn_loop.active_model(), *backup.model());
+    assert!(turn_loop.failed_over());
+
+    // Next turn is executed against backup provider
+    turn_loop
+      .run_turn("hello backup", &CancelToken::new(), &mut SilentProgress)
+      .expect("turn succeeds");
+    assert_eq!(backup.requests().len(), 1);
+    assert_eq!(primary.requests().len(), 0);
+
+    // Switch back to primary
+    let epoch2 = turn_loop
+      .switch_back_manual()
+      .expect("switch back succeeds");
+    assert_eq!(epoch2.index, 2);
+    assert_eq!(epoch2.model, *primary.model());
+    assert_eq!(epoch2.reason, EpochReason::ManualSwitchBack);
+    assert_eq!(turn_loop.active_model(), *primary.model());
+    assert!(!turn_loop.failed_over());
+
+    // Next turn is executed against primary provider
+    turn_loop
+      .run_turn("hello primary", &CancelToken::new(), &mut SilentProgress)
+      .expect("turn succeeds");
+    assert_eq!(primary.requests().len(), 1);
+    assert_eq!(backup.requests().len(), 1);
+  }
+
+  #[test]
+  fn manual_failover_refused_without_backup() {
+    let primary = Scripted::new("primary", vec![text("primary ok")]);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, 32_768);
+    let mut trace = Recorder::default();
+
+    let mut turn_loop = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    );
+
+    let err = turn_loop.failover_manual().unwrap_err();
+    assert!(format!("{err:?}").contains("no backup model configured"));
+  }
+
+  #[test]
+  fn retry_backoff_respects_cancellation() {
+    let failure = ModelFailure::new(
+      ModelFailureKind::Transport,
+      FailurePhase::Streaming,
+      "connection dropped",
+    );
+    let provider = Scripted::new("retry_cancel", vec![text("ok")]).fails(0, failure);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, 32_768);
+    let mut trace = Recorder::default();
+
+    let cancel = CancelToken::new();
+    cancel.cancel();
+
+    let mut turn_loop = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    );
+
+    let res = turn_loop.run_turn("test", &cancel, &mut SilentProgress);
+    assert!(res.is_ok());
+    let report = res.unwrap();
+    assert!(matches!(report.status, TurnStatus::Cancelled));
   }
 }

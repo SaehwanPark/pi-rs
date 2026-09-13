@@ -400,16 +400,16 @@ Open in this area, in order:
 ### Retry
 
 - [x] Add bounded retry policy.
-- [ ] Add backoff.
+- [x] Add backoff (exponential backoff with server retry-after honoring).
 - [x] Emit retry events.
-- [ ] Support cancellation during retry.
+- [x] Support cancellation during retry (cancellation checked during backoff sleep).
 
 ### Backup model
 
 - [x] Add primary/backup configuration.
 - [x] Validate backup config without eagerly initializing it.
-- [ ] Add manual `/failover`.
-- [x] Add model epoch transition.
+- [x] Add manual `/failover` (`SessionHandle::failover_manual`, interactive `/failover` command).
+- [x] Add model epoch transition (`EpochReason::ManualSwitch`).
 
 ### Capability gate
 
@@ -435,8 +435,8 @@ Open in this area, in order:
 
 ### Recovery policy
 
-- [ ] Keep backup active after failover.
-- [ ] Add explicit switch-back command.
+- [x] Keep backup active after failover (active model persists across subsequent turns).
+- [x] Add explicit switch-back command (`SessionHandle::switch_back_manual`, interactive `/switch-back`).
 - [x] Avoid automatic ping-pong.
 
 ### Stage gate
