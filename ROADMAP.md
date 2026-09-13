@@ -296,7 +296,13 @@ Open in this area, in order:
 - [x] Report unsupported package surfaces (per-surface `Warning` variants with counts;
       does not reject the whole package when only one optional feature is unrecognised;
       `extensions` is the documented Phase-8 surface, recorded with entry count).
-- [ ] Implement package discovery.
+- [x] Implement package discovery (`crates/pi-rs-compat/src/package.rs`: `discover(&Discovery)`
+      scans `$HOME/.pi/agent/packages`, `$HOME/.pi/packages`, and `<ancestor>/.pi/packages`
+      when trusted; deterministic lexicographical sort; first-found-wins duplicate resolution;
+      subdirectories missing `package.json` flagged with `Warning::MissingManifest`;
+      exposes contained `skill_locations` and `prompt_locations` via manifest or convention;
+      `pi-rs packages [--project] [--show <name>]` CLI command; `tests/compat_packages.rs`:
+      9 passing fixture-driven tests; `tests/packages_cli.rs`: 6 passing CLI tests).
 - [ ] Implement package install path.
 - [ ] Add `pi-rs compat` prototype.
 
@@ -311,19 +317,19 @@ Open in this area, in order:
 
 ### Stage gate
 
-> Skills and prompts gates are passed; packages and extensions are deferred to post-MVP.
+> Skills, prompts, and package discovery gates are passed; package install and extensions are deferred.
 > `tests/compat_skills.rs` drives fixture skills (discovery, body loading, `disable-model-invocation`,
 > `SKILL.md` frontmatter, project trust gate) — all 6 tests pass.
 > `tests/compat_prompts.rs` drives fixture templates (Pi substitution grammar, argument splitting,
 > description fallback, duplicate/malformed warnings) — all 7 tests pass.
-> `tests/compat_packages.rs` drives fixture manifests (minimal, full, extensions, malformed, missing)
-> — all 5 fixture tests pass; 21 unit tests in `package.rs` pass.
-> Package discovery and TypeScript extension compatibility remain open (Phases 7/8).
+> `tests/compat_packages.rs` drives fixture manifests and discovery (minimal, full, extensions, malformed, missing, home/project discovery)
+> — all 9 fixture tests pass; 27 unit tests in `package.rs` pass; `tests/packages_cli.rs`: 6 CLI tests pass.
+> TypeScript extension compatibility remains open (Phase 8).
 
 - [x] Representative Pi skills run unchanged (`tests/compat_skills.rs`: 6 passing fixture tests cover discovery, frontmatter, body loading, and project-trust gate).
 - [x] Prompt templates are reusable (`tests/compat_prompts.rs`: 7 passing fixture tests cover Pi substitution grammar, argument splitting, and description fallback).
-- [x] Package compatibility diagnostics are useful and explicit (`tests/compat_packages.rs`: 5 fixture-driven integration tests; `package.rs`: per-surface `Warning` variants; no whole-package rejection for a single unsupported surface).
-- [x] Compatibility tests run in CI (`cargo test` includes `compat_skills`, `compat_prompts`, and `compat_packages` integration tests).
+- [x] Package compatibility diagnostics are useful and explicit (`tests/compat_packages.rs`: 9 fixture-driven integration tests; `package.rs`: per-surface `Warning` variants; no whole-package rejection for a single unsupported surface).
+- [x] Compatibility tests run in CI (`cargo test` includes `compat_skills`, `compat_prompts`, `compat_packages`, and `packages_cli` integration tests).
 
 ---
 

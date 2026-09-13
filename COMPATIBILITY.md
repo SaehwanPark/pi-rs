@@ -163,6 +163,24 @@ Package compatibility
 ✗ internal Pi module import
 ```
 
+### 7.1 Implemented
+
+`pi-rs packages [--project]` scans, in order: `$HOME/.pi/agent/packages`,
+`$HOME/.pi/packages`, then `<ancestor>/.pi/packages` from the working directory up
+to the git root. Discovery is non-recursive at each package root: every child
+directory holding a `package.json` is a package candidate. A package declares its
+identity (`name`, `version`, `description`) and contained surfaces (`pi.skills`,
+`pi.prompts`, `extensions`).
+
+When a package declares no explicit skill or prompt paths, standard conventions apply:
+`<package>/skills/` or `<package>/SKILL.md` is exposed for skills, and `<package>/prompts/`
+for prompt templates. Project package locations are read only when the project is trusted
+(`--project`), preserving the trust boundary. Duplicate package names resolve to the
+first package found. Unsupported surfaces (such as `extensions` requiring the Node host)
+produce per-surface diagnostics without rejecting the package.
+
+`pi-rs packages --show <name>` displays detailed surface status and contained locations.
+
 ## 8. TypeScript extensions
 
 Existing Pi TypeScript extensions should run through a compatibility host when practical.
