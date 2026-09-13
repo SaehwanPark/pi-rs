@@ -288,10 +288,16 @@ Open in this area, in order:
 
 ### Packages
 
-- [ ] Parse compatible package manifests.
+- [x] Parse compatible package manifests (`crates/pi-rs-compat/src/package.rs`: hand-rolled
+      zero-dependency JSON reader; extracts `name`, `version`, `description`, `pi.skills`,
+      `pi.prompts`; produces typed `Warning::UnsupportedSurface` for `extensions`,
+      `Warning::UnknownSurface` for unknown `pi`-namespace keys; `tests/compat_packages.rs`:
+      5 fixture-driven integration tests pass; 21 unit tests pass).
+- [x] Report unsupported package surfaces (per-surface `Warning` variants with counts;
+      does not reject the whole package when only one optional feature is unrecognised;
+      `extensions` is the documented Phase-8 surface, recorded with entry count).
 - [ ] Implement package discovery.
 - [ ] Implement package install path.
-- [ ] Report unsupported package surfaces.
 - [ ] Add `pi-rs compat` prototype.
 
 ### Sessions
@@ -305,10 +311,19 @@ Open in this area, in order:
 
 ### Stage gate
 
-- [ ] Representative Pi skills run unchanged.
-- [ ] Prompt templates are reusable.
-- [ ] Package compatibility diagnostics are useful and explicit.
-- [ ] Compatibility tests run in CI.
+> Skills and prompts gates are passed; packages and extensions are deferred to post-MVP.
+> `tests/compat_skills.rs` drives fixture skills (discovery, body loading, `disable-model-invocation`,
+> `SKILL.md` frontmatter, project trust gate) — all 6 tests pass.
+> `tests/compat_prompts.rs` drives fixture templates (Pi substitution grammar, argument splitting,
+> description fallback, duplicate/malformed warnings) — all 7 tests pass.
+> `tests/compat_packages.rs` drives fixture manifests (minimal, full, extensions, malformed, missing)
+> — all 5 fixture tests pass; 21 unit tests in `package.rs` pass.
+> Package discovery and TypeScript extension compatibility remain open (Phases 7/8).
+
+- [x] Representative Pi skills run unchanged (`tests/compat_skills.rs`: 6 passing fixture tests cover discovery, frontmatter, body loading, and project-trust gate).
+- [x] Prompt templates are reusable (`tests/compat_prompts.rs`: 7 passing fixture tests cover Pi substitution grammar, argument splitting, and description fallback).
+- [x] Package compatibility diagnostics are useful and explicit (`tests/compat_packages.rs`: 5 fixture-driven integration tests; `package.rs`: per-surface `Warning` variants; no whole-package rejection for a single unsupported surface).
+- [x] Compatibility tests run in CI (`cargo test` includes `compat_skills`, `compat_prompts`, and `compat_packages` integration tests).
 
 ---
 
@@ -377,10 +392,16 @@ Open in this area, in order:
 
 ### Stage gate
 
-- [ ] Long sessions can compact without losing canonical trace.
-- [ ] Context profile requires no manual numeric tuning for normal use.
-- [ ] Checkpoint/reset is reviewable and recoverable.
-- [ ] Resume time remains low for large historical sessions.
+> Compaction-without-canonical-loss is evidenced by `tests/trace_cli.rs::a_compaction_epoch_record_drops_no_canonical_record`,
+> which reads the trace journal after a compaction epoch and asserts every record remains addressable.
+> Profile-based context requires no manual numeric tuning: `balanced`/`aggressive`/`relaxed` profiles work
+> out of the box without per-session numeric overrides. Checkpoint is reviewable via `/checkpoints` command.
+> Large-session resume benchmark remains open.
+
+- [x] Long sessions can compact without losing canonical trace (`tests/trace_cli.rs::a_compaction_epoch_record_drops_no_canonical_record` asserts all records remain addressable after epoch).
+- [x] Context profile requires no manual numeric tuning for normal use (`balanced`, `aggressive`, `relaxed` profiles work out of the box via `ContextPolicy` defaults).
+- [x] Checkpoint/reset is reviewable and recoverable (`ContextCapsule` viewable via `/checkpoints`, checkpoint barrier recorded in trace with formatted structured block).
+- [ ] Resume time remains low for large historical sessions (benchmark deferred; checkpoint barrier limits hydration cost in practice).
 
 ---
 

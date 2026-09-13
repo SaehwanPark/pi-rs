@@ -1,0 +1,9 @@
+{
+  "name": "ext-pkg",
+  "version": "1.0.0",
+  "description": "A package with TypeScript extensions (not yet supported).",
+  "pi": {
+    "skills": ["skills/"]
+  },
+  "extensions": ["dist/main.js", "dist/tools.js"]
+}

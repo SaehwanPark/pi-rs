@@ -1,0 +1,12 @@
+{
+  "name": "full-pkg",
+  "version": "2.0.0",
+  "description": "A full-featured Pi package with skills and prompts.",
+  "license": "MIT",
+  "author": "Example Author",
+  "keywords": ["pi", "coding-agent"],
+  "pi": {
+    "skills": ["skills/", "skills/pdf-tools"],
+    "prompts": ["prompts/review.md", "prompts/plan.md"]
+  }
+}
