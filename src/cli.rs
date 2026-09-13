@@ -21,6 +21,9 @@ pub const TOP_HELP: &str = concat!(
   "               be carried\n",
   "  export       Write a session back out as a Pi session file\n",
   "\n",
+  "Options:\n",
+  "  -h, --help   Show this help\n",
+  "\n",
   "Run `pi-rs <command> --help` for that command's flags.\n",
 );
 pub const RUN_HELP: &str = concat!(
@@ -58,6 +61,7 @@ pub const RUN_HELP: &str = concat!(
   "                           unrecorded one is not\n",
   "  --silent                 Print no transcript at all (the answer on stdout is\n",
   "                           still written, and the session is still recorded)\n",
+  "  -h, --help               Show this help\n",
   // The two commands read the same flag differently on purpose: for `run` the
   // transcript is commentary on an answer, for `trace` it is the answer.
   "\n",
@@ -91,6 +95,9 @@ pub const INTERACTIVE_HELP: &str = concat!(
   "  --config <file>          Provider configuration\n",
   "  --cwd <workspace>        Workspace root\n",
   "\n",
+  "Options:\n",
+  "  -h, --help               Show this help\n",
+  "\n",
   "A turn interrupted with ctrl-c stops without failing the session, which stays\n",
   "open for the next prompt. For one turn from a script, use `pi-rs run`.",
 );
@@ -118,9 +125,10 @@ pub const TRACE_HELP: &str = concat!(
   "  --no-color               Same as --color never.\n",
   "  --width <columns>        Column budget; 0 never wraps (default: probe stdout).\n",
   "  --no-reasoning           Omit reasoning text, show each block's extent.\n",
+  "  --verbose                Print routine transcript chrome too.\n",
   "  --quiet                  Only warnings, errors, and tool trouble.\n",
   "  --silent                 No transcript (the footer still reports what was read).\n",
-  "  --help                   Show this help.\n",
+  "  -h, --help               Show this help.\n",
 );
 
 pub const SKILLS_HELP: &str = concat!(
@@ -143,7 +151,7 @@ pub const SKILLS_HELP: &str = concat!(
   "  --show <name>            Print one skill's body. This is the explicit invocation\n",
   "                           an explicit-only skill reserves for the user.\n",
   "  --skill <path>           Explicit skill file or directory to load\n",
-  "  --help                   Show this help.\n",
+  "  -h, --help               Show this help.\n",
 );
 
 pub const PROMPTS_HELP: &str = concat!(
@@ -163,7 +171,7 @@ pub const PROMPTS_HELP: &str = concat!(
   "  --project                Read the project's own prompt locations\n",
   "  --prompt-template <path> Explicit prompt template file or directory to load\n",
   "  --no-prompt-templates    Do not discover prompt templates from standard locations\n",
-  "  --help                   Show this help.\n",
+  "  -h, --help               Show this help.\n",
   "\n",
   "See also: pi-rs prompt <name>, which expands one of these templates.",
 );
@@ -185,7 +193,7 @@ pub const PROMPT_HELP: &str = concat!(
   "  --project                Read the project's own prompt locations\n",
   "  --prompt-template <path> Explicit prompt template file or directory to load\n",
   "  --no-prompt-templates    Do not discover prompt templates from standard locations\n",
-  "  --help                   Show this help.\n",
+  "  -h, --help               Show this help.\n",
 );
 
 pub const PACKAGES_HELP: &str = concat!(
@@ -200,7 +208,7 @@ pub const PACKAGES_HELP: &str = concat!(
   "\n",
   "  --project                Read the project's own package locations\n",
   "  --show <name>            Show detailed surfaces and diagnostics for one package\n",
-  "  --help                   Show this help.\n",
+  "  -h, --help               Show this help.\n",
 );
 
 pub const COMPAT_HELP: &str = concat!(
@@ -215,7 +223,7 @@ pub const COMPAT_HELP: &str = concat!(
   "Options:\n",
   "  --project                Read project package locations when resolving package names\n",
   "  --json                   Emit machine-readable JSON compatibility report\n",
-  "  --help                   Show this help.\n",
+  "  -h, --help               Show this help.\n",
 );
 
 pub const IMPORT_HELP: &str = concat!(
@@ -235,7 +243,7 @@ pub const IMPORT_HELP: &str = concat!(
   "  --config <file>          State root and write policy from a runtime config.\n",
   "  --write                  File the import as a new session. Without it, report\n",
   "                           only. Refuses when that session already exists.\n",
-  "  --help                   Show this help.\n",
+  "  -h, --help               Show this help.\n",
 );
 
 pub const EXPORT_HELP: &str = concat!(
@@ -260,7 +268,7 @@ pub const EXPORT_HELP: &str = concat!(
   "  --config <file>          Configuration whose state root holds the traces.\n",
   "  --out <path>             Write here instead of stdout, creating the parent\n",
   "                           directories this path needs and nothing else.\n",
-  "  --help                   Show this help.\n",
+  "  -h, --help               Show this help.\n",
 );
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1775,5 +1783,70 @@ mod tests {
       Ok(cmd) => panic!("expected error, got {cmd:?}"),
     };
     assert!(err.contains("compat needs a target to inspect"));
+  }
+
+  #[test]
+  fn every_command_and_top_level_answers_both_help_flags() {
+    let cases = [
+      ("", TOP_HELP),
+      ("run", RUN_HELP),
+      ("interactive", INTERACTIVE_HELP),
+      ("trace", TRACE_HELP),
+      ("skills", SKILLS_HELP),
+      ("prompts", PROMPTS_HELP),
+      ("prompt", PROMPT_HELP),
+      ("packages", PACKAGES_HELP),
+      ("compat", COMPAT_HELP),
+      ("import", IMPORT_HELP),
+      ("import-pi", IMPORT_HELP),
+      ("export", EXPORT_HELP),
+    ];
+
+    for (cmd, expected_help) in cases {
+      for flag in ["--help", "-h"] {
+        let args = if cmd.is_empty() {
+          vec![flag]
+        } else {
+          vec![cmd, flag]
+        };
+        let parsed = parse(strings(&args))
+          .unwrap_or_else(|err| panic!("expected help for {args:?}, got err: {err}"));
+        assert_eq!(
+          parsed,
+          Command::Help(expected_help),
+          "flag {flag} for command '{cmd}' should produce expected help"
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn help_texts_document_accepted_help_and_verbose_flags() {
+    let all_helps = [
+      ("TOP_HELP", TOP_HELP),
+      ("RUN_HELP", RUN_HELP),
+      ("INTERACTIVE_HELP", INTERACTIVE_HELP),
+      ("TRACE_HELP", TRACE_HELP),
+      ("SKILLS_HELP", SKILLS_HELP),
+      ("PROMPTS_HELP", PROMPTS_HELP),
+      ("PROMPT_HELP", PROMPT_HELP),
+      ("PACKAGES_HELP", PACKAGES_HELP),
+      ("COMPAT_HELP", COMPAT_HELP),
+      ("IMPORT_HELP", IMPORT_HELP),
+      ("EXPORT_HELP", EXPORT_HELP),
+    ];
+
+    for (name, help_text) in all_helps {
+      assert!(
+        help_text.contains("-h, --help")
+          || (help_text.contains("-h") && help_text.contains("--help")),
+        "{name} must document both -h and --help"
+      );
+    }
+
+    assert!(
+      TRACE_HELP.contains("--verbose"),
+      "TRACE_HELP must document --verbose"
+    );
   }
 }
