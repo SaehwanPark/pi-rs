@@ -221,7 +221,12 @@ These are engineering targets, not compatibility promises.
 - `COMPATIBILITY.md` — Pi compatibility targets and support policy.
 - `ROADMAP.md` — staged implementation plan and tracked action items.
 - `AGENTS.md` — instructions and constraints for coding agents working in this repository.
+- `CONTRIBUTING.md` — operational developer workflows, verification commands, and review criteria.
+- `LESSONS.md` — durable lessons learned from development and integration.
 - `docs/PROJECT_DESIGN_CANONICAL.md` — source-of-truth project design.
+- `docs/subagents_policy.md` — subagent delegation patterns and context management policy.
+- `docs/codexbar.md` — AI subscription usage monitoring and limit guidelines.
+- `docs/harness/pi-rs-development/team-spec.md` — specialist roles and delivery harness.
 
 ## Initial implementation rule
 

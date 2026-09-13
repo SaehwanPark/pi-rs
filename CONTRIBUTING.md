@@ -79,7 +79,9 @@ runner.
 Edition 2024, `rust-version = 1.85`, two-space indent, 100-column lines, idiomatic stable
 Rust. Small focused modules, typed state instead of boolean conventions, typed errors, I/O
 at the boundary with transformation logic that is pure and testable. `unsafe` needs an
-architecture-level justification, not a performance hunch.
+architecture-level justification, not a performance hunch. Within a module, order higher-level
+or public functions before lower-level helpers when it improves readability; keep call
+relationships easy to follow and avoid circular module ownership.
 
 Every new dependency needs a concrete need, an ecosystem-maintained crate, an acceptable
 startup and binary cost, and no standard-library or local alternative. Dependencies on the

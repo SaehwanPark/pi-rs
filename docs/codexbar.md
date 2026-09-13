@@ -7,8 +7,7 @@ You are encouraged to periodically check current AI usage based on the current m
 
 ## Basic Policy
 
-- For 5-hour limit, if the limit is approaching in less than 10 minutes, wait until the limit resets (use `sleep` until the estimated reset time + 30 seconds as buffer) before making new requests.
-- For weekly limit, if the limit is approaching in less than 10 minutes, smartly determine where to stop (i.e., should be completed within 5 minutes). When the stop point is reached, open PR and merge into the main branch. Then stop.
+- When the used percentage is 97% or higher (i.e., equivalently 3% or less remaining), you should wrap up by gracefully stopping ongoing work (i.e., stop when the immediate action is done.) and generate handoff document to resume next time.
 
 ## Per-Provider Usage
 
