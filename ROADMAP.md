@@ -218,7 +218,7 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [x] Implement trace filtering by tools.
 - [x] Implement trace filtering by reasoning.
 - [x] Implement model-epoch inspection.
-- [ ] Name the stored-out reference for an externalized field when rendering a recorded line. The transcript budgets a long argument value to keep one request on one line, which cuts the reference off; the marker is in the line and the typed `externalized` record carries the path.
+- [x] Name the stored-out reference for an externalized field when rendering a recorded line. The transcript budgets a long argument value to keep one request on one line, which cuts the reference off; the marker is in the line and the typed `externalized` record carries the path. (Verified in `crates/pi-rs-tui/src/trace.rs` unit tests and `tests/trace_cli.rs`)
 
 ### Stage gate
 

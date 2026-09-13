@@ -20,7 +20,7 @@ use pi_rs_core::{AgentEvent, EventSeq, ReasoningProvenance, TraceEntry};
 
 use crate::line::RenderLine;
 use crate::style::Role;
-use crate::transcript::{escape_control, label, reasoning_label, render_event, wrap_lines};
+use crate::transcript::{escape_control, fact, label, reasoning_label, render_event, wrap_lines};
 use crate::{TranscriptOptions, reasoning_role};
 
 /// Which slice of a recorded session a trace view shows.
@@ -103,6 +103,11 @@ pub fn render_trace(
         {
           let mut line = label("answer");
           line.push(&escape_control(&text), Role::Assistant);
+          for e in &entries[index..next] {
+            for ext in &e.externalized {
+              fact(&mut line, Role::Path, &ext.reference);
+            }
+          }
           emit(&mut rendered, entry, line, options);
         }
         index = next;
@@ -114,12 +119,25 @@ pub fn render_trace(
           let mut line = RenderLine::new();
           line.push(&reasoning_label(provenance), Role::Muted);
           line.push(&escape_control(&text), reasoning_role(provenance));
+          for e in &entries[index..next] {
+            for ext in &e.externalized {
+              fact(&mut line, Role::Path, &ext.reference);
+            }
+          }
           emit(&mut rendered, entry, line, options);
         }
         index = next;
       }
       other => {
-        for line in render_event(other, options) {
+        let mut lines = render_event(other, options);
+        if !entry.externalized.is_empty() {
+          if let Some(first) = lines.first_mut() {
+            for ext in &entry.externalized {
+              fact(first, Role::Path, &ext.reference);
+            }
+          }
+        }
+        for line in lines {
           emit(&mut rendered, entry, line, options);
         }
         index += 1;
@@ -566,5 +584,24 @@ mod tests {
     for (colour, plain) in with_colour.iter().zip(&without) {
       assert_eq!(colour.line.plain(), plain.line.plain());
     }
+  }
+
+  #[test]
+  fn externalized_reference_is_named_on_recorded_line() {
+    let mut e = failed(1, "write");
+    e.externalized.push(pi_rs_core::ExternalizedField {
+      field: "event.arguments.contents".to_string(),
+      reference: "blobs/sha256/1234567890abcdef".to_string(),
+      bytes: 40_960,
+      inline: 256,
+    });
+    let out = render_trace(
+      &[e],
+      &TranscriptOptions::default(),
+      &TraceSelection::default(),
+    );
+    assert!(!out.is_empty());
+    let plain = out[0].line.plain();
+    assert!(plain.contains("blobs/sha256/1234567890abcdef"), "{plain}");
   }
 }
