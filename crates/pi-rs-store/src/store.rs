@@ -262,6 +262,33 @@ impl Store {
     Ok(freed)
   }
 
+  /// List all checkpoint capsules recorded for the given session.
+  pub fn list_checkpoints(
+    &self,
+    session: &SessionId,
+  ) -> Result<Vec<(CheckpointId, ContextCapsule)>, StoreError> {
+    let dir = self.layout.checkpoints_dir(session);
+    if !dir.exists() {
+      return Ok(Vec::new());
+    }
+    let mut checkpoints = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+      let entry = entry?;
+      let path = entry.path();
+      if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+          let id = CheckpointId::from_string(stem);
+          let bytes = std::fs::read(&path)?;
+          if let Ok(capsule) = serde_json::from_slice::<ContextCapsule>(&bytes) {
+            checkpoints.push((id, capsule));
+          }
+        }
+      }
+    }
+    checkpoints.sort_by_key(|a| a.0.clone());
+    Ok(checkpoints)
+  }
+
   /// Report what the configured retention would delete, deleting nothing.
   ///
   /// Retention destroys data that cannot be recovered afterwards, so the plan is
@@ -453,6 +480,30 @@ impl Session {
       .log
       .append(&SessionRecord::CheckpointBarrier(record.clone()))?;
     Ok(record)
+  }
+
+  /// List all checkpoint capsules for this session.
+  pub fn list_checkpoints(&self) -> Result<Vec<(CheckpointId, ContextCapsule)>, StoreError> {
+    let dir = self.layout.checkpoints_dir(self.id());
+    if !dir.exists() {
+      return Ok(Vec::new());
+    }
+    let mut checkpoints = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+      let entry = entry?;
+      let path = entry.path();
+      if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+          let id = CheckpointId::from_string(stem);
+          let bytes = std::fs::read(&path)?;
+          if let Ok(capsule) = serde_json::from_slice::<ContextCapsule>(&bytes) {
+            checkpoints.push((id, capsule));
+          }
+        }
+      }
+    }
+    checkpoints.sort_by_key(|a| a.0.clone());
+    Ok(checkpoints)
   }
 
   /// Store a payload, redacting it at this boundary before choosing inline or

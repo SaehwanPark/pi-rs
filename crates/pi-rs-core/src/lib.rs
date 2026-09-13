@@ -48,9 +48,9 @@ pub use config::{
   UiConfig,
 };
 pub use context::{
-  CapsuleArtifact, CapsuleDecision, ContextAction, ContextCapsule, ContextDecision, ContextLevel,
-  ContextPolicy, ContextProfile, ContextState, ContextThresholds, ExternalContextItem,
-  ProfilePolicy, ReductionReason,
+  CAPSULE_SCHEMA_VERSION, CapsuleArtifact, CapsuleDecision, ContextAction, ContextCapsule,
+  ContextDecision, ContextLevel, ContextPolicy, ContextProfile, ContextState, ContextThresholds,
+  ExternalContextItem, ProfilePolicy, ReductionReason,
 };
 pub use event::{
   AgentEvent, AssistantDelta, AttributedMessage, CheckpointCreated, ContextCompactionCompleted,

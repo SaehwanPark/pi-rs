@@ -5,9 +5,9 @@ use std::{
 };
 
 use pi_rs_core::{
-  AttributedMessage, CancelToken, EventEnvelope, Message, ModelProvider, ModelRef,
-  ReasoningProvenance, RuntimeConfig, SessionEndReason, SessionHeader, SessionId, SinkError,
-  TraceId, TurnId, now_millis,
+  AttributedMessage, CancelToken, CheckpointId, ContextCapsule, EventEnvelope, Message,
+  ModelProvider, ModelRef, ReasoningProvenance, RuntimeConfig, SessionEndReason, SessionHeader,
+  SessionId, SinkError, TraceId, TurnId, now_millis,
 };
 use pi_rs_provider::{Deferred, OpenAiCompat, ProviderConfig};
 use pi_rs_runtime::{StoreTrace, Trace, TurnError, TurnLoop, TurnProgress, TurnReport};
@@ -306,6 +306,40 @@ impl SessionHandle<'_> {
     Ok(self.tools.unregister_prefix(&prefix))
   }
 
+  /// Create a checkpoint capsule, append its barrier to the session log, emit
+  /// `CheckpointCreated`, and reset visible messages.
+  #[allow(dead_code)]
+  pub fn checkpoint(
+    &mut self,
+    capsule: Option<pi_rs_core::ContextCapsule>,
+  ) -> Result<pi_rs_core::CheckpointCreated, TurnError> {
+    let turn_id = TurnId::new();
+    let capsule = match capsule {
+      Some(c) => c,
+      None => {
+        let state = pi_rs_core::ContextState::zero(64_000);
+        self.runtime.synthesize_capsule(&state, "manual checkpoint")
+      }
+    };
+    self.runtime.checkpoint(&turn_id, capsule)
+  }
+
+  /// Session identifier for this active session.
+  #[allow(dead_code)]
+  pub fn session_id(&self) -> &SessionId {
+    self.runtime.session_id()
+  }
+
+  /// List all checkpoint capsules recorded for this session.
+  pub fn list_checkpoints(
+    &self,
+  ) -> Result<Vec<(pi_rs_core::CheckpointId, pi_rs_core::ContextCapsule)>, String> {
+    self
+      .runtime
+      .list_checkpoints()
+      .map_err(|e| format!("cannot list checkpoints: {e:?}"))
+  }
+
   /// Flush the transcript, end the session as a user exit, and report what the
   /// caller should show.
   ///
@@ -394,22 +428,12 @@ fn continue_context(store: &Store, session_id: &SessionId) -> Result<Vec<Message
       restored.malformed_records
     ));
   }
-  if restored.messages.is_empty() && restored.summarized_messages > 0 {
-    return Err(format!(
-      "cannot continue session {}: all {} recorded message(s) were summarized into its \
-       checkpoint capsule and nothing survives past the barrier, and the runtime cannot \
-       place a capsule in front of a model",
-      session_id.as_str(),
-      restored.summarized_messages
-    ));
+  let mut messages = Vec::new();
+  if let Some(capsule) = restored.checkpoint {
+    messages.push(Message::user(capsule.format_for_model()));
   }
-  Ok(
-    restored
-      .messages
-      .into_iter()
-      .map(|message| message.message)
-      .collect(),
-  )
+  messages.extend(restored.messages.into_iter().map(|message| message.message));
+  Ok(messages)
 }
 
 fn backup_provider(config: &RuntimeConfig) -> Result<Option<Deferred>, String> {
@@ -600,6 +624,17 @@ impl Trace for ReportingTrace {
 
   fn put_payload(&mut self, bytes: &[u8]) -> Result<Option<pi_rs_core::BlobRef>, SinkError> {
     self.inner.put_payload(bytes)
+  }
+
+  fn create_checkpoint(
+    &mut self,
+    capsule: &ContextCapsule,
+  ) -> Result<Option<(CheckpointId, String)>, SinkError> {
+    self.inner.create_checkpoint(capsule)
+  }
+
+  fn list_checkpoints(&self) -> Result<Vec<(CheckpointId, ContextCapsule)>, SinkError> {
+    self.inner.list_checkpoints()
   }
 
   fn flush(&mut self) -> Result<(), SinkError> {

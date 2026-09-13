@@ -357,6 +357,14 @@ Core fields should cover:
 
 The capsule schema must be versioned.
 
+### Checkpoint barrier invariant
+
+A checkpoint capsule (L3) forms an impermeable barrier for ordinary compaction (L1/L2):
+- Compaction operates only on messages accumulated after the most recent checkpoint.
+- Compaction never crosses, mutates, or back-propagates across an established checkpoint capsule.
+- When `ContextAction::SuggestCheckpoint` is evaluated under context pressure, the runtime synthesizes a structured capsule, archives it to durable storage (`checkpoints/<id>.json`), logs `CheckpointCreated`, advances the context compaction epoch, and resets model-visible messages to the structured capsule block.
+- Session resume across a checkpoint initializes prompt context with the active capsule followed by post-checkpoint turns.
+
 ## 11. Context profiles
 
 Built-in modes:
