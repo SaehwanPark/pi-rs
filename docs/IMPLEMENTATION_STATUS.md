@@ -7,7 +7,7 @@ yet exercised**.
 Verification for everything marked *done* below:
 
 ```
-cargo test --workspace --all-features      # 970 tests (2026-09-14)
+cargo test --workspace --all-features      # 998 tests (2026-09-14)
 cargo clippy --workspace --all-targets --all-features   # 0 warnings
 cargo fmt --all --check
 cargo doc --workspace --no-deps      # 0 warnings
@@ -17,15 +17,15 @@ cargo doc --workspace --no-deps      # 0 warnings
 
 | Layer | Crate | State | Tests |
 | --- | --- | --- | --- |
-| Contracts | `pi-rs-core` | done | 82 |
-| Durability | `pi-rs-store` | done, incl. payload bounding, externalized fields, retention | 136 |
+| Contracts | `pi-rs-core` | done | 86 |
+| Durability | `pi-rs-store` | done, incl. payload bounding, externalized fields, retention | 138 |
 | Model I/O | `pi-rs-provider` | done, verified against a real endpoint | 82 |
 | Native tools | `pi-rs-tools` | done, lifecycle + failure/unknown outcomes | 92 |
 | Turn loop + recovery | `pi-rs-runtime` | done (failover, cancel, handles, provider-overflow recovery) | 72 |
 | Surface | `pi-rs-tui` | done (raw terminal, editor, status, highlighting, wrap) | 179 |
-| Pi compatibility readers | `pi-rs-compat` | skills, prompts, packages; fixture suites | 93 |
-| MCP client | `pi-rs-mcp` | done, lazy stdio transport, discovery, and tool normalization | 11 |
-| Composition root | `pi-rs` | run, interactive, trace, compatibility, import/export, resume | 223 |
+| Pi compatibility readers | `pi-rs-compat` | skills, prompts, packages; fixture suites | 100 |
+| MCP client | `pi-rs-mcp` | done, lazy stdio transport, discovery, and tool normalization | 19 |
+| Composition root | `pi-rs` | run, interactive, trace, compatibility, import/export, resume | 230 |
 
 ## What the merge series added on top of the one-shot command
 
