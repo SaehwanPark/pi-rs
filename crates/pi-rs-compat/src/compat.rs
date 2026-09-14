@@ -182,7 +182,7 @@ pub fn inspect_package(
     (pkg_path, pkg_path.join("package.json"))
   };
 
-  let (manifest, warnings) = if let Some(pkg) = package_opt {
+  let (manifest, mut warnings) = if let Some(pkg) = package_opt {
     (pkg.manifest.clone(), pkg.warnings.clone())
   } else if manifest_path.is_file() {
     let parse = package::read(&manifest_path);
@@ -193,6 +193,7 @@ pub fn inspect_package(
     }];
     (package::Manifest::default(), warnings)
   };
+  warnings.extend(package::invalid_manifest_paths(pkg_root, &manifest));
 
   let mut surfaces = Vec::new();
   let mut diagnostics = Vec::new();
@@ -230,14 +231,16 @@ pub fn inspect_package(
     manifest
       .skill_paths
       .iter()
-      .map(|p| pkg_root.join(p))
+      .filter_map(|p| package::safe_manifest_path(pkg_root, p))
       .collect::<Vec<_>>()
   } else {
-    let skills_dir = pkg_root.join("skills");
-    let skill_md = pkg_root.join("SKILL.md");
-    if skills_dir.is_dir() {
+    if let Some(skills_dir) = package::safe_manifest_path(pkg_root, "skills")
+      && skills_dir.is_dir()
+    {
       vec![skills_dir]
-    } else if skill_md.is_file() {
+    } else if let Some(skill_md) = package::safe_manifest_path(pkg_root, "SKILL.md")
+      && skill_md.is_file()
+    {
       vec![skill_md]
     } else {
       Vec::new()
@@ -295,11 +298,12 @@ pub fn inspect_package(
     manifest
       .prompt_paths
       .iter()
-      .map(|p| pkg_root.join(p))
+      .filter_map(|p| package::safe_manifest_path(pkg_root, p))
       .collect::<Vec<_>>()
   } else {
-    let prompts_dir = pkg_root.join("prompts");
-    if prompts_dir.is_dir() {
+    if let Some(prompts_dir) = package::safe_manifest_path(pkg_root, "prompts")
+      && prompts_dir.is_dir()
+    {
       vec![prompts_dir]
     } else {
       Vec::new()
@@ -354,19 +358,26 @@ pub fn inspect_package(
         Warning::UnsupportedSurface { surface, .. } if surface == "extensions"
       )
     })
-    || pkg_root.join("extensions").is_dir();
+    || package::safe_manifest_path(pkg_root, "extensions").is_some_and(|path| path.is_dir());
 
   if has_ext_decl {
     let mut ext_files = Vec::new();
     for p in &manifest.extension_paths {
-      let file_path = pkg_root.join(p);
-      if file_path.is_file() {
+      if let Some(file_path) = package::safe_manifest_path(pkg_root, p)
+        && file_path.is_file()
+      {
         ext_files.push(file_path);
       }
     }
-    scan_js_ts_files(&pkg_root.join("extensions"), &mut ext_files);
-    scan_js_ts_files(&pkg_root.join("src"), &mut ext_files);
-    scan_js_ts_files(&pkg_root.join("dist"), &mut ext_files);
+    if let Some(path) = package::safe_manifest_path(pkg_root, "extensions") {
+      scan_js_ts_files(&path, &mut ext_files);
+    }
+    if let Some(path) = package::safe_manifest_path(pkg_root, "src") {
+      scan_js_ts_files(&path, &mut ext_files);
+    }
+    if let Some(path) = package::safe_manifest_path(pkg_root, "dist") {
+      scan_js_ts_files(&path, &mut ext_files);
+    }
 
     if !ext_files.is_empty() {
       let mut has_register_tool = false;
@@ -926,6 +937,11 @@ fn describe_package_warning(warning: &Warning) -> String {
         path.display()
       )
     }
+    Warning::InvalidSurfacePath {
+      surface,
+      path,
+      reason,
+    } => format!("invalid {surface} path '{path}': {reason}"),
   }
 }
 
@@ -955,6 +971,40 @@ mod tests {
         .surfaces
         .iter()
         .any(|s| s.name == "package manifest" && s.status == CompatibilityLevel::Supported)
+    );
+  }
+
+  #[test]
+  fn test_inspect_package_rejects_manifest_escape_paths() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let package = temp.path().join("package");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(
+      outside.join("SKILL.md"),
+      "---\nname: outside\ndescription: outside\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+      package.join("package.json"),
+      r#"{"name":"escape","pi":{"skills":["../../outside"]}}"#,
+    )
+    .unwrap();
+
+    let report = inspect_package(&package, None).unwrap();
+    assert!(
+      report
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.contains("invalid skills path"))
+    );
+    assert!(
+      report
+        .surfaces
+        .iter()
+        .all(|surface| surface.name != "skill discovery"
+          || surface.detail.as_deref() != Some("1 skill(s) found"))
     );
   }
 

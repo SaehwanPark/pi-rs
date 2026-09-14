@@ -18,25 +18,73 @@ use crate::{event::EventEnvelope, hash::sha256_hex};
 /// Schema version stamped onto trace records that need their own version.
 pub const TRACE_SCHEMA_VERSION: u32 = 1;
 
+/// Encoding used for a content-addressed payload on disk.
+///
+/// The logical hash and size in [`BlobRef`] always describe the redacted,
+/// uncompressed bytes. The encoding is recorded in the reference so a reader
+/// does not need the current retention configuration to decode an old blob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlobCompression {
+  /// Store and read the logical bytes as-is.
+  #[default]
+  None,
+  /// Raw Deflate stream, used only when it is smaller than the logical bytes.
+  Deflate,
+}
+
+impl BlobCompression {
+  pub fn is_none(&self) -> bool {
+    matches!(self, Self::None)
+  }
+
+  /// Suffix used in a durable blob path, if this encoding is active.
+  pub fn suffix(self) -> Option<&'static str> {
+    match self {
+      Self::None => None,
+      Self::Deflate => Some("deflate"),
+    }
+  }
+
+  /// Parse the optional suffix on a durable blob path.
+  pub fn from_suffix(suffix: Option<&str>) -> Option<Self> {
+    match suffix {
+      None => Some(Self::None),
+      Some("deflate") => Some(Self::Deflate),
+      Some(_) => None,
+    }
+  }
+}
+
 /// Reference to one stored payload.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BlobRef {
-  /// Lowercase hex SHA-256 of the stored bytes.
+  /// Lowercase hex SHA-256 of the logical, redacted bytes.
   pub hash: String,
-  /// Byte length of the stored bytes.
+  /// Byte length of the logical, redacted bytes.
   pub size: u64,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub content_type: Option<String>,
+  /// Encoding used by the bytes at the referenced path.
+  #[serde(default, skip_serializing_if = "BlobCompression::is_none")]
+  pub compression: BlobCompression,
 }
 
 impl BlobRef {
-  /// Derive the reference the store must use for these bytes.
+  /// Derive the uncompressed reference the store must use for these bytes.
   pub fn for_bytes(bytes: &[u8], content_type: Option<&str>) -> Self {
     Self {
       hash: sha256_hex(bytes),
       size: bytes.len() as u64,
       content_type: content_type.map(str::to_string),
+      compression: BlobCompression::None,
     }
+  }
+
+  /// Return the same logical reference with a selected on-disk encoding.
+  pub fn with_compression(mut self, compression: BlobCompression) -> Self {
+    self.compression = compression;
+    self
   }
 
   /// Truncated hash for display and for `recovery_ref` strings.
@@ -47,12 +95,19 @@ impl BlobRef {
   /// Relative path used inside a session directory.
   ///
   /// Two levels of prefix sharding keep directories usable when a long session
-  /// stores many payloads.
+  /// stores many payloads. Encoded payloads add a validated suffix so raw and
+  /// compressed representations never collide.
   pub fn relative_path(&self) -> String {
+    let suffix = self
+      .compression
+      .suffix()
+      .map(|suffix| format!(".{suffix}"))
+      .unwrap_or_default();
     format!(
-      "blobs/{}/{}",
+      "blobs/{}/{}{}",
       &self.hash[..2.min(self.hash.len())],
-      self.hash
+      self.hash,
+      suffix
     )
   }
 
@@ -95,6 +150,9 @@ pub struct TraceRetention {
   /// Payloads at or above this size go to blob storage instead of inline.
   pub inline_threshold_bytes: u64,
   pub raw_payload: RawPayloadCapture,
+  /// Optional encoding preference for payloads behind blob references.
+  #[serde(default, skip_serializing_if = "BlobCompression::is_none")]
+  pub compression: BlobCompression,
 }
 
 impl Default for TraceRetention {
@@ -104,6 +162,7 @@ impl Default for TraceRetention {
       max_bytes: Some(512 * 1024 * 1024),
       inline_threshold_bytes: 8 * 1024,
       raw_payload: RawPayloadCapture::Disabled,
+      compression: BlobCompression::None,
     }
   }
 }
@@ -239,6 +298,26 @@ mod tests {
     assert_eq!(RawPayloadCapture::default(), RawPayloadCapture::Disabled);
     assert!(!RawPayloadCapture::default().is_enabled());
     assert!(TraceRetention::default().raw_payload == RawPayloadCapture::Disabled);
+    assert_eq!(TraceRetention::default().compression, BlobCompression::None);
+  }
+
+  #[test]
+  fn compression_metadata_is_backward_compatible_and_explicit() {
+    let legacy: BlobRef = serde_json::from_str(
+      r#"{"hash":"0123456789012345678901234567890123456789012345678901234567890123","size":4}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy.compression, BlobCompression::None);
+    assert!(
+      !serde_json::to_string(&legacy)
+        .unwrap()
+        .contains("compression")
+    );
+
+    let compressed = legacy.with_compression(BlobCompression::Deflate);
+    let encoded = serde_json::to_string(&compressed).unwrap();
+    assert!(encoded.contains("\"compression\":\"deflate\""), "{encoded}");
+    assert!(compressed.relative_path().ends_with(".deflate"));
   }
 
   #[test]

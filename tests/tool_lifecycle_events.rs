@@ -13,19 +13,19 @@
 
 use std::{
   fs,
-  io::{Read, Write},
-  net::{SocketAddr, TcpListener, TcpStream},
   path::{Path, PathBuf},
   process::Command,
-  thread,
-  time::{Duration, Instant},
 };
+
+mod fake_provider;
 
 use pi_rs_core::{
   AgentEvent, ModelCapabilities, ModelEndpoint, ModelRef, ReasoningExposure, RuntimeConfig,
 };
 use pi_rs_store::{StateLayout, TraceJournal};
 use tempfile::TempDir;
+
+use fake_provider::{FakeServer, text_response, tool_call};
 
 /// Provider-supplied call ids. That these exact ids reach the journal is part of the
 /// durable-id claim: the id the model emitted is the id stored on disk.
@@ -139,7 +139,7 @@ fn a_failing_tool_action_records_a_failure() {
   // `exit 3` is the deterministic failing action: the shell reports status 3.
   let records = turn_records(
     &[
-      tool_response(FAILING_CALL, "exec", r#"{"command":"exit 3"}"#),
+      tool_call(FAILING_CALL, "exec", r#"{"command":"exit 3"}"#),
       text_response("completed"),
     ],
     2,
@@ -193,7 +193,7 @@ fn an_outcome_the_runtime_cannot_determine_is_not_coerced_into_success_or_failur
   // is still running and its completion is never observed.
   let records = turn_records(
     &[
-      tool_response(
+      tool_call(
         UNOBSERVED_CALL,
         "exec",
         r#"{"command":"sleep 5","timeout_ms":250}"#,
@@ -268,12 +268,12 @@ fn tool_turn_records() -> Vec<Record> {
   let exec_cmd = r#"{"command":"printf executed > exec.txt"}"#;
 
   let server = FakeServer::answer(vec![
-    tool_response(
+    tool_call(
       WRITE_CALL,
       "write",
       r#"{"path":"model.txt","contents":"from tool\n"}"#,
     ),
-    tool_response(EXEC_CALL, "exec", exec_cmd),
+    tool_call(EXEC_CALL, "exec", exec_cmd),
     text_response("completed"),
   ]);
   // Both tools are mutating, so the run needs explicit auto-approval to reach them.
@@ -396,130 +396,6 @@ enum Stage {
   Start,
   /// The action is closed.
   Terminal,
-}
-
-/// Scripted OpenAI-compatible provider: one canned response per model request.
-struct FakeServer {
-  addr: SocketAddr,
-  handle: thread::JoinHandle<Vec<String>>,
-}
-
-impl FakeServer {
-  fn answer(responses: Vec<String>) -> Self {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider");
-    let addr = listener.local_addr().expect("fake provider address");
-    listener.set_nonblocking(true).unwrap();
-    let handle = thread::spawn(move || {
-      responses
-        .into_iter()
-        .map(|response| {
-          let deadline = Instant::now() + Duration::from_secs(5);
-          let mut socket = loop {
-            match listener.accept() {
-              Ok((socket, _)) => break socket,
-              Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                assert!(
-                  Instant::now() < deadline,
-                  "timed out waiting for provider request"
-                );
-                thread::sleep(Duration::from_millis(5));
-              }
-              Err(error) => panic!("accept provider request: {error}"),
-            }
-          };
-          let request = drain_request(&mut socket);
-          socket
-            .write_all(response.as_bytes())
-            .expect("write response");
-          socket.flush().expect("flush response");
-          request
-        })
-        .collect()
-    });
-    Self { addr, handle }
-  }
-
-  fn base_url(&self) -> String {
-    format!("http://{}/v1", self.addr)
-  }
-
-  fn requests(self) -> Vec<String> {
-    self.handle.join().expect("fake provider thread")
-  }
-}
-
-fn drain_request(socket: &mut TcpStream) -> String {
-  let mut bytes = Vec::new();
-  let mut buffer = [0u8; 1024];
-  let mut expected = None;
-  loop {
-    let read = socket.read(&mut buffer).unwrap_or(0);
-    if read == 0 {
-      break;
-    }
-    bytes.extend_from_slice(&buffer[..read]);
-    if expected.is_none()
-      && let Some(end) = find(&bytes, b"\r\n\r\n")
-    {
-      let body_start = end + 4;
-      let headers = String::from_utf8_lossy(&bytes[..body_start]).to_ascii_lowercase();
-      let content_length = headers
-        .split("\r\n")
-        .find_map(|line| line.strip_prefix("content-length:"))
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-      expected = Some(body_start + content_length);
-    }
-    if expected.is_some_and(|length| bytes.len() >= length) {
-      break;
-    }
-  }
-  String::from_utf8_lossy(&bytes).into_owned()
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-  haystack
-    .windows(needle.len())
-    .position(|part| part == needle)
-}
-
-fn sse(events: &[serde_json::Value]) -> String {
-  let mut body = String::new();
-  for event in events {
-    body.push_str("data: ");
-    body.push_str(&event.to_string());
-    body.push_str("\n\n");
-  }
-  body.push_str("data: [DONE]\n\n");
-  format!(
-    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
-    body.len()
-  )
-}
-
-fn tool_response(id: &str, name: &str, arguments: &str) -> String {
-  sse(&[
-    serde_json::json!({
-      "choices": [{"delta": {"tool_calls": [{
-        "index": 0,
-        "id": id,
-        "function": {"name": name, "arguments": arguments}
-      }]}}]
-    }),
-    serde_json::json!({
-      "choices": [{"delta": {}, "finish_reason": "tool_calls"}]
-    }),
-  ])
-}
-
-fn text_response(text: &str) -> String {
-  sse(&[
-    serde_json::json!({"choices": [{"delta": {"content": text}}]}),
-    serde_json::json!({
-      "choices": [{"delta": {}, "finish_reason": "stop"}],
-      "usage": {"prompt_tokens": 20, "completion_tokens": 3}
-    }),
-  ])
 }
 
 fn write_config(root: &Path, base_url: &str, auto_approve_mutating: bool) -> PathBuf {

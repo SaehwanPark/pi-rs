@@ -16,6 +16,7 @@ pub const TOP_HELP: &str = concat!(
   "  prompts      List the prompt templates a session would offer\n",
   "  prompt       Expand one prompt template and print the prompt it becomes\n",
   "  packages     List discovered Pi packages and their contained surfaces\n",
+  "  trust        Record or inspect explicit project-trust decisions\n",
   "  compat       Inspect an artifact or package for Pi behavioral compatibility\n",
   "  import       Import a Pi session file into the store, reporting what could not\n",
   "               be carried\n",
@@ -132,7 +133,7 @@ pub const TRACE_HELP: &str = concat!(
 );
 
 pub const SKILLS_HELP: &str = concat!(
-  "Usage: pi-rs skills [--project]\n",
+  "Usage: pi-rs skills [--project] [--trust-store <dir>]\n",
   "\n",
   "Lists the skills that would be offered to a model, one per pair of lines: source\n",
   "and name, then the description the model sees. The listing goes to stdout; every\n",
@@ -145,6 +146,7 @@ pub const SKILLS_HELP: &str = concat!(
   "be:\n",
   "\n",
   "  --project                Read the project's own skill locations\n",
+  "  --trust-store <dir>      Consult trust.json before reading project locations\n",
   "  --control-prompt         Print the skill-control prompt a session puts in front\n",
   "                           of the model, instead of the listing. Skills marked\n",
   "                           explicit-only are not in it.\n",
@@ -155,7 +157,7 @@ pub const SKILLS_HELP: &str = concat!(
 );
 
 pub const PROMPTS_HELP: &str = concat!(
-  "Usage: pi-rs prompts [--project]\n",
+  "Usage: pi-rs prompts [--project] [--trust-store <dir>]\n",
   "\n",
   "Lists the prompt templates a session would offer, one per pair of lines: source\n",
   "and name -- with the declared argument hint when there is one -- then the\n",
@@ -169,6 +171,7 @@ pub const PROMPTS_HELP: &str = concat!(
   "may be:\n",
   "\n",
   "  --project                Read the project's own prompt locations\n",
+  "  --trust-store <dir>      Consult trust.json before reading project locations\n",
   "  --prompt-template <path> Explicit prompt template file or directory to load\n",
   "  --no-prompt-templates    Do not discover prompt templates from standard locations\n",
   "  -h, --help               Show this help.\n",
@@ -177,8 +180,7 @@ pub const PROMPTS_HELP: &str = concat!(
 );
 
 pub const PROMPT_HELP: &str = concat!(
-  "Usage: pi-rs prompt [--project] <name> [arguments...]\n",
-  "\n",
+  "Usage: pi-rs prompt [--project] [--trust-store <dir>] <name> [arguments...]\n",
   "Expands one template the way Pi would and writes the prompt to stdout, raw, as\n",
   "the only thing on it. Nothing is sent to a model: this is the expansion, not the\n",
   "run. Options come before the name; everything after the name is an argument to\n",
@@ -191,23 +193,46 @@ pub const PROMPT_HELP: &str = concat!(
   "  ${@:N} and ${@:N:L}      a slice of the argument list, 1-indexed\n",
   "\n",
   "  --project                Read the project's own prompt locations\n",
+  "  --trust-store <dir>      Consult trust.json before reading project locations\n",
   "  --prompt-template <path> Explicit prompt template file or directory to load\n",
   "  --no-prompt-templates    Do not discover prompt templates from standard locations\n",
   "  -h, --help               Show this help.\n",
 );
 
 pub const PACKAGES_HELP: &str = concat!(
-  "Usage: pi-rs packages [--project] [--show <name>]\n",
+  "Usage: pi-rs packages [--project] [--trust-store <dir>] [--show <name>]\n",
+  "       pi-rs packages install [--project] <local-directory>\n",
   "\n",
   "Lists the packages discovered on disk, one per pair of lines: source, name,\n",
   "and version, then description. The listing goes to stdout; every package that\n",
   "was skipped or carried warnings, and why, goes to stderr.\n",
   "\n",
   "Reads $HOME/.pi/agent/packages, $HOME/.pi/packages, and --project's\n",
-  "<ancestor>/.pi/packages up to the git root.\n",
+  "<ancestor>/.pi/packages up to the git root. Install copies an explicit local\n",
+  "package directory into the selected package location. It never runs dependency\n",
+  "scripts or follows source symlinks; npm, git, and HTTP sources are not accepted yet.\n",
   "\n",
-  "  --project                Read the project's own package locations\n",
+  "  --project                Read/install the project's own package locations\n",
+  "  --trust-store <dir>      Consult trust.json before reading project locations\n",
   "  --show <name>            Show detailed surfaces and diagnostics for one package\n",
+  "  -h, --help               Show this help.\n",
+);
+
+pub const TRUST_HELP: &str = concat!(
+  "Usage: pi-rs trust --store <dir> --list\n",
+  "       pi-rs trust --store <dir> --project <path> [--grant|--deny|--clear]\n",
+  "\n",
+  "Records explicit project-trust decisions without loading a provider, model, or\n",
+  "project-local content. The store path is supplied by the caller and is never read\n",
+  "from the project being trusted. Grant/deny/clear scope to the canonical git root\n",
+  "when one exists, otherwise the supplied project directory.\n",
+  "\n",
+  "  --store <dir>            State root containing trust.json (required)\n",
+  "  --project <path>         Project directory for grant/deny/clear\n",
+  "  --list                   List recorded scope keys and decisions\n",
+  "  --grant                  Record a durable trusted decision\n",
+  "  --deny                   Record a durable denied decision\n",
+  "  --clear                  Remove the exact project decision\n",
   "  -h, --help               Show this help.\n",
 );
 
@@ -222,6 +247,7 @@ pub const COMPAT_HELP: &str = concat!(
   "\n",
   "Options:\n",
   "  --project                Read project package locations when resolving package names\n",
+  "  --trust-store <dir>      Consult trust.json before reading project locations\n",
   "  --json                   Emit machine-readable JSON compatibility report\n",
   "  -h, --help               Show this help.\n",
 );
@@ -281,6 +307,7 @@ pub enum Command {
   Prompts(PromptsArgs),
   Prompt(PromptArgs),
   Packages(PackagesArgs),
+  Trust(TrustArgs),
   Compat(CompatArgs),
   Import(ImportArgs),
   Export(ExportArgs),
@@ -293,17 +320,41 @@ pub struct CompatArgs {
   pub target: String,
   /// Whether the project's own package locations may be read.
   pub project: bool,
+  /// Optional durable trust store used to resolve project-local access.
+  pub trust_store: Option<PathBuf>,
   /// Whether to format the output as JSON.
   pub json: bool,
+}
+
+/// `pi-rs trust`: durable project-trust decisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustArgs {
+  /// State root that owns trust.json; never inferred from project files.
+  pub store: PathBuf,
+  /// Project directory whose canonical git root is the trust scope.
+  pub project: Option<PathBuf>,
+  pub action: TrustAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustAction {
+  List,
+  Grant,
+  Deny,
+  Clear,
 }
 
 /// `pi-rs packages`: packages discovered on disk.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PackagesArgs {
-  /// Whether the project's own package locations may be read.
+  /// Whether the project's own package locations may be read or installed into.
   pub project: bool,
+  /// Optional durable trust store used to resolve project-local access.
+  pub trust_store: Option<PathBuf>,
   /// Inspect one package's detailed surfaces and diagnostics.
   pub show: Option<String>,
+  /// Explicit local package directory to install.
+  pub install: Option<PathBuf>,
 }
 
 /// `pi-rs prompts`: the templates a session would offer.
@@ -312,6 +363,8 @@ pub struct PromptsArgs {
   /// Whether the project's own locations may be read, for the same reason as skills:
   /// a template is text that ends up in front of the model.
   pub project: bool,
+  /// Optional durable trust store used to resolve project-local access.
+  pub trust_store: Option<PathBuf>,
   /// Explicit prompt template files or directories passed via `--prompt-template <path>`.
   pub template_paths: Vec<PathBuf>,
   /// Disable discovering prompt templates from standard locations.
@@ -326,6 +379,8 @@ pub struct PromptArgs {
   /// a template's own arguments must not be mistaken for this command's flags.
   pub arguments: Vec<String>,
   pub project: bool,
+  /// Optional durable trust store used to resolve project-local access.
+  pub trust_store: Option<PathBuf>,
   /// Explicit prompt template files or directories passed via `--prompt-template <path>`.
   pub template_paths: Vec<PathBuf>,
   /// Disable discovering prompt templates from standard locations.
@@ -339,6 +394,8 @@ pub struct SkillsArgs {
   /// is instructions for the model, and a checkout should not be able to hand the
   /// model instructions that nobody in this session agreed to.
   pub project: bool,
+  /// Optional durable trust store used to resolve project-local access.
+  pub trust_store: Option<PathBuf>,
   /// Print the skill-control prompt — the block a session puts in front of the model —
   /// instead of the human listing.
   pub control_prompt: bool,
@@ -500,6 +557,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
   if command == "packages" {
     return parse_packages(&remaining);
   }
+  if command == "trust" {
+    return parse_trust(&remaining);
+  }
   if command == "compat" {
     return parse_compat(&remaining);
   }
@@ -520,6 +580,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
 /// `pi-rs skills`: what a model would be offered, and what was declined.
 fn parse_skills(remaining: &[OsString]) -> Result<Command, String> {
   let mut project = false;
+  let mut trust_store: Option<PathBuf> = None;
   let mut control_prompt = false;
   let mut show: Option<String> = None;
   let mut skill_paths = Vec::new();
@@ -531,6 +592,15 @@ fn parse_skills(remaining: &[OsString]) -> Result<Command, String> {
     index += 1;
     match flag {
       "--project" => project = true,
+      "--trust-store" => {
+        let path = remaining
+          .get(index)
+          .and_then(|value| value.to_str())
+          .filter(|value| !value.starts_with('-'))
+          .ok_or_else(|| format!("--trust-store needs a directory\n{SKILLS_HELP}"))?;
+        index += 1;
+        trust_store = Some(PathBuf::from(path));
+      }
       "--control-prompt" => control_prompt = true,
       "--skill" => {
         let path = remaining
@@ -558,6 +628,7 @@ fn parse_skills(remaining: &[OsString]) -> Result<Command, String> {
   }
   Ok(Command::Skills(SkillsArgs {
     project,
+    trust_store,
     control_prompt,
     show,
     skill_paths,
@@ -567,6 +638,7 @@ fn parse_skills(remaining: &[OsString]) -> Result<Command, String> {
 /// `pi-rs prompts`: list the templates.
 fn parse_prompts(remaining: &[OsString]) -> Result<Command, String> {
   let mut project = false;
+  let mut trust_store: Option<PathBuf> = None;
   let mut template_paths = Vec::new();
   let mut no_prompt_templates = false;
   let mut index = 0;
@@ -577,6 +649,15 @@ fn parse_prompts(remaining: &[OsString]) -> Result<Command, String> {
     index += 1;
     match flag {
       "--project" => project = true,
+      "--trust-store" => {
+        let path = remaining
+          .get(index)
+          .and_then(|value| value.to_str())
+          .filter(|value| !value.starts_with('-'))
+          .ok_or_else(|| format!("--trust-store needs a directory\n{PROMPTS_HELP}"))?;
+        index += 1;
+        trust_store = Some(PathBuf::from(path));
+      }
       "--no-prompt-templates" => no_prompt_templates = true,
       "--prompt-template" => {
         let path = remaining
@@ -597,6 +678,7 @@ fn parse_prompts(remaining: &[OsString]) -> Result<Command, String> {
   }
   Ok(Command::Prompts(PromptsArgs {
     project,
+    trust_store,
     template_paths,
     no_prompt_templates,
   }))
@@ -606,6 +688,7 @@ fn parse_prompts(remaining: &[OsString]) -> Result<Command, String> {
 /// `pi-rs prompt review --strict` hands `--strict` to the template.
 fn parse_prompt(remaining: &[OsString]) -> Result<Command, String> {
   let mut project = false;
+  let mut trust_store: Option<PathBuf> = None;
   let mut template_paths = Vec::new();
   let mut no_prompt_templates = false;
   let mut name: Option<String> = None;
@@ -620,6 +703,16 @@ fn parse_prompt(remaining: &[OsString]) -> Result<Command, String> {
       match text {
         "--project" => {
           project = true;
+          continue;
+        }
+        "--trust-store" => {
+          let path = remaining
+            .get(index)
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.starts_with('-'))
+            .ok_or_else(|| format!("--trust-store needs a directory\n{PROMPT_HELP}"))?;
+          index += 1;
+          trust_store = Some(PathBuf::from(path));
           continue;
         }
         "--no-prompt-templates" => {
@@ -656,6 +749,7 @@ fn parse_prompt(remaining: &[OsString]) -> Result<Command, String> {
     name,
     arguments,
     project,
+    trust_store,
     template_paths,
     no_prompt_templates,
   }))
@@ -664,7 +758,9 @@ fn parse_prompt(remaining: &[OsString]) -> Result<Command, String> {
 /// `pi-rs packages`: list the packages.
 fn parse_packages(remaining: &[OsString]) -> Result<Command, String> {
   let mut project = false;
+  let mut trust_store: Option<PathBuf> = None;
   let mut show: Option<String> = None;
+  let mut install: Option<PathBuf> = None;
   let mut index = 0;
   while index < remaining.len() {
     let flag = remaining[index]
@@ -673,6 +769,15 @@ fn parse_packages(remaining: &[OsString]) -> Result<Command, String> {
     index += 1;
     match flag {
       "--project" => project = true,
+      "--trust-store" => {
+        let path = remaining
+          .get(index)
+          .and_then(|value| value.to_str())
+          .filter(|value| !value.starts_with('-'))
+          .ok_or_else(|| format!("--trust-store needs a directory\n{PACKAGES_HELP}"))?;
+        index += 1;
+        trust_store = Some(PathBuf::from(path));
+      }
       "--show" => {
         let name = remaining
           .get(index)
@@ -682,6 +787,20 @@ fn parse_packages(remaining: &[OsString]) -> Result<Command, String> {
         index += 1;
         show = Some(name.to_string());
       }
+      "install" => {
+        if install.is_some() {
+          return Err(format!(
+            "packages install accepts one source\n{PACKAGES_HELP}"
+          ));
+        }
+        let source = remaining
+          .get(index)
+          .and_then(|value| value.to_str())
+          .filter(|value| !value.starts_with('-'))
+          .ok_or_else(|| format!("packages install needs a local directory\n{PACKAGES_HELP}"))?;
+        index += 1;
+        install = Some(PathBuf::from(source));
+      }
       "--help" | "-h" => return Ok(Command::Help(PACKAGES_HELP)),
       other => {
         return Err(format!(
@@ -690,12 +809,83 @@ fn parse_packages(remaining: &[OsString]) -> Result<Command, String> {
       }
     };
   }
-  Ok(Command::Packages(PackagesArgs { project, show }))
+  if show.is_some() && install.is_some() {
+    return Err(format!(
+      "packages cannot combine install and --show\n{PACKAGES_HELP}"
+    ));
+  }
+  Ok(Command::Packages(PackagesArgs {
+    project,
+    trust_store,
+    show,
+    install,
+  }))
+}
+
+/// `pi-rs trust`: record or inspect project-trust decisions.
+fn parse_trust(remaining: &[OsString]) -> Result<Command, String> {
+  let mut store: Option<PathBuf> = None;
+  let mut project: Option<PathBuf> = None;
+  let mut action: Option<TrustAction> = None;
+  let mut index = 0;
+  while index < remaining.len() {
+    let flag = remaining[index]
+      .to_str()
+      .ok_or_else(|| format!("trust argument is not valid UTF-8\n{TRUST_HELP}"))?;
+    index += 1;
+    match flag {
+      "--store" => {
+        let value = remaining
+          .get(index)
+          .and_then(|value| value.to_str())
+          .filter(|value| !value.starts_with('-'))
+          .ok_or_else(|| format!("--store needs a directory\n{TRUST_HELP}"))?;
+        index += 1;
+        store = Some(PathBuf::from(value));
+      }
+      "--project" => {
+        let value = remaining
+          .get(index)
+          .and_then(|value| value.to_str())
+          .filter(|value| !value.starts_with('-'))
+          .ok_or_else(|| format!("--project needs a directory\n{TRUST_HELP}"))?;
+        index += 1;
+        project = Some(PathBuf::from(value));
+      }
+      "--list" => set_trust_action(&mut action, TrustAction::List)?,
+      "--grant" => set_trust_action(&mut action, TrustAction::Grant)?,
+      "--deny" => set_trust_action(&mut action, TrustAction::Deny)?,
+      "--clear" => set_trust_action(&mut action, TrustAction::Clear)?,
+      "--help" | "-h" => return Ok(Command::Help(TRUST_HELP)),
+      other => return Err(format!("unknown trust argument '{other}'\n{TRUST_HELP}")),
+    }
+  }
+  let store = store.ok_or_else(|| format!("trust needs --store <dir>\n{TRUST_HELP}"))?;
+  let action = action.ok_or_else(|| format!("trust needs exactly one action\n{TRUST_HELP}"))?;
+  if !matches!(action, TrustAction::List) && project.is_none() {
+    return Err(format!("trust action needs --project <path>\n{TRUST_HELP}"));
+  }
+  if matches!(action, TrustAction::List) && project.is_some() {
+    return Err(format!("trust --list cannot take --project\n{TRUST_HELP}"));
+  }
+  Ok(Command::Trust(TrustArgs {
+    store,
+    project,
+    action,
+  }))
+}
+
+fn set_trust_action(action: &mut Option<TrustAction>, next: TrustAction) -> Result<(), String> {
+  if action.replace(next).is_some() {
+    return Err(format!("trust accepts exactly one action\n{TRUST_HELP}"));
+  }
+  Ok(())
 }
 
 /// `pi-rs compat`: inspect an artifact or package for compatibility.
 fn parse_compat(remaining: &[OsString]) -> Result<Command, String> {
   let mut project = false;
+  let mut trust_store: Option<PathBuf> = None;
   let mut json = false;
   let mut target: Option<String> = None;
   let mut index = 0;
@@ -706,6 +896,15 @@ fn parse_compat(remaining: &[OsString]) -> Result<Command, String> {
     index += 1;
     match arg {
       "--project" => project = true,
+      "--trust-store" => {
+        let path = remaining
+          .get(index)
+          .and_then(|value| value.to_str())
+          .filter(|value| !value.starts_with('-'))
+          .ok_or_else(|| format!("--trust-store needs a directory\n{COMPAT_HELP}"))?;
+        index += 1;
+        trust_store = Some(PathBuf::from(path));
+      }
       "--json" => json = true,
       "--help" | "-h" => return Ok(Command::Help(COMPAT_HELP)),
       other if other.starts_with('-') => {
@@ -731,6 +930,7 @@ fn parse_compat(remaining: &[OsString]) -> Result<Command, String> {
   Ok(Command::Compat(CompatArgs {
     target,
     project,
+    trust_store,
     json,
   }))
 }
@@ -1582,6 +1782,7 @@ mod tests {
       parse(strings(&["skills"])).unwrap(),
       Command::Skills(SkillsArgs {
         project: false,
+        trust_store: None,
         control_prompt: false,
         show: None,
         skill_paths: Vec::new(),
@@ -1591,6 +1792,7 @@ mod tests {
       parse(strings(&["skills", "--project"])).unwrap(),
       Command::Skills(SkillsArgs {
         project: true,
+        trust_store: None,
         control_prompt: false,
         show: None,
         skill_paths: Vec::new(),
@@ -1600,6 +1802,7 @@ mod tests {
       parse(strings(&["skills", "--skill", "my-skill/SKILL.md"])).unwrap(),
       Command::Skills(SkillsArgs {
         project: false,
+        trust_store: None,
         control_prompt: false,
         show: None,
         skill_paths: vec![PathBuf::from("my-skill/SKILL.md")],
@@ -1648,6 +1851,7 @@ mod tests {
       parse(strings(&["prompts"])).unwrap(),
       Command::Prompts(PromptsArgs {
         project: false,
+        trust_store: None,
         template_paths: Vec::new(),
         no_prompt_templates: false,
       })
@@ -1656,6 +1860,7 @@ mod tests {
       parse(strings(&["prompts", "--project"])).unwrap(),
       Command::Prompts(PromptsArgs {
         project: true,
+        trust_store: None,
         template_paths: Vec::new(),
         no_prompt_templates: false,
       })
@@ -1670,6 +1875,7 @@ mod tests {
       .unwrap(),
       Command::Prompts(PromptsArgs {
         project: false,
+        trust_store: None,
         template_paths: vec![PathBuf::from("foo.md")],
         no_prompt_templates: true,
       })
@@ -1691,6 +1897,7 @@ mod tests {
         name: "review".to_string(),
         arguments: vec![],
         project: false,
+        trust_store: None,
         template_paths: Vec::new(),
         no_prompt_templates: false,
       })
@@ -1713,6 +1920,7 @@ mod tests {
         name: "lint".to_string(),
         arguments: vec!["--strict".to_string(), "src/".to_string()],
         project: true,
+        trust_store: None,
         template_paths: vec![PathBuf::from("custom.md")],
         no_prompt_templates: false,
       })
@@ -1760,6 +1968,7 @@ mod tests {
       Command::Compat(CompatArgs {
         target: "my-pkg".to_string(),
         project: false,
+        trust_store: None,
         json: false,
       })
     );
@@ -1769,6 +1978,7 @@ mod tests {
       Command::Compat(CompatArgs {
         target: "./path/to/pkg".to_string(),
         project: true,
+        trust_store: None,
         json: true,
       })
     );

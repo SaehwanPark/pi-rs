@@ -8,21 +8,17 @@
 use std::path::Path;
 
 use pi_rs_compat::{
-  scan::{Discovery, Trust},
+  scan::Trust,
   skill::{self, SkillWarning},
 };
 
-use crate::cli::SkillsArgs;
+use crate::{cli::SkillsArgs, trust};
 
 /// Show what a model would be offered: the listing, the control prompt, or one skill's
 /// body — and report the skills that were skipped.
 pub fn execute(args: SkillsArgs) -> Result<(), String> {
   let cwd = std::env::current_dir().map_err(|error| format!("current directory: {error}"))?;
-  let discovery = if args.project {
-    Discovery::new(cwd).trusted()
-  } else {
-    Discovery::new(cwd)
-  };
+  let discovery = trust::discovery(cwd, args.project, args.trust_store.as_deref())?;
   let options = skill::SkillOptions {
     extra_skills: args.skill_paths,
   };

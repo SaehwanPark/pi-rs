@@ -214,6 +214,8 @@ High-resolution historical execution.
 
 A journal line carries an inline budget. Above it, whole fields move to the session's content-addressed blob store and the line keeps a bounded preview naming the reference and the original size, plus an `externalized` record beside it so a program can follow the pointer without parsing prose. Envelope bookkeeping and pointer-shaped fields (`*_id`, `*_ref`, `hash`, a `blob` record) are never elided: a line that cannot be attributed, or a pointer that cannot be followed, is worse than a long line. Redaction runs first, so the bytes that leave the line are already sanitized.
 
+Blob payload compression is optional and disabled by default. When enabled, the store prefers raw Deflate only when it reduces the logical payload; the persisted `BlobRef` records the encoding suffix while its hash and size remain those of the redacted uncompressed bytes. Existing raw references remain readable, and the append-only JSONL journal itself is never compressed so tail recovery, inspection, and export remain plain-file operations.
+
 Possible layout:
 
 ```text
@@ -469,7 +471,11 @@ Rules:
 - discovery is lazy or filtered;
 - do not inject all MCP schemas into every prompt;
 - isolate protocol-version handling in the MCP layer;
-- prefer semantic resource references over permanent prompt copying.
+- prefer semantic resource references over permanent prompt copying;
+- stdio and the bounded Streamable HTTP adapter are supported; HTTP POST responses are
+  bounded, JSON/SSE response ids are checked, session headers are carried, and protocol-owned
+  headers cannot be overridden;
+- long-lived server push and cancellation-aware blocked HTTP reads remain deferred.
 
 ## 15. MCP server / worker mode
 
@@ -551,7 +557,7 @@ Priority order:
 1. skills;
 2. prompts;
 3. package manifests/discovery;
-4. package install;
+4. package install (bounded explicit local copy; remote/dependency execution deferred);
 5. session import/export;
 6. extension tools/commands;
 7. selected lifecycle events;
@@ -607,7 +613,10 @@ All durable trace output should pass through redaction policy before persistence
 
 Raw provider payload storage must be opt-in.
 
-Project-local config must respect trust boundaries.
+Project-local config must respect trust boundaries. Compatibility readers receive an
+explicit caller-owned `Discovery::trust`; `pi-rs trust` persists exact canonical project
+scopes in a private, schema-versioned file, but no reader infers trust from the files it
+would activate.
 
 Potentially dangerous behavior includes:
 

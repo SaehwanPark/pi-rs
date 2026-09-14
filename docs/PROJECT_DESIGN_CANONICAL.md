@@ -473,6 +473,12 @@ blobs/
 tool-results/
 ```
 
+Blob payload compression is an optional storage policy, disabled by default. The
+append-only JSONL trace remains plain and appendable; only content-addressed payload
+bytes may use a recorded encoding such as Deflate. A compressed reference keeps the
+hash and size of the redacted logical bytes, so old raw references remain readable and
+redaction still precedes hashing and encoding.
+
 The runtime should be able to reconstruct what happened without loading every large payload into active memory.
 
 ---
@@ -841,6 +847,9 @@ This should not be required for the initial implementation.
 MCP should be a first-party interoperability subsystem.
 
 MCP capabilities should normalize into the same internal tool abstraction used by native tools and extensions.
+The client supports lazy stdio and bounded Streamable HTTP POST activation: JSON or matching
+response-SSE, session-id propagation, bounded bodies, and JSON-RPC id validation. Long-lived
+server push and cancellation-aware network reads remain optional future work.
 
 Conceptually:
 
@@ -1660,7 +1669,10 @@ Trust-sensitive capabilities include:
 - writing checkpoints outside normal locations;
 - enabling custom native extensions.
 
-Global and project configuration should have explicit precedence and trust rules.
+Global and project configuration should have explicit precedence and trust rules. Compatibility
+readers take trust as a caller-owned input, and `pi-rs trust` records canonical project scopes
+in a private, schema-versioned store; no project file can grant its own trust. The current
+interactive resolver remains deliberately explicit rather than guessing on `NeedsUser`.
 
 ---
 

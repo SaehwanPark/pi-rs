@@ -153,15 +153,18 @@ Implemented so far: `pi-rs skills [--project]` reads the skill locations Pi read
 per pair of lines, on stdout. Every file it skipped, and the reason, goes to stderr, so a
 pipe gets names and nothing else. Project locations are read only with `--project`: a
 skill is instructions for the model, and a checkout should not be able to supply them
-unasked.
+unasked. Pass `--trust-store <dir>` to consult the durable, exact-scope `trust.json`
+record before project discovery; a recorded denial wins over the one-shot flag.
 
 `pi-rs prompts [--project]` does the same for Pi's prompt templates, and
 `pi-rs prompt [--project] <name> [arguments…]` expands one — `$1`, `$@`, `${1:-default}`,
 `${@:N:L}` — and prints only the prompt, so a template written for Pi is usable here before
 any session knows how to invoke one. Package manifests/discovery and per-surface
 compatibility diagnostics are available through `pi-rs packages` and `pi-rs compat`.
-Pi session import/export is available as a partial, loss-reporting adapter; project package
-installation and executable extension compatibility remain deferred.
+`pi-rs packages install <local-directory>` provides a bounded local copy path; remote package
+resolution, dependency execution, and executable extension compatibility remain deferred.
+The `pi-rs trust` command records explicit project decisions without reading project content;
+its `--store` directory can be passed to discovery commands with `--trust-store`.
 
 Priority targets:
 

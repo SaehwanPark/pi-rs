@@ -1,20 +1,13 @@
 //! The `compat` subcommand: inspect an artifact or package for Pi compatibility.
 
-use pi_rs_compat::{
-  compat::{self, CompatReport},
-  scan::Discovery,
-};
+use pi_rs_compat::compat::{self, CompatReport};
 
-use crate::cli::CompatArgs;
+use crate::{cli::CompatArgs, trust};
 
 /// Run compatibility inspection on a target artifact or package.
 pub fn execute(args: CompatArgs) -> Result<(), String> {
   let cwd = std::env::current_dir().map_err(|error| format!("current directory: {error}"))?;
-  let discovery = if args.project {
-    Discovery::new(cwd).trusted()
-  } else {
-    Discovery::new(cwd)
-  };
+  let discovery = trust::discovery(cwd, args.project, args.trust_store.as_deref())?;
 
   let report = compat::inspect_target(&args.target, &discovery)?;
 

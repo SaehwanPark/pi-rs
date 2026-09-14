@@ -24,7 +24,7 @@
 
 use serde_json::Value;
 
-use pi_rs_core::{BlobRef, ExternalizedField};
+use pi_rs_core::ExternalizedField;
 
 use crate::{blob::BlobStore, error::StoreError};
 
@@ -98,7 +98,8 @@ pub fn bound(
     // The reference is derived from the bytes, so the bounded form is knowable
     // before anything is written. Deciding first means a spill that is rejected
     // for futility does not leave unreferenced bytes behind.
-    let reference = BlobRef::for_bytes(text.as_bytes(), None).relative_path();
+    let blob = blobs.reference_for(text.as_bytes(), None)?;
+    let reference = blob.relative_path();
     let kept = format!(
       "{preview}\u{2026} [stored {} bytes in {}, {} bytes shown]",
       text.len(),
@@ -266,6 +267,20 @@ mod tests {
     })
   }
 
+  fn compressed_fixture() -> Result<Fixture, StoreError> {
+    let temp = TempDir::new("payload-bounding-compressed");
+    let layout = StateLayout::new(temp.path());
+    let session = pi_rs_core::SessionId::new();
+    Ok(Fixture {
+      blobs: BlobStore::for_session_with_compression(
+        &layout,
+        &session,
+        pi_rs_core::BlobCompression::Deflate,
+      )?,
+      _temp: temp,
+    })
+  }
+
   #[test]
   fn a_line_inside_its_budget_is_left_alone() {
     let fixture = fixture().unwrap();
@@ -311,6 +326,22 @@ mod tests {
     assert_eq!(spilled[0].reference, blob.relative_path());
     assert_eq!(fixture.blobs.get(&blob).unwrap(), output.as_bytes());
     assert!(fixture.blobs.verify(&blob).unwrap());
+  }
+
+  #[test]
+  fn a_compressed_spill_keeps_the_encoded_reference_and_logical_recovery() {
+    let fixture = compressed_fixture().unwrap();
+    let output = "compressible output ".repeat(4 * 1024);
+    let mut line = json!({"type": "tool_completed", "output": output});
+    let spilled = bound(&mut line, &fixture.blobs, 1024, bytes).unwrap();
+
+    assert_eq!(spilled.len(), 1);
+    assert!(spilled[0].reference.ends_with(".deflate"));
+    assert_eq!(
+      fixture.blobs.get_relative(&spilled[0].reference).unwrap(),
+      output.as_bytes()
+    );
+    assert!(bytes(&line).unwrap() <= 1024);
   }
 
   #[test]

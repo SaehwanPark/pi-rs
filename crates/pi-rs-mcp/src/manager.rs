@@ -12,7 +12,7 @@ use crate::{
   client::McpClient,
   error::McpError,
   tool::McpTool,
-  transport::{McpTransport, StdioTransport},
+  transport::{HttpTransport, McpTransport, StdioTransport},
 };
 
 /// Status report for an MCP server.
@@ -32,6 +32,16 @@ pub struct McpManager {
   clients: BTreeMap<String, Arc<McpClient>>,
   active_tools: BTreeMap<String, Vec<McpTool>>,
   first_use_latencies: BTreeMap<String, Duration>,
+}
+
+fn redact_url(url: &str) -> String {
+  if let Some((base, _)) = url.split_once('?') {
+    return format!("{base}?[redacted]");
+  }
+  if let Some((base, _)) = url.split_once('#') {
+    return format!("{base}#[redacted]");
+  }
+  url.to_string()
 }
 
 impl McpManager {
@@ -84,7 +94,11 @@ impl McpManager {
           .map(|d| d.as_millis() as u64);
         McpServerStatus {
           name: cfg.name.clone(),
-          command: cfg.command.clone(),
+          command: cfg
+            .url
+            .as_deref()
+            .map(redact_url)
+            .unwrap_or_else(|| cfg.command.clone()),
           enabled: cfg.enabled,
           active,
           tool_count,
@@ -112,8 +126,16 @@ impl McpManager {
 
     let start = Instant::now();
 
-    let transport = StdioTransport::spawn(&config.command, &config.args, &config.env)?;
-    let client = Arc::new(McpClient::new(Arc::new(transport)));
+    let transport: Arc<dyn McpTransport> = if let Some(url) = &config.url {
+      Arc::new(HttpTransport::new(url.clone(), config.headers.clone())?)
+    } else {
+      Arc::new(StdioTransport::spawn(
+        &config.command,
+        &config.args,
+        &config.env,
+      )?)
+    };
+    let client = Arc::new(McpClient::new(transport));
 
     // Perform handshake and negotiate protocol
     client.initialize()?;
@@ -201,6 +223,76 @@ mod tests {
   use crate::transport::MockTransport;
   use pi_rs_core::Tool;
   use serde_json::json;
+  use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    thread,
+  };
+
+  #[test]
+  fn test_manager_selects_lazy_http_transport() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind HTTP fixture");
+    let address = listener.local_addr().expect("HTTP fixture address");
+    let server = thread::spawn(move || {
+      for _ in 0..3 {
+        let (mut stream, _) = listener.accept().expect("accept HTTP request");
+        let mut request = Vec::new();
+        loop {
+          let mut byte = [0u8; 1];
+          stream.read_exact(&mut byte).expect("read HTTP headers");
+          request.push(byte[0]);
+          if request.ends_with(b"\r\n\r\n") {
+            break;
+          }
+        }
+        let header_text = String::from_utf8_lossy(&request);
+        let content_length = header_text
+          .lines()
+          .find_map(|line| {
+            line
+              .strip_prefix("Content-Length:")
+              .or_else(|| line.strip_prefix("content-length:"))
+          })
+          .and_then(|value| value.trim().parse::<usize>().ok())
+          .unwrap_or(0);
+        let mut body = vec![0; content_length];
+        stream.read_exact(&mut body).expect("read HTTP body");
+        let body = String::from_utf8_lossy(&body);
+        let (status, response) = if body.contains("initialize") {
+          (
+            "200 OK",
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"http-fixture","version":"1"}}}"#,
+          )
+        } else if body.contains("notifications/initialized") {
+          ("202 Accepted", "")
+        } else {
+          (
+            "200 OK",
+            r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"search","description":"search","inputSchema":{"type":"object"}}]}}"#,
+          )
+        };
+        let response_text = format!(
+          "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{response}",
+          response.len()
+        );
+        stream
+          .write_all(response_text.as_bytes())
+          .expect("write HTTP response");
+        stream.flush().expect("flush HTTP response");
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+      }
+    });
+
+    let url = format!("http://{address}/mcp");
+    let config = McpServerConfig::new("remote", "").with_url(url.clone());
+    let mut manager = McpManager::new(vec![config]);
+    let tools = manager
+      .enable_server("remote")
+      .expect("HTTP activation succeeds");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(manager.statuses()[0].command, url);
+    server.join().unwrap();
+  }
 
   #[test]
   fn test_manager_lazy_discovery() {

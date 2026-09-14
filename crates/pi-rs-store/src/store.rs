@@ -27,7 +27,7 @@ use pi_rs_core::{
   session::{
     SessionCheckpointRecord, SessionHeader, SessionMessage, SessionRecord, SessionSummary,
   },
-  trace::{BlobRef, RawPayloadCapture, TraceRetention},
+  trace::{BlobCompression, BlobRef, RawPayloadCapture, TraceRetention},
 };
 
 use crate::{
@@ -56,6 +56,8 @@ pub struct WritePolicy {
   /// per line rather than per field because the unit a reader pays for — `grep`,
   /// `tail`, a resume that only needs the last few events — is the line.
   pub inline_threshold_bytes: u64,
+  /// Optional encoding preference for payload bytes behind blob references.
+  pub compression: BlobCompression,
 }
 
 impl Default for WritePolicy {
@@ -64,6 +66,7 @@ impl Default for WritePolicy {
       redaction: RedactionPolicy::default(),
       raw_payload: RawPayloadCapture::Disabled,
       inline_threshold_bytes: DEFAULT_INLINE_THRESHOLD_BYTES,
+      compression: BlobCompression::None,
     }
   }
 }
@@ -80,6 +83,7 @@ impl WritePolicy {
       redaction: redaction.clone(),
       raw_payload: retention.raw_payload,
       inline_threshold_bytes: retention.inline_threshold_bytes,
+      compression: retention.compression,
     }
   }
 }
@@ -145,6 +149,11 @@ impl Store {
     self.layout.root()
   }
 
+  /// Open the durable trust decisions for this state root.
+  pub fn trust_store(&self) -> Result<crate::FileTrustStore, StoreError> {
+    crate::FileTrustStore::open(self.root())
+  }
+
   /// Start a new session.
   pub fn begin(&self, header: SessionHeader) -> Result<Session, StoreError> {
     StateLayout::validate_session_id(&header.session_id)?;
@@ -179,8 +188,12 @@ impl Store {
 
   fn session(&self, header: SessionHeader, log: SessionLog, journal: TraceJournal) -> Session {
     Session {
-      blobs: BlobStore::for_session(&self.layout, &header.session_id)
-        .expect("blob directory was created with the session"),
+      blobs: BlobStore::for_session_with_compression(
+        &self.layout,
+        &header.session_id,
+        self.policy.compression,
+      )
+      .expect("blob directory was created with the session"),
       header,
       layout: self.layout.clone(),
       log,
@@ -248,7 +261,7 @@ impl Store {
   }
 
   pub fn blobs(&self, session: &SessionId) -> Result<BlobStore, StoreError> {
-    BlobStore::for_session(&self.layout, session)
+    BlobStore::for_session_with_compression(&self.layout, session, self.policy.compression)
   }
 
   /// Total bytes held under the sessions directory.
@@ -552,7 +565,7 @@ mod tests {
     },
     ids::{EventId, ToolCallId, TraceId, uuidv7},
     session::{SESSION_SCHEMA_VERSION, SessionEpochRecord},
-    trace::TraceRetention,
+    trace::{BlobCompression, TraceRetention},
   };
 
   use crate::{StateLayout, tmp::TempDir};
@@ -1087,6 +1100,46 @@ mod tests {
   }
 
   #[test]
+  fn configured_compression_redacts_before_encoding_and_recovers_logical_bytes() {
+    let tmp = TempDir::new("store-compression-redaction");
+    let policy = WritePolicy {
+      compression: BlobCompression::Deflate,
+      redaction: RedactionPolicy {
+        literals: vec!["secret-value".into()],
+        scan_environment: false,
+        ..RedactionPolicy::default()
+      },
+      ..WritePolicy::default()
+    };
+    let opened = Store::open(tmp.path(), policy).unwrap();
+    let id = SessionId::from_string(uuidv7());
+    let session = opened.begin(header(&id)).unwrap();
+    let blob = session
+      .put_recovery_blob(format!("secret-value {}", "repeat ".repeat(2_000)).as_bytes())
+      .unwrap();
+    let encoded = std::fs::read(session.blobs().path_for(&blob)).unwrap();
+
+    assert_eq!(blob.compression, BlobCompression::Deflate);
+    assert!(
+      !encoded
+        .windows("secret-value".len())
+        .any(|window| window == b"secret-value")
+    );
+    let recovered = session.blobs().get(&blob).unwrap();
+    assert!(
+      String::from_utf8(recovered)
+        .unwrap()
+        .starts_with("[redacted:field]")
+    );
+
+    let public = opened.blobs(&id).unwrap();
+    let public_blob = public
+      .put(&b"public repeated payload ".repeat(256), None)
+      .unwrap();
+    assert_eq!(public_blob.compression, BlobCompression::Deflate);
+  }
+
+  #[test]
   fn listing_is_cheap_and_details_are_detailed() {
     let tmp = TempDir::new("store-details");
     let opened = store(&tmp);
@@ -1182,6 +1235,7 @@ mod tests {
     );
     assert_eq!(derived.inline_threshold_bytes, 64);
     assert!(derived.raw_payload.is_enabled());
+    assert_eq!(derived.compression, BlobCompression::None);
     assert_eq!(derived.redaction, RedactionPolicy::default());
 
     let tmp = TempDir::new("store-threshold");
