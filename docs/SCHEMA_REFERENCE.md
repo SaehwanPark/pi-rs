@@ -1,9 +1,14 @@
-# Schema reference: events, session records, provenance
+# Schema reference: events, session records, provenance (historical snapshot: 2026-09-08)
 
-This document describes the schemas **as the code defines them today**. It was written
-from `grep` output and `Read`, not from the slice spec's recollection. Where the slice
-spec (`docs/SLICE_SCHEMAS.md`) disagreed with the repository, the repository won and the
-mismatch is recorded in place.
+> **Historical snapshot.** This document describes the schemas and producer inventory as
+> audited on 2026-09-08. Later runtime producers and compatibility work make some details
+> below stale; use [`docs/COMPACT_EVENT_AUDIT.md`](COMPACT_EVENT_AUDIT.md),
+> [`docs/IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md), and the source for current
+> status.
+
+It was written from `grep` output and `Read`, not from the slice spec's recollection. Where
+the slice spec (`docs/SLICE_SCHEMAS.md`) disagreed with the repository at that time, the
+repository won and the mismatch is recorded in place.
 
 ## Method and scope
 
