@@ -540,6 +540,7 @@ dependencies = [
 name = "pi-rs-compat"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "tempfile",
 ]
 
@@ -561,6 +562,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "ureq",
 ]
 
 [[package]]

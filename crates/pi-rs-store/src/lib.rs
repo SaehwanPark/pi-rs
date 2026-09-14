@@ -49,6 +49,7 @@ mod retention;
 mod session_log;
 mod store;
 pub mod tmp;
+mod trust;
 
 /// Reading a Pi session file. Exported as a module: the importer is a surface, not a detail
 /// of the store's own formats.
@@ -63,6 +64,7 @@ pub use retention::{DEFAULT_KEEP_NEWEST, RetentionReport, session_started_ms};
 pub use session_log::{RestoredSession, SessionLog, restore};
 pub use store::{DEFAULT_INLINE_THRESHOLD_BYTES, Payload, Session, Store, WritePolicy};
 pub use tmp::TempDir;
+pub use trust::{FileTrustStore, TRUST_SCHEMA_VERSION};
 
 /// Schema version of this crate's on-disk layout.
 ///

@@ -149,6 +149,11 @@ impl Store {
     self.layout.root()
   }
 
+  /// Open the durable trust decisions for this state root.
+  pub fn trust_store(&self) -> Result<crate::FileTrustStore, StoreError> {
+    crate::FileTrustStore::open(self.root())
+  }
+
   /// Start a new session.
   pub fn begin(&self, header: SessionHeader) -> Result<Session, StoreError> {
     StateLayout::validate_session_id(&header.session_id)?;

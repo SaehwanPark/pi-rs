@@ -471,7 +471,11 @@ Rules:
 - discovery is lazy or filtered;
 - do not inject all MCP schemas into every prompt;
 - isolate protocol-version handling in the MCP layer;
-- prefer semantic resource references over permanent prompt copying.
+- prefer semantic resource references over permanent prompt copying;
+- stdio and the bounded Streamable HTTP adapter are supported; HTTP POST responses are
+  bounded, JSON/SSE response ids are checked, session headers are carried, and protocol-owned
+  headers cannot be overridden;
+- long-lived server push and cancellation-aware blocked HTTP reads remain deferred.
 
 ## 15. MCP server / worker mode
 
@@ -553,7 +557,7 @@ Priority order:
 1. skills;
 2. prompts;
 3. package manifests/discovery;
-4. package install;
+4. package install (bounded explicit local copy; remote/dependency execution deferred);
 5. session import/export;
 6. extension tools/commands;
 7. selected lifecycle events;
@@ -609,7 +613,10 @@ All durable trace output should pass through redaction policy before persistence
 
 Raw provider payload storage must be opt-in.
 
-Project-local config must respect trust boundaries.
+Project-local config must respect trust boundaries. Compatibility readers receive an
+explicit caller-owned `Discovery::trust`; `pi-rs trust` persists exact canonical project
+scopes in a private, schema-versioned file, but no reader infers trust from the files it
+would activate.
 
 Potentially dangerous behavior includes:
 

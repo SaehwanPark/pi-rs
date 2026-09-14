@@ -91,8 +91,9 @@ it by name (`pi-rs skills --show <name>`, which prints the body with the frontma
 removed) is the explicit invocation that flag reserves for the user.
 `pi-rs skills --control-prompt` prints exactly what a session would send, empty stdout
 when there is nothing to offer — and only global locations reach a session, because the
-workspace's own skill files need a trust decision `run` does not have; `--project` with
-the `skills` command stays how one is read.
+workspace's own skill files need a trust decision `run` does not have. Discovery commands
+accept `--trust-store <dir>` to consult durable canonical project scopes; an explicit
+`--project` is a one-shot grant for an unknown scope, but a recorded denial still wins.
 
 Package-local skills from discovered packages and `--skill <path>` CLI options are supported. The `skills` array in settings is deferred.
 
@@ -139,16 +140,19 @@ and `--no-prompt-templates` are supported. The `prompts` array in settings is de
 ## 7. Packages
 
 Support Pi-style package discovery and installation as early as practical. Discovery and
-surface diagnostics are supported; the install/update path remains a roadmap item and must
-not be represented as available until its source, trust, and dependency-execution contract
-is implemented.
+surface diagnostics are supported, and `pi-rs packages install <local-directory>` now copies
+an explicit local package into the global or `--project` package root without running
+scripts. npm/git/HTTP sources, dependency installation, update/remove settings, and
+extension execution remain deferred; the surface therefore stays `Partial`.
 
 Goals:
 
 - recognize compatible package manifests;
-- install package dependencies when required;
+- install an explicit local package directory without following symlinks or running scripts;
 - expose contained skills/prompts/extensions;
-- report unsupported package surfaces clearly.
+- report unsupported package surfaces clearly;
+- leave remote source resolution and dependency installation explicit as unsupported until
+  their subprocess/network/trust contract is implemented.
 
 A package should not be considered incompatible merely because one optional feature is unsupported.
 
@@ -170,7 +174,8 @@ Package compatibility
 
 `pi-rs packages [--project]` scans, in order: `$HOME/.pi/agent/packages`,
 `$HOME/.pi/packages`, then `<ancestor>/.pi/packages` from the working directory up
-to the git root. Discovery is non-recursive at each package root: every child
+to the git root. `--trust-store <dir>` can resolve the project scope before those
+locations are read. Discovery is non-recursive at each package root: every child
 directory holding a `package.json` is a package candidate. A package declares its
 identity (`name`, `version`, `description`) and contained surfaces (`pi.skills`,
 `pi.prompts`, `extensions`).
@@ -178,9 +183,11 @@ identity (`name`, `version`, `description`) and contained surfaces (`pi.skills`,
 When a package declares no explicit skill or prompt paths, standard conventions apply:
 `<package>/skills/` or `<package>/SKILL.md` is exposed for skills, and `<package>/prompts/`
 for prompt templates. Project package locations are read only when the project is trusted
-(`--project`), preserving the trust boundary. Duplicate package names resolve to the
-first package found. Unsupported surfaces (such as `extensions` requiring the Node host)
-produce per-surface diagnostics without rejecting the package.
+(`--project`), preserving the trust boundary. Manifest surface paths must be relative and
+contained within the package; absolute, parent-traversing, or outward-symlink paths are
+reported and not activated. Duplicate package names resolve to the first package found.
+Unsupported surfaces (such as `extensions` requiring the Node host) produce per-surface
+diagnostics without rejecting the package.
 
 `pi-rs packages --show <name>` displays detailed surface status and contained locations.
 
@@ -365,7 +372,10 @@ Provider normalization should preserve:
 
 ## 13. MCP compatibility
 
-MCP version handling should remain isolated in the MCP adapter.
+MCP version handling should remain isolated in the MCP adapter. Stdio and the bounded
+Streamable HTTP transport are supported; HTTP responses are JSON or matching-response SSE,
+with session headers and bounded bodies. Long-lived server push and cancellation-aware HTTP
+reads remain deferred.
 
 Requirements:
 

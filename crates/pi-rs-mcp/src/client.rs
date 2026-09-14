@@ -1,8 +1,13 @@
 //! High-level MCP client handling handshake, capabilities, and tool dispatch.
 
-use std::sync::{Arc, Mutex};
+use std::{
+  collections::HashSet,
+  sync::{Arc, Mutex},
+};
 
 use serde_json::{Value, json};
+
+const MAX_TOOL_LIST_PAGES: usize = 1_024;
 
 use crate::{
   error::McpError,
@@ -62,12 +67,14 @@ impl McpClient {
         ))
       })?;
 
+    *self.negotiated_version.lock().unwrap() = Some(negotiated.to_string());
+    self.transport.set_protocol_version(negotiated);
+
     // Handshake completion notification
     self.transport.notify("notifications/initialized", None)?;
 
     *self.server_info.lock().unwrap() = Some(init_result.server_info.clone());
     *self.server_capabilities.lock().unwrap() = Some(init_result.capabilities.clone());
-    *self.negotiated_version.lock().unwrap() = Some(negotiated.to_string());
 
     Ok(init_result)
   }
@@ -76,8 +83,9 @@ impl McpClient {
   pub fn list_tools(&self) -> Result<Vec<McpToolDefinition>, McpError> {
     let mut all_tools = Vec::new();
     let mut cursor: Option<String> = None;
+    let mut seen_cursors = HashSet::new();
 
-    loop {
+    for page_index in 0..MAX_TOOL_LIST_PAGES {
       let params = cursor.as_ref().map(|c| json!({ "cursor": c }));
       let res_val = self.transport.call("tools/list", params)?;
       let page: ListToolsResult = serde_json::from_value(res_val)
@@ -86,14 +94,22 @@ impl McpClient {
       all_tools.extend(page.tools);
       if let Some(next) = page.next_cursor {
         if !next.is_empty() {
+          if !seen_cursors.insert(next.clone()) {
+            return Err(McpError::Protocol(format!(
+              "MCP tools/list repeated cursor after page {}",
+              page_index + 1
+            )));
+          }
           cursor = Some(next);
           continue;
         }
       }
-      break;
+      return Ok(all_tools);
     }
 
-    Ok(all_tools)
+    Err(McpError::Protocol(format!(
+      "MCP tools/list exceeded {MAX_TOOL_LIST_PAGES} pages"
+    )))
   }
 
   /// Call an MCP tool on the server.
@@ -142,6 +158,21 @@ impl McpClient {
 mod tests {
   use super::*;
   use crate::transport::MockTransport;
+
+  #[test]
+  fn repeated_tools_cursor_is_rejected() {
+    let mock = Arc::new(MockTransport::new());
+    mock.on(
+      "tools/list",
+      json!({
+        "tools": [],
+        "nextCursor": "same"
+      }),
+    );
+    let client = McpClient::new(mock);
+    let error = client.list_tools().unwrap_err();
+    assert!(format!("{error}").contains("repeated cursor"));
+  }
 
   #[test]
   fn test_client_handshake_and_tools() {

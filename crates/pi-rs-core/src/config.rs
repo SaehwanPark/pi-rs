@@ -12,7 +12,10 @@
 //!   key by default. A literal key is accepted for local servers only, and
 //!   config serialization never emits one.
 
-use std::collections::BTreeMap;
+use std::{
+  collections::{BTreeMap, HashSet},
+  fmt,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -214,9 +217,10 @@ pub struct RuntimeConfig {
 }
 
 /// Configuration for an external MCP server.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerConfig {
   pub name: String,
+  /// Stdio command. Required when `url` is absent.
   pub command: String,
   #[serde(default)]
   pub args: Vec<String>,
@@ -226,6 +230,29 @@ pub struct McpServerConfig {
   pub enabled: bool,
   #[serde(default)]
   pub read_only_tools: Vec<String>,
+  /// Streamable HTTP endpoint. When present, no child process is spawned.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub url: Option<String>,
+  /// Additional HTTP headers for a network MCP endpoint.
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub headers: BTreeMap<String, String>,
+}
+
+impl fmt::Debug for McpServerConfig {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let header_names: Vec<&str> = self.headers.keys().map(String::as_str).collect();
+    formatter
+      .debug_struct("McpServerConfig")
+      .field("name", &self.name)
+      .field("command", &self.command)
+      .field("args", &self.args)
+      .field("env", &self.env.keys().collect::<Vec<_>>())
+      .field("enabled", &self.enabled)
+      .field("read_only_tools", &self.read_only_tools)
+      .field("url", &self.url.as_deref().map(redact_url))
+      .field("header_names", &header_names)
+      .finish()
+  }
 }
 
 impl McpServerConfig {
@@ -237,6 +264,8 @@ impl McpServerConfig {
       env: BTreeMap::new(),
       enabled: false,
       read_only_tools: Vec::new(),
+      url: None,
+      headers: BTreeMap::new(),
     }
   }
 
@@ -253,6 +282,20 @@ impl McpServerConfig {
   pub fn with_enabled(mut self, enabled: bool) -> Self {
     self.enabled = enabled;
     self
+  }
+
+  pub fn with_url(mut self, url: impl Into<String>) -> Self {
+    self.url = Some(url.into());
+    self
+  }
+
+  pub fn with_headers(mut self, headers: BTreeMap<String, String>) -> Self {
+    self.headers = headers;
+    self
+  }
+
+  pub fn is_network(&self) -> bool {
+    self.url.is_some()
   }
 }
 
@@ -298,6 +341,49 @@ impl RuntimeConfig {
         return Err(ConfigError(
           "backup model must differ from primary; a self-backup hides failures".into(),
         ));
+      }
+    }
+    let mut mcp_names = HashSet::new();
+    for mcp in &self.mcp_servers {
+      if mcp.name.trim().is_empty() {
+        return Err(ConfigError("MCP server name must not be empty".into()));
+      }
+      if !mcp_names.insert(mcp.name.as_str()) {
+        return Err(ConfigError(format!(
+          "MCP server name '{}' is duplicated",
+          mcp.name
+        )));
+      }
+      if let Some(url) = &mcp.url {
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+          return Err(ConfigError(format!(
+            "MCP server {} URL must start with http:// or https://",
+            mcp.name
+          )));
+        }
+        if url_has_userinfo(url) {
+          return Err(ConfigError(format!(
+            "MCP server {} URL must not contain userinfo credentials",
+            mcp.name
+          )));
+        }
+      } else if mcp.command.trim().is_empty() {
+        return Err(ConfigError(format!(
+          "MCP server {} needs a command or URL",
+          mcp.name
+        )));
+      }
+      for (name, value) in &mcp.headers {
+        if !valid_http_header_name(name)
+          || value.contains('\r')
+          || value.contains('\n')
+          || is_protocol_header(name)
+        {
+          return Err(ConfigError(format!(
+            "MCP server {} has an invalid HTTP header",
+            mcp.name
+          )));
+        }
       }
     }
     for endpoint in &self.endpoints {
@@ -358,8 +444,81 @@ impl RuntimeConfig {
         }
       }
     }
+    if let Some(servers) = value.get_mut("mcp_servers").and_then(|v| v.as_array_mut()) {
+      for server in servers {
+        if let Some(url) = server
+          .get("url")
+          .and_then(|value| value.as_str())
+          .map(str::to_owned)
+        {
+          server["url"] = serde_json::Value::String(redact_url(&url));
+        }
+        if let Some(headers) = server.get_mut("headers").and_then(|v| v.as_object_mut()) {
+          for value in headers.values_mut() {
+            *value = serde_json::Value::String("[redacted]".into());
+          }
+        }
+      }
+    }
     serde_json::to_string_pretty(&value).map_err(|error| ConfigError(error.to_string()))
   }
+}
+
+fn valid_http_header_name(name: &str) -> bool {
+  !name.is_empty()
+    && name.bytes().all(|byte| {
+      byte.is_ascii_alphanumeric()
+        || matches!(
+          byte,
+          b'!'
+            | b'#'
+            | b'$'
+            | b'%'
+            | b'&'
+            | b'\''
+            | b'*'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'|'
+            | b'~'
+        )
+    })
+}
+
+fn is_protocol_header(name: &str) -> bool {
+  matches!(
+    name.to_ascii_lowercase().as_str(),
+    "accept"
+      | "content-type"
+      | "content-length"
+      | "host"
+      | "mcp-session-id"
+      | "mcp-protocol-version"
+  )
+}
+
+fn redact_url(url: &str) -> String {
+  if let Some((base, _)) = url.split_once('?') {
+    return format!("{base}?[redacted]");
+  }
+  if let Some((base, _)) = url.split_once('#') {
+    return format!("{base}#[redacted]");
+  }
+  url.to_string()
+}
+
+fn url_has_userinfo(url: &str) -> bool {
+  let Some((_, authority_and_path)) = url.split_once("://") else {
+    return false;
+  };
+  authority_and_path
+    .split_once('/')
+    .map(|(authority, _)| authority.contains('@'))
+    .unwrap_or_else(|| authority_and_path.contains('@'))
 }
 
 /// Configuration problem, in operator terms.
@@ -461,6 +620,93 @@ mod tests {
     assert!(policy.is_allowed("read"));
     assert!(!policy.is_allowed("exec"));
     assert!(!policy.auto_approve_mutating);
+  }
+
+  #[test]
+  fn network_mcp_config_round_trips_and_requires_safe_headers() {
+    let mut config = sample_config();
+    let server = McpServerConfig::new("remote", "")
+      .with_url("https://mcp.example.test/rpc")
+      .with_headers(BTreeMap::from([(
+        "authorization".into(),
+        "Bearer test".into(),
+      )]));
+    config.mcp_servers.push(server);
+    let json = config.to_json_string().unwrap();
+    let parsed = RuntimeConfig::parse(&json).unwrap();
+    assert_eq!(
+      parsed.mcp_servers[0].url.as_deref(),
+      Some("https://mcp.example.test/rpc")
+    );
+    assert_eq!(parsed.mcp_servers[0].headers["authorization"], "[redacted]");
+    assert!(
+      !json.contains("Bearer test"),
+      "MCP header values must be redacted"
+    );
+
+    let mut invalid = config;
+    invalid.mcp_servers[0]
+      .headers
+      .insert("x\nname".into(), "x".into());
+    assert!(invalid.validate().unwrap_err().0.contains("header"));
+  }
+
+  #[test]
+  fn mcp_config_redacts_url_queries_and_rejects_duplicates_and_protocol_headers() {
+    let mut config = sample_config();
+    config.mcp_servers.push(
+      McpServerConfig::new("remote", "")
+        .with_url("https://mcp.example.test/rpc?token=secret-value"),
+    );
+    let json = config.to_json_string().unwrap();
+    assert!(
+      !json.contains("secret-value"),
+      "MCP URL query leaked: {json}"
+    );
+    assert!(json.contains("https://mcp.example.test/rpc?[redacted]"));
+    let debug = format!("{:?}", config.mcp_servers[0]);
+    assert!(
+      !debug.contains("secret-value"),
+      "MCP Debug leaked URL query: {debug}"
+    );
+
+    let mut duplicate = config.clone();
+    duplicate
+      .mcp_servers
+      .push(McpServerConfig::new("remote", "command"));
+    assert!(duplicate.validate().unwrap_err().0.contains("duplicated"));
+
+    let mut reserved = sample_config();
+    reserved.mcp_servers.push(
+      McpServerConfig::new("reserved", "")
+        .with_url("https://mcp.example.test/rpc")
+        .with_headers(BTreeMap::from([(
+          "MCP-Protocol-Version".into(),
+          "spoof".into(),
+        )])),
+    );
+    assert!(reserved.validate().unwrap_err().0.contains("header"));
+  }
+
+  #[test]
+  fn network_mcp_requires_http_url_or_stdio_command() {
+    let mut config = sample_config();
+    config
+      .mcp_servers
+      .push(McpServerConfig::new("remote", "").with_url("file:///tmp/mcp"));
+    assert!(config.validate().unwrap_err().0.contains("URL"));
+
+    let mut no_endpoint = sample_config();
+    no_endpoint
+      .mcp_servers
+      .push(McpServerConfig::new("missing", ""));
+    assert!(
+      no_endpoint
+        .validate()
+        .unwrap_err()
+        .0
+        .contains("command or URL")
+    );
   }
 
   #[test]

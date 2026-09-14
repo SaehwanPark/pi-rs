@@ -49,7 +49,12 @@
 //! presence. This is the same philosophy as the frontmatter reader: read exactly what
 //! the format documents, surface area for nothing beyond it.
 
-use std::path::{Path, PathBuf};
+use std::{
+  fs, io,
+  path::{Path, PathBuf},
+  process,
+  time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::scan::{self, Discovery, Source, Trust};
 
@@ -102,6 +107,13 @@ pub enum Warning {
   },
   /// A subdirectory in a package location is missing a `package.json` manifest.
   MissingManifest { path: PathBuf },
+  /// A manifest surface path was absolute, escaped with `..`, or resolved through
+  /// a symlink outside the package root, so it was not activated.
+  InvalidSurfacePath {
+    surface: String,
+    path: String,
+    reason: String,
+  },
 }
 
 /// A coarse classification of a JSON value, used in unknown-surface diagnostics.
@@ -195,15 +207,17 @@ impl Package {
         .manifest
         .skill_paths
         .iter()
-        .map(|rel| self.path.join(rel))
+        .filter_map(|rel| safe_manifest_path(&self.path, rel))
         .collect();
     }
-    let skills_dir = self.path.join("skills");
-    if skills_dir.is_dir() {
+    if let Some(skills_dir) = safe_manifest_path(&self.path, "skills")
+      && skills_dir.is_dir()
+    {
       return vec![skills_dir];
     }
-    let skill_md = self.path.join("SKILL.md");
-    if skill_md.is_file() {
+    if let Some(skill_md) = safe_manifest_path(&self.path, "SKILL.md")
+      && skill_md.is_file()
+    {
       return vec![skill_md];
     }
     Vec::new()
@@ -222,11 +236,12 @@ impl Package {
         .manifest
         .prompt_paths
         .iter()
-        .map(|rel| self.path.join(rel))
+        .filter_map(|rel| safe_manifest_path(&self.path, rel))
         .collect();
     }
-    let prompts_dir = self.path.join("prompts");
-    if prompts_dir.is_dir() {
+    if let Some(prompts_dir) = safe_manifest_path(&self.path, "prompts")
+      && prompts_dir.is_dir()
+    {
       return vec![prompts_dir];
     }
     Vec::new()
@@ -239,11 +254,12 @@ impl Package {
         .manifest
         .extension_paths
         .iter()
-        .map(|rel| self.path.join(rel))
+        .filter_map(|rel| safe_manifest_path(&self.path, rel))
         .collect();
     }
-    let extensions_dir = self.path.join("extensions");
-    if extensions_dir.is_dir() {
+    if let Some(extensions_dir) = safe_manifest_path(&self.path, "extensions")
+      && extensions_dir.is_dir()
+    {
       return vec![extensions_dir];
     }
     Vec::new()
@@ -304,6 +320,323 @@ impl PackageScan {
   }
 }
 
+/// Result of an explicit local package installation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledPackage {
+  /// Name from the copied manifest, not a name inferred from the source path.
+  pub name: String,
+  /// Final package directory discovered by the normal package scanner.
+  pub path: PathBuf,
+  /// Whether the destination is project-local rather than global.
+  pub project: bool,
+}
+
+/// Copy a local Pi package into the selected package directory.
+///
+/// This is deliberately narrower than the upstream installer: it accepts only a
+/// local directory, never follows symlinks, never runs package-manager scripts, and
+/// refuses an existing destination. The explicit copy is the user's install action;
+/// activation of project-local package content still requires the caller to provide
+/// a trusted [`Discovery`].
+pub fn install_local(source: &Path, cwd: &Path, project: bool) -> Result<InstalledPackage, String> {
+  let (package_root, containment_root) = if project {
+    let root = fs::canonicalize(crate::scan::project_root(cwd)).map_err(|error| {
+      format!(
+        "cannot resolve project package root '{}': {error}",
+        crate::scan::project_root(cwd).display()
+      )
+    })?;
+    (root.join(".pi/packages"), Some(root))
+  } else {
+    let home = crate::scan::home_dir()
+      .ok_or_else(|| "global package installation needs HOME or USERPROFILE".to_string())?;
+    (home.join(".pi/agent/packages"), None)
+  };
+  install_local_into(source, project, package_root, containment_root)
+}
+
+fn install_local_into(
+  source: &Path,
+  project: bool,
+  package_root: PathBuf,
+  containment_root: Option<PathBuf>,
+) -> Result<InstalledPackage, String> {
+  let source_metadata = fs::symlink_metadata(source).map_err(|error| {
+    format!(
+      "cannot inspect package source {}: {error}",
+      source.display()
+    )
+  })?;
+  if source_metadata.file_type().is_symlink() {
+    return Err(format!(
+      "refusing symlink package source: {}",
+      source.display()
+    ));
+  }
+  if !source_metadata.is_dir() {
+    return Err(format!(
+      "package source {} is not a directory",
+      source.display()
+    ));
+  }
+  let source = fs::canonicalize(source).map_err(|error| {
+    format!(
+      "cannot resolve package source {}: {error}",
+      source.display()
+    )
+  })?;
+
+  let manifest_path = source.join("package.json");
+  let parsed = read(&manifest_path);
+  let fatal = parsed.warnings.iter().any(|warning| {
+    matches!(
+      warning,
+      Warning::Malformed { .. } | Warning::Unreadable { .. }
+    )
+  });
+  if fatal {
+    return Err(format_manifest_warnings(&parsed.warnings));
+  }
+  let name = parsed
+    .manifest
+    .name
+    .as_deref()
+    .map(str::trim)
+    .filter(|name| !name.is_empty())
+    .ok_or_else(|| {
+      format!(
+        "package manifest {} must declare a non-empty name",
+        manifest_path.display()
+      )
+    })?
+    .to_string();
+  let directory_name = install_directory_name(&name)?;
+
+  if let Some(root) = containment_root {
+    ensure_contained_package_root(&root, &package_root)?;
+  } else {
+    fs::create_dir_all(&package_root).map_err(|error| {
+      format!(
+        "cannot create package destination {}: {error}",
+        package_root.display()
+      )
+    })?;
+  }
+  let canonical_package_root = fs::canonicalize(&package_root).map_err(|error| {
+    format!(
+      "cannot resolve package destination {}: {error}",
+      package_root.display()
+    )
+  })?;
+  let destination = package_root.join(directory_name);
+  if fs::symlink_metadata(&destination).is_ok() {
+    return Err(format!(
+      "package destination {} already exists; remove it before installing",
+      destination.display()
+    ));
+  }
+  if source.starts_with(&canonical_package_root) {
+    return Err(format!(
+      "package source {} is already inside destination root {}",
+      source.display(),
+      package_root.display()
+    ));
+  }
+
+  let temporary = temporary_destination(&destination);
+  if temporary.exists() {
+    return Err(format!(
+      "temporary package destination {} already exists",
+      temporary.display()
+    ));
+  }
+  let result = copy_tree(&source, &temporary).and_then(|()| {
+    fs::rename(&temporary, &destination).map_err(|error| {
+      format!(
+        "cannot activate package at {}: {error}",
+        destination.display()
+      )
+    })
+  });
+  if result.is_err() {
+    let _ = fs::remove_dir_all(&temporary);
+  }
+  result.map(|()| InstalledPackage {
+    name,
+    path: destination,
+    project,
+  })
+}
+
+fn ensure_contained_package_root(root: &Path, package_root: &Path) -> Result<(), String> {
+  let relative = package_root.strip_prefix(root).map_err(|_| {
+    format!(
+      "package destination {} is outside project root {}",
+      package_root.display(),
+      root.display()
+    )
+  })?;
+  let mut current = root.to_path_buf();
+  for component in relative.components() {
+    let std::path::Component::Normal(name) = component else {
+      return Err(format!(
+        "package destination {} contains an invalid path component",
+        package_root.display()
+      ));
+    };
+    current.push(name);
+    match fs::symlink_metadata(&current) {
+      Ok(metadata) if metadata.file_type().is_symlink() => {
+        return Err(format!(
+          "project package destination component {} must not be a symlink",
+          current.display()
+        ));
+      }
+      Ok(metadata) if !metadata.is_dir() => {
+        return Err(format!(
+          "project package destination component {} is not a directory",
+          current.display()
+        ));
+      }
+      Ok(_) => {}
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        fs::create_dir(&current).map_err(|error| {
+          format!(
+            "cannot create project package destination {}: {error}",
+            current.display()
+          )
+        })?;
+      }
+      Err(error) => {
+        return Err(format!(
+          "cannot inspect project package destination {}: {error}",
+          current.display()
+        ));
+      }
+    }
+  }
+  let canonical = fs::canonicalize(&current).map_err(|error| {
+    format!(
+      "cannot resolve project package destination {}: {error}",
+      current.display()
+    )
+  })?;
+  let canonical_root = fs::canonicalize(root)
+    .map_err(|error| format!("cannot resolve project root {}: {error}", root.display()))?;
+  if !canonical.starts_with(&canonical_root) {
+    return Err(format!(
+      "project package destination {} escapes project root {}",
+      current.display(),
+      root.display()
+    ));
+  }
+  Ok(())
+}
+
+fn format_manifest_warnings(warnings: &[Warning]) -> String {
+  warnings
+    .iter()
+    .map(|warning| match warning {
+      Warning::Unreadable { path, reason } => format!("{}: {reason}", path.display()),
+      Warning::Malformed { path, reason } => format!("{}: {reason}", path.display()),
+      other => format!("invalid package manifest: {other:?}"),
+    })
+    .collect::<Vec<_>>()
+    .join("; ")
+}
+
+fn install_directory_name(name: &str) -> Result<String, String> {
+  if name == "." || name == ".." || name.contains('\0') {
+    return Err(format!(
+      "package name '{name}' cannot be used as a destination"
+    ));
+  }
+  let directory = name.replace(['/', '\\'], "__");
+  if directory.is_empty() || directory == "." || directory == ".." {
+    return Err(format!(
+      "package name '{name}' cannot be used as a destination"
+    ));
+  }
+  Ok(directory)
+}
+
+fn temporary_destination(destination: &Path) -> PathBuf {
+  let stamp = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map(|duration| duration.as_nanos())
+    .unwrap_or_default();
+  let pid = process::id();
+  PathBuf::from(format!("{}.tmp-{pid}-{stamp}", destination.display()))
+}
+
+fn copy_tree(source: &Path, destination: &Path) -> Result<(), String> {
+  let metadata = fs::symlink_metadata(source)
+    .map_err(|error| format!("cannot inspect {}: {error}", source.display()))?;
+  if metadata.file_type().is_symlink() {
+    return Err(format!(
+      "refusing symlink in package source: {}",
+      source.display()
+    ));
+  }
+  if metadata.is_dir() {
+    fs::create_dir(destination)
+      .map_err(|error| format!("cannot create {}: {error}", destination.display()))?;
+    let mut entries = fs::read_dir(source)
+      .map_err(|error| format!("cannot read {}: {error}", source.display()))?
+      .collect::<Result<Vec<_>, _>>()
+      .map_err(|error| format!("cannot read {}: {error}", source.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+      copy_tree(&entry.path(), &destination.join(entry.file_name()))?;
+    }
+    return Ok(());
+  }
+  if !metadata.is_file() {
+    return Err(format!(
+      "refusing unsupported file type in package source: {}",
+      source.display()
+    ));
+  }
+  copy_regular_file(source, destination)
+}
+
+fn copy_regular_file(source: &Path, destination: &Path) -> Result<(), String> {
+  let mut input_options = fs::OpenOptions::new();
+  input_options.read(true);
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::OpenOptionsExt;
+    input_options.custom_flags(libc::O_NOFOLLOW);
+  }
+  let mut input = input_options.open(source).map_err(|error| {
+    format!(
+      "cannot open {} without following a symlink: {error}",
+      source.display()
+    )
+  })?;
+  if !input
+    .metadata()
+    .map_err(|error| format!("cannot inspect {}: {error}", source.display()))?
+    .is_file()
+  {
+    return Err(format!(
+      "refusing unsupported file type in package source: {}",
+      source.display()
+    ));
+  }
+  let mut output = fs::OpenOptions::new()
+    .write(true)
+    .create_new(true)
+    .open(destination)
+    .map_err(|error| format!("cannot create {}: {error}", destination.display()))?;
+  io::copy(&mut input, &mut output)
+    .map_err(|error| format!("cannot copy {}: {error}", source.display()))?;
+  output
+    .sync_all()
+    .map_err(|error| format!("cannot flush {}: {error}", destination.display()))?;
+  Ok(())
+}
+
 /// Scan the documented package locations.
 ///
 /// Order of discovery:
@@ -347,12 +680,97 @@ pub fn discover(discovery: &Discovery) -> PackageScan {
   scan
 }
 
+pub(crate) fn invalid_manifest_paths(root: &Path, manifest: &Manifest) -> Vec<Warning> {
+  let mut warnings = Vec::new();
+  for (surface, paths) in [
+    ("skills", &manifest.skill_paths),
+    ("prompts", &manifest.prompt_paths),
+    ("extensions", &manifest.extension_paths),
+  ] {
+    for path in paths {
+      if !is_safe_manifest_path(root, path) {
+        warnings.push(Warning::InvalidSurfacePath {
+          surface: surface.to_string(),
+          path: path.clone(),
+          reason: "path is absolute, escapes the package, or resolves through an external symlink"
+            .to_string(),
+        });
+      }
+    }
+  }
+  warnings
+}
+
+pub(crate) fn safe_manifest_path(root: &Path, relative: &str) -> Option<PathBuf> {
+  let path = Path::new(relative);
+  if path.is_absolute()
+    || path.components().any(|component| {
+      matches!(
+        component,
+        std::path::Component::ParentDir
+          | std::path::Component::RootDir
+          | std::path::Component::Prefix(_)
+      )
+    })
+  {
+    return None;
+  }
+  let candidate = root.join(path);
+  if !is_safe_manifest_path(root, relative) {
+    return None;
+  }
+  Some(candidate)
+}
+
+fn is_safe_manifest_path(root: &Path, relative: &str) -> bool {
+  let path = Path::new(relative);
+  if path.is_absolute()
+    || path.components().any(|component| {
+      matches!(
+        component,
+        std::path::Component::ParentDir
+          | std::path::Component::RootDir
+          | std::path::Component::Prefix(_)
+      )
+    })
+  {
+    return false;
+  }
+  let Ok(root) = fs::canonicalize(root) else {
+    return false;
+  };
+  let candidate = root.join(path);
+  let mut existing = candidate.clone();
+  while fs::symlink_metadata(&existing).is_err() {
+    let Some(parent) = existing.parent() else {
+      return false;
+    };
+    if parent == existing {
+      return false;
+    }
+    existing = parent.to_path_buf();
+  }
+  fs::canonicalize(existing)
+    .map(|resolved| resolved.starts_with(&root))
+    .unwrap_or(false)
+}
+
 fn scan_location(
   dir: &Path,
   source: Source,
   seen: &mut std::collections::BTreeMap<String, PathBuf>,
   scan: &mut PackageScan,
 ) {
+  if let Ok(metadata) = fs::symlink_metadata(dir)
+    && metadata.file_type().is_symlink()
+  {
+    scan.warnings.push(Warning::Unreadable {
+      path: dir.to_path_buf(),
+      reason: "refusing to scan a symlinked package location".to_string(),
+    });
+    return;
+  }
+
   let entries = match std::fs::read_dir(dir) {
     Ok(entries) => entries,
     Err(error) => {
@@ -383,6 +801,15 @@ fn scan_location(
   children.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
   for child in children {
+    if let Ok(metadata) = fs::symlink_metadata(&child)
+      && metadata.file_type().is_symlink()
+    {
+      scan.warnings.push(Warning::Unreadable {
+        path: child,
+        reason: "refusing to scan a symlinked package root".to_string(),
+      });
+      continue;
+    }
     if !child.is_dir() {
       continue;
     }
@@ -435,12 +862,14 @@ fn scan_location(
 
     seen.insert(name.clone(), child.clone());
 
-    for w in &parse.warnings {
-      scan.warnings.push(w.clone());
-    }
-
     let version = parse.manifest.version.clone();
     let description = parse.manifest.description.clone();
+    let mut package_warnings = parse.warnings;
+    package_warnings.extend(invalid_manifest_paths(&child, &parse.manifest));
+
+    for warning in &package_warnings {
+      scan.warnings.push(warning.clone());
+    }
 
     scan.packages.push(Package {
       name,
@@ -450,7 +879,7 @@ fn scan_location(
       manifest_path,
       source,
       manifest: parse.manifest,
-      warnings: parse.warnings,
+      warnings: package_warnings,
     });
   }
 }
@@ -1177,8 +1606,111 @@ mod tests {
   }
 
   // -------------------------------------------------------------------------
-  // Package discovery tests
+  // Package installation and discovery tests
   // -------------------------------------------------------------------------
+
+  #[test]
+  fn install_local_copies_global_package_without_running_scripts() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let home = temp.path().join("home");
+    let source = temp.path().join("source");
+    std::fs::create_dir_all(source.join("skills")).expect("create source");
+    std::fs::write(
+      source.join("package.json"),
+      r#"{"name":"local-pkg","scripts":{"postinstall":"touch should-not-exist"}}"#,
+    )
+    .expect("write manifest");
+    std::fs::write(source.join("skills/SKILL.md"), "# skill\n").expect("write skill");
+
+    let installed = install_local_into(&source, false, home.join(".pi/agent/packages"), None)
+      .expect("install package");
+
+    assert_eq!(installed.name, "local-pkg");
+    assert!(!installed.project);
+    assert!(installed.path.join("skills/SKILL.md").is_file());
+    assert!(!installed.path.join("should-not-exist").exists());
+    assert_eq!(
+      discover(&Discovery {
+        home: Some(home),
+        cwd: temp.path().to_path_buf(),
+        trust: Trust::Untrusted,
+      })
+      .named("local-pkg")
+      .expect("installed package discovered")
+      .path,
+      installed.path
+    );
+  }
+
+  #[test]
+  fn install_local_uses_git_root_for_project_destination() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let project = temp.path().join("project");
+    let nested = project.join("src/nested");
+    let source = temp.path().join("source");
+    std::fs::create_dir_all(&nested).expect("create nested cwd");
+    std::fs::create_dir_all(&source).expect("create source");
+    std::fs::create_dir_all(project.join(".git")).expect("create git root");
+    std::fs::write(source.join("package.json"), r#"{"name":"project-pkg"}"#)
+      .expect("write manifest");
+
+    let installed = install_local(&source, &nested, true).expect("install project package");
+    assert_eq!(
+      installed.path,
+      fs::canonicalize(project.join(".pi/packages/project-pkg")).unwrap()
+    );
+    assert!(installed.project);
+    let scan = discover(&Discovery {
+      home: None,
+      cwd: nested,
+      trust: Trust::Trusted,
+    });
+    assert_eq!(
+      scan
+        .named("project-pkg")
+        .map(|pkg| fs::canonicalize(&pkg.path).unwrap()),
+      Some(installed.path.clone())
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn install_local_refuses_symlinked_project_destination() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let project = temp.path().join("project");
+    let outside = temp.path().join("outside");
+    let source = temp.path().join("source");
+    std::fs::create_dir_all(project.join(".git")).expect("git root");
+    std::fs::create_dir_all(&outside).expect("outside");
+    std::fs::create_dir_all(&source).expect("source");
+    std::fs::write(source.join("package.json"), r#"{"name":"pkg"}"#).expect("manifest");
+    std::os::unix::fs::symlink(&outside, project.join(".pi")).expect(".pi symlink");
+
+    let error = install_local(&source, &project, true).expect_err("symlink destination refused");
+    assert!(error.contains("must not be a symlink"), "{error}");
+  }
+
+  #[test]
+  fn install_local_refuses_existing_destination_and_symlink_sources() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let home = temp.path().join("home");
+    let source = temp.path().join("source");
+    std::fs::create_dir_all(&source).expect("create source");
+    std::fs::write(source.join("package.json"), r#"{"name":"pkg"}"#).expect("write manifest");
+
+    let package_root = home.join(".pi/agent/packages");
+    install_local_into(&source, false, package_root.clone(), None).expect("first install");
+    let duplicate =
+      install_local_into(&source, false, package_root, None).expect_err("duplicate refused");
+    assert!(duplicate.contains("already exists"), "{duplicate}");
+    #[cfg(unix)]
+    {
+      let link = temp.path().join("link");
+      std::os::unix::fs::symlink(&source, &link).expect("create source symlink");
+      let error = install_local(&link, temp.path(), false).expect_err("symlink refused");
+      assert!(error.contains("refusing symlink"), "{error}");
+    }
+  }
 
   #[test]
   fn discover_finds_global_and_project_packages_when_trusted() {
@@ -1334,6 +1866,62 @@ mod tests {
 
     assert_eq!(p.skill_locations(), vec![pkg_dir.join("skills")]);
     assert_eq!(p.prompt_locations(), vec![pkg_dir.join("prompts")]);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn conventional_surface_symlinks_outside_package_are_ignored() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let pkg_dir = temp.path().join("pkg");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&pkg_dir).expect("package dir");
+    std::fs::create_dir_all(&outside).expect("outside dir");
+    std::os::unix::fs::symlink(&outside, pkg_dir.join("skills")).expect("skills symlink");
+    std::fs::write(pkg_dir.join("package.json"), r#"{"name":"pkg"}"#).expect("package manifest");
+
+    let package = Package {
+      name: "pkg".to_string(),
+      version: None,
+      description: None,
+      path: pkg_dir.clone(),
+      manifest_path: pkg_dir.join("package.json"),
+      source: Source::Global,
+      manifest: Manifest::default(),
+      warnings: Vec::new(),
+    };
+    assert!(package.skill_locations().is_empty());
+  }
+
+  #[test]
+  fn manifest_surface_paths_cannot_escape_package_root() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let home = temp.path().join("home");
+    let package_root = home.join(".pi/agent/packages/escape");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&package_root).expect("create package");
+    std::fs::create_dir_all(&outside).expect("create outside");
+    std::fs::write(outside.join("SKILL.md"), "outside").expect("write outside");
+    std::fs::write(
+      package_root.join("package.json"),
+      r#"{"name":"escape","pi":{"skills":["../../outside","skills/missing"]}}"#,
+    )
+    .expect("write manifest");
+
+    let scan = discover(&Discovery {
+      home: Some(home),
+      cwd: temp.path().to_path_buf(),
+      trust: Trust::Untrusted,
+    });
+    let package = scan.named("escape").expect("package discovered");
+    assert_eq!(
+      package.skill_locations(),
+      vec![package_root.join("skills/missing")]
+    );
+    assert!(scan.warnings.iter().any(|warning| matches!(
+      warning,
+      Warning::InvalidSurfacePath { surface, path, .. }
+        if surface == "skills" && path == "../../outside"
+    )));
   }
 
   #[test]

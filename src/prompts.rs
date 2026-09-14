@@ -17,11 +17,14 @@ use pi_rs_compat::{
   scan::{Discovery, Trust},
 };
 
-use crate::cli::{PromptArgs, PromptsArgs};
+use crate::{
+  cli::{PromptArgs, PromptsArgs},
+  trust,
+};
 
 /// List the templates a session would offer, and report the ones that were skipped.
 pub fn list(args: PromptsArgs) -> Result<(), String> {
-  let discovery = discovery(args.project)?;
+  let discovery = discovery(args.project, args.trust_store.as_deref())?;
   let options = prompt::PromptOptions {
     extra_templates: args.template_paths,
     no_prompt_templates: args.no_prompt_templates,
@@ -59,7 +62,7 @@ pub fn list(args: PromptsArgs) -> Result<(), String> {
 
 /// Expand one template and print the prompt it becomes.
 pub fn expand(args: PromptArgs) -> Result<(), String> {
-  let discovery = discovery(args.project)?;
+  let discovery = discovery(args.project, args.trust_store.as_deref())?;
   let options = prompt::PromptOptions {
     extra_templates: args.template_paths,
     no_prompt_templates: args.no_prompt_templates,
@@ -83,14 +86,9 @@ pub fn expand(args: PromptArgs) -> Result<(), String> {
   Ok(())
 }
 
-fn discovery(project: bool) -> Result<Discovery, String> {
+fn discovery(project: bool, trust_store: Option<&std::path::Path>) -> Result<Discovery, String> {
   let cwd = std::env::current_dir().map_err(|error| format!("current directory: {error}"))?;
-  let discovery = Discovery::new(cwd);
-  Ok(if project {
-    discovery.trusted()
-  } else {
-    discovery
-  })
+  trust::discovery(cwd, project, trust_store)
 }
 
 /// The decisions the scan made, on stderr.

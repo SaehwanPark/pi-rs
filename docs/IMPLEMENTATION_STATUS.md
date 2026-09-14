@@ -213,9 +213,11 @@ The following items are not blockers for the canonical initial MVP, but remain e
    ordering tests.
 7. A resumed imported session has not been exercised against a live provider; store-level
    restoration proves the resume projection, not a real request.
-8. Project trust is explicit at compatibility-reader call sites, but a persisted interactive
-   trust-decision workflow remains open. MCP network transport, package installation, and
-   the `rkb-rs` integration remain roadmap work.
+8. Project trust is explicit at compatibility-reader call sites, and `pi-rs trust` now
+   persists exact project decisions with fail-closed storage; interactive once/always
+   resolution remains open. The bounded MCP HTTP transport and local package-install path
+   are implemented; remote package resolution/dependency execution and the `rkb-rs`
+   integration remain roadmap work.
 9. Optional trace compression is implemented for content-addressed payload blobs (opt-in
    raw Deflate; plain JSONL remains appendable). Reconstructed-rationale production remains
    unimplemented; no producer may infer hidden chain-of-thought or relabel it as recovered.

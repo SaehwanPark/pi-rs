@@ -9,19 +9,32 @@ use std::path::Path;
 
 use pi_rs_compat::{
   package::{self, Warning},
-  scan::{Discovery, Trust},
+  scan::Trust,
 };
 
-use crate::cli::PackagesArgs;
+use crate::{cli::PackagesArgs, trust};
 
 /// Show what packages were discovered, or inspect one package's detailed surfaces.
 pub fn execute(args: PackagesArgs) -> Result<(), String> {
   let cwd = std::env::current_dir().map_err(|error| format!("current directory: {error}"))?;
-  let discovery = if args.project {
-    Discovery::new(cwd).trusted()
-  } else {
-    Discovery::new(cwd)
-  };
+  if let Some(source) = &args.install {
+    let source_text = source.to_string_lossy();
+    if source_text.starts_with("npm:")
+      || source_text.starts_with("git:")
+      || source_text.starts_with("http://")
+      || source_text.starts_with("https://")
+      || source_text.starts_with("ssh://")
+    {
+      return Err(
+        "remote package sources (npm, git, HTTP, and SSH) are not supported by local install yet"
+          .to_string(),
+      );
+    }
+    let installed = package::install_local(source, &cwd, args.project)?;
+    println!("installed {} {}", installed.name, display(&installed.path));
+    return Ok(());
+  }
+  let discovery = trust::discovery(cwd, args.project, args.trust_store.as_deref())?;
   let scan = package::discover(&discovery);
 
   if let Some(name) = &args.show {
@@ -124,6 +137,11 @@ fn describe(warning: &Warning) -> String {
         display(path)
       )
     }
+    Warning::InvalidSurfacePath {
+      surface,
+      path,
+      reason,
+    } => format!("invalid {surface} path '{path}': {reason}"),
   }
 }
 

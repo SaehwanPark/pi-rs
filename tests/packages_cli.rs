@@ -1,6 +1,8 @@
 //! `pi-rs packages` as a process: listing and inspection on stdout, diagnostics on stderr.
 
-use std::{path::Path, process::Command};
+use std::{fs, path::Path, process::Command};
+
+use tempfile::TempDir;
 
 fn binary() -> &'static str {
   env!("CARGO_BIN_EXE_pi-rs")
@@ -105,4 +107,57 @@ fn packages_help_flag_displays_help() {
   let (stdout, _stderr, success) = run(&["packages", "--help"], fixture_home(), fixture_project());
   assert!(success);
   assert!(stdout.contains("Usage: pi-rs packages"));
+  assert!(stdout.contains("packages install"));
+}
+
+#[test]
+fn packages_install_copies_a_local_package_to_global_home() {
+  let temp = TempDir::new().expect("tempdir");
+  let home = temp.path().join("home");
+  let cwd = temp.path().join("cwd");
+  let source = temp.path().join("source");
+  fs::create_dir_all(source.join("skills")).expect("create source");
+  fs::create_dir_all(&cwd).expect("create cwd");
+  fs::write(
+    source.join("package.json"),
+    r#"{"name":"cli-local","version":"1.0.0","pi":{"skills":["skills"]}}"#,
+  )
+  .expect("write manifest");
+  fs::write(
+    source.join("skills/SKILL.md"),
+    "---\nname: local\ndescription: local\n---\nbody\n",
+  )
+  .expect("write skill");
+  let source_text = source.to_str().expect("utf8 source");
+  let (stdout, stderr, success) = run(
+    &["packages", "install", source_text],
+    home.to_str().unwrap(),
+    cwd.to_str().unwrap(),
+  );
+  assert!(success, "stdout={stdout}\nstderr={stderr}");
+  assert!(stdout.contains("installed cli-local"), "{stdout}");
+  assert!(
+    home
+      .join(".pi/agent/packages/cli-local/package.json")
+      .is_file()
+  );
+  assert!(
+    home
+      .join(".pi/agent/packages/cli-local/skills/SKILL.md")
+      .is_file()
+  );
+}
+
+#[test]
+fn packages_install_rejects_remote_sources_explicitly() {
+  let temp = TempDir::new().expect("tempdir");
+  let cwd = temp.path().join("cwd");
+  fs::create_dir_all(&cwd).expect("create cwd");
+  let (stdout, stderr, success) = run(
+    &["packages", "install", "npm:example"],
+    temp.path().join("home").to_str().unwrap(),
+    cwd.to_str().unwrap(),
+  );
+  assert!(!success, "stdout={stdout}\nstderr={stderr}");
+  assert!(stderr.contains("remote package sources"), "{stderr}");
 }

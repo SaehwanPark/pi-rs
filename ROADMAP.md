@@ -285,7 +285,7 @@ Open in this area, in order:
       included.
 - [x] Add package-local prompts (`manifest.prompt_paths`, conventional `prompts/`),
       `--prompt-template`, and `--no-prompt-templates`. (Settings array remains deferred).
-- [ ] Decide trust somewhere other than the file reader, then pass its answer in.
+- [x] Decide trust somewhere other than the file reader, then pass its answer in (`--project` is an explicit caller-owned one-shot grant; `--trust-store <dir>` resolves durable exact canonical project scopes, with denial winning over the one-shot flag; durable high-risk decisions are recorded by `pi-rs trust` in `FileTrustStore`, while runtime once/always prompting remains deferred).
 - [x] Add the compatibility fixture suite (`tests/compat/` holds skill, prompt, and package
       fixtures; session import/export has targeted CLI coverage and extensions remain deferred).
 
@@ -304,9 +304,10 @@ Open in this area, in order:
       when trusted; deterministic lexicographical sort; first-found-wins duplicate resolution;
       subdirectories missing `package.json` flagged with `Warning::MissingManifest`;
       exposes contained `skill_locations` and `prompt_locations` via manifest or convention;
-      `pi-rs packages [--project] [--show <name>]` CLI command; `tests/compat_packages.rs`:
+      `pi-rs packages [--project] [--trust-store <dir>] [--show <name>]` CLI command;
+      `tests/compat_packages.rs`:
       9 passing fixture-driven tests; `tests/packages_cli.rs`: 6 passing CLI tests).
-- [ ] Implement package install path.
+- [x] Implement package install path (explicit local-directory copy to global/project package roots with atomic staging, symlink/path checks, and no dependency/script execution; npm/git/HTTP/update support remains deferred and compatibility stays Partial).
 - [x] Add `pi-rs compat` prototype (`crates/pi-rs-compat/src/compat.rs`: `inspect_target` inspects
       package manifests, skills, prompts, and extension files with static analysis of `registerTool`,
       `registerCommand`, context hooks, and internal imports; `pi-rs compat [options] <path-or-package>`
@@ -324,7 +325,7 @@ Open in this area, in order:
 
 ### Stage gate
 
-> Skills, prompts, and package discovery gates are passed; package install and extensions are deferred.
+> Skills, prompts, and package discovery gates are passed. The bounded local package-install path is covered; `--trust-store` resolves durable project grants/denials for compatibility discovery; remote source resolution, dependency installation, and extensions remain deferred.
 > `tests/compat_skills.rs` drives fixture skills (discovery, body loading, `disable-model-invocation`,
 > `SKILL.md` frontmatter, project trust gate) — all 8 tests pass.
 > `tests/compat_prompts.rs` drives fixture templates (Pi substitution grammar, argument splitting,
@@ -500,7 +501,7 @@ Open in this area, in order:
 
 - [x] Implement MCP transport abstraction (`McpTransport` trait).
 - [x] Implement stdio transport (`StdioTransport` with child process and JSON-RPC 2.0).
-- [ ] Implement supported network transport.
+- [x] Implement supported network transport (lazy Streamable HTTP POST with bounded JSON/SSE responses, session headers, status/id validation, and config redaction; long-lived push/cancellation remains deferred).
 - [x] Add protocol negotiation (`initialize` handshake and version agreement).
 - [x] Add selected older-version compatibility (`2024-11-05`, `2024-10-07`).
 - [x] Normalize tool schemas (`McpToolDefinition` input schema mapped to tool JSON schema).
@@ -522,9 +523,10 @@ Open in this area, in order:
 
 ### Stage gate
 
-- [x] A configured MCP server can be used without delaying startup (warm startup ~3.2 ms vs <100 ms budget).
+- [x] A configured MCP server can be used without delaying startup (warm startup ~3.2 ms vs <100 ms budget; HTTP construction performs no I/O).
 - [x] Large MCP catalogs do not all enter model context by default (activation is lazy and filtered).
 - [x] MCP tools participate in the same trace/tool lifecycle as native tools (verified via `mcp_integration.rs`).
+- [x] A configured HTTP MCP endpoint is selected lazily and passes initialize/tools-list through the same client (`pi-rs-mcp` manager/transport wire tests); JSON and bounded SSE responses, session headers, notification 202/204, status/id failures, reserved headers, and response limits are covered.
 
 ---
 

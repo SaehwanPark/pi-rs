@@ -26,4 +26,6 @@ pub use protocol::{
   ServerCapabilities, ServerInfo,
 };
 pub use tool::{McpTool, mcp_namespaced_tool_name};
-pub use transport::{DEFAULT_REQUEST_TIMEOUT, McpTransport, MockTransport, StdioTransport};
+pub use transport::{
+  DEFAULT_REQUEST_TIMEOUT, HttpTransport, McpTransport, MockTransport, StdioTransport,
+};

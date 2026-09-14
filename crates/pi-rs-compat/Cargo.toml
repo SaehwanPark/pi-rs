@@ -6,6 +6,7 @@ license.workspace = true
 description = "Pi-compatible reading of skills, prompts, packages, and session files."
 
 [dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }

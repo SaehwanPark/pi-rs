@@ -847,6 +847,9 @@ This should not be required for the initial implementation.
 MCP should be a first-party interoperability subsystem.
 
 MCP capabilities should normalize into the same internal tool abstraction used by native tools and extensions.
+The client supports lazy stdio and bounded Streamable HTTP POST activation: JSON or matching
+response-SSE, session-id propagation, bounded bodies, and JSON-RPC id validation. Long-lived
+server push and cancellation-aware network reads remain optional future work.
 
 Conceptually:
 
@@ -1666,7 +1669,10 @@ Trust-sensitive capabilities include:
 - writing checkpoints outside normal locations;
 - enabling custom native extensions.
 
-Global and project configuration should have explicit precedence and trust rules.
+Global and project configuration should have explicit precedence and trust rules. Compatibility
+readers take trust as a caller-owned input, and `pi-rs trust` records canonical project scopes
+in a private, schema-versioned store; no project file can grant its own trust. The current
+interactive resolver remains deliberately explicit rather than guessing on `NeedsUser`.
 
 ---
 

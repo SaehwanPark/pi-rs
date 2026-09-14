@@ -101,6 +101,16 @@ fn git_root(cwd: &Path) -> Option<PathBuf> {
     .map(Path::to_path_buf)
 }
 
+/// The project root used for explicit project-local writes.
+///
+/// Discovery walks from the current directory to this same git ceiling. An install
+/// must choose one deterministic destination rather than silently placing a package
+/// in whichever ancestor happened to be scanned first, so it uses the git root and
+/// falls back to the caller's directory when no repository is present.
+pub fn project_root(cwd: &Path) -> PathBuf {
+  git_root(cwd).unwrap_or_else(|| cwd.to_path_buf())
+}
+
 pub(crate) fn is_dir(kind: &Option<fs::Metadata>) -> bool {
   kind.as_ref().is_some_and(fs::Metadata::is_dir)
 }
