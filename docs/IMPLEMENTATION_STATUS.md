@@ -24,7 +24,7 @@ cargo doc --workspace --no-deps      # 0 warnings
 | Surface | `pi-rs-tui` | done for the interactive surface: raw terminal, buffer/caret, status line, highlighting, wrap | 179 |
 | Pi compatibility readers | `pi-rs-compat` | skills, prompt-template, and package readers with fixture suites | 93 |
 | MCP client | `pi-rs-mcp` | done, lazy stdio transport, discovery, and tool normalization | 11 |
-| Composition root | `pi-rs` binary | run, interactive, trace, skills, prompts, prompt, packages, compat, import-pi, export-pi, run --resume | 223 |
+| Composition root | `pi-rs` binary | run, interactive, trace, skills, prompts, prompt, packages, compat, import-pi, export, run --resume | 223 |
 
 ## What the merge series added on top of the one-shot command
 
@@ -33,7 +33,7 @@ cargo doc --workspace --no-deps      # 0 warnings
   (operation vs arguments), Ctrl-C split between in-flight turn and idle draft.
 * `pi-rs run --resume <id|prefix>` — continues a recorded session; id resolution is
   shared with `pi-rs trace` so two commands cannot disagree about one session id.
-* `pi-rs import-pi` / `pi-rs export-pi` — Pi session files in and out, with a
+* `pi-rs import-pi` / `pi-rs export` — Pi session files in and out, with a
   round-trip fixture and an explicit report of what could not be carried.
 * Failover made readable: model epochs, takeover reasons, and the epoch that served
   the answer are durable events, not prose.
