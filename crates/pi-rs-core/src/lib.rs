@@ -82,8 +82,8 @@ pub use tool::{
   ToolMetadata, ToolOutcome, ToolProgress, ToolRequest,
 };
 pub use trace::{
-  BlobRef, ExternalContextSource, ExternalizedField, RawPayloadCapture, TRACE_SCHEMA_VERSION,
-  TraceEntry, TraceRetention,
+  BlobCompression, BlobRef, ExternalContextSource, ExternalizedField, RawPayloadCapture,
+  TRACE_SCHEMA_VERSION, TraceEntry, TraceRetention,
 };
 pub use trust::{
   EmptyTrustStore, Risk, TrustDecision, TrustEntry, TrustGate, TrustScope, TrustStore,

@@ -9,10 +9,12 @@
 
 use std::{
   fs,
+  io::{Read, Write},
   path::{Path, PathBuf},
 };
 
-use pi_rs_core::{hash::sha256_hex, ids::SessionId, trace::BlobRef};
+use flate2::{Compression as FlateCompression, read::DeflateDecoder, write::DeflateEncoder};
+use pi_rs_core::{BlobCompression, hash::sha256_hex, ids::SessionId, trace::BlobRef};
 
 use crate::{StateLayout, StoreError};
 
@@ -20,15 +22,25 @@ use crate::{StateLayout, StoreError};
 #[derive(Debug, Clone)]
 pub struct BlobStore {
   base: PathBuf,
+  compression: BlobCompression,
 }
 
 impl BlobStore {
-  /// Prepare the payload directory for one session.
+  /// Prepare the payload directory for one session with compression disabled.
   pub fn for_session(layout: &StateLayout, session: &SessionId) -> Result<Self, StoreError> {
+    Self::for_session_with_compression(layout, session, BlobCompression::None)
+  }
+
+  /// Prepare the payload directory for one session with an encoding preference.
+  pub fn for_session_with_compression(
+    layout: &StateLayout,
+    session: &SessionId,
+    compression: BlobCompression,
+  ) -> Result<Self, StoreError> {
     StateLayout::validate_session_id(session)?;
     let base = layout.blobs_dir(session);
     fs::create_dir_all(&base)?;
-    Ok(Self { base })
+    Ok(Self { base, compression })
   }
 
   /// Root directory of this store.
@@ -36,20 +48,41 @@ impl BlobStore {
     &self.base
   }
 
+  /// Encoding preference used for newly written payloads.
+  pub fn compression(&self) -> BlobCompression {
+    self.compression
+  }
+
   pub fn path_for(&self, blob: &BlobRef) -> PathBuf {
     self.base.join(&blob.relative_path()["blobs/".len()..])
+  }
+
+  /// Plan the reference that will be used for these logical bytes.
+  ///
+  /// Compression is a preference rather than a promise: a payload that does
+  /// not shrink keeps the old raw path and reference shape.
+  pub fn reference_for(
+    &self,
+    bytes: &[u8],
+    content_type: Option<&str>,
+  ) -> Result<BlobRef, StoreError> {
+    let raw = BlobRef::for_bytes(bytes, content_type);
+    if self.compression == BlobCompression::Deflate && deflate(bytes)?.len() < bytes.len() {
+      Ok(raw.with_compression(BlobCompression::Deflate))
+    } else {
+      Ok(raw)
+    }
   }
 
   /// Store bytes and return the reference that must be recorded durably.
   ///
   /// Existing matching content is not rewritten. Existing *disagreeing*
   /// content is rewritten rather than trusted: a reference is a claim about
-  /// bytes, so a stored object that fails verification is repaired on the next
-  /// write instead of silently persisting the lie. Verification costs one hash
-  /// over bytes that are already in hand, which is acceptable because repeat
-  /// puts are rare and payload writes are not on the startup path.
+  /// logical bytes, so a stored object that fails decoding, hashing, or sizing
+  /// is repaired on the next write instead of silently persisting the lie.
   pub fn put(&self, bytes: &[u8], content_type: Option<&str>) -> Result<BlobRef, StoreError> {
-    let blob = BlobRef::for_bytes(bytes, content_type);
+    let blob = self.reference_for(bytes, content_type)?;
+    let encoded = encode(bytes, blob.compression)?;
     let final_path = self.path_for(&blob);
     if final_path.exists() && self.verify(&blob)? {
       return Ok(blob);
@@ -62,8 +95,8 @@ impl BlobStore {
     let temp = final_path.with_extension(format!("part-{}", std::process::id()));
     {
       let mut file = fs::File::create(&temp)?;
-      std::io::Write::write_all(&mut file, bytes)?;
-      std::io::Write::flush(&mut file)?;
+      file.write_all(&encoded)?;
+      file.flush()?;
     }
     verify_file(&temp, &blob)?;
     match fs::rename(&temp, &final_path) {
@@ -93,29 +126,17 @@ impl BlobStore {
   }
 
   /// Read a payload, failing rather than returning empty when it is absent.
-  /// Read the bytes a durable reference points at.
+  /// Read the logical bytes a durable reference points at.
   ///
   /// A reference is what a bounded line records, and it arrives here as text from
   /// a file, so it is validated rather than trusted: it must be exactly the
-  /// `blobs/<shard>/<hash>` shape the layout produces, with the shard equal to the
-  /// hash's own prefix. Anything else is refused instead of joined, because a
-  /// pointer read from a journal must not become a path outside this store.
+  /// `blobs/<shard>/<hash>[.encoding]` shape the layout produces, with the shard
+  /// equal to the hash's own prefix. Anything else is refused instead of joined,
+  /// because a pointer read from a journal must not become a path outside this store.
   pub fn get_relative(&self, reference: &str) -> Result<Vec<u8>, StoreError> {
-    let invalid = || StoreError::Invalid(format!("not a blob reference: {reference}"));
-    let rest = reference.strip_prefix("blobs/").ok_or_else(invalid)?;
-    let (shard, hash) = rest.split_once('/').ok_or_else(invalid)?;
-    if hash.contains('/') || reference.contains("..") {
-      return Err(invalid());
-    }
-    if hash.len() != 64
-      || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-      || shard.len() != 2
-      || !hash.starts_with(shard)
-    {
-      return Err(invalid());
-    }
-    match fs::read(self.base.join(shard).join(hash)) {
-      Ok(bytes) => Ok(bytes),
+    let (path, compression) = self.parse_relative(reference)?;
+    match fs::read(&path) {
+      Ok(bytes) => decode(&bytes, compression),
       Err(error) if StoreError::is_missing(&error) => {
         Err(StoreError::Missing(reference.to_string()))
       }
@@ -126,7 +147,7 @@ impl BlobStore {
   pub fn get(&self, blob: &BlobRef) -> Result<Vec<u8>, StoreError> {
     let path = self.path_for(blob);
     match fs::read(&path) {
-      Ok(bytes) => Ok(bytes),
+      Ok(bytes) => decode(&bytes, blob.compression),
       Err(error) if StoreError::is_missing(&error) => {
         Err(StoreError::Missing(path.display().to_string()))
       }
@@ -146,13 +167,38 @@ impl BlobStore {
     })
   }
 
-  /// Verify that stored bytes still match their reference.
+  /// Verify that stored logical bytes still match their reference.
   pub fn verify(&self, blob: &BlobRef) -> Result<bool, StoreError> {
     match fs::read(self.path_for(blob)) {
-      Ok(bytes) => Ok(sha256_hex(&bytes) == blob.hash && bytes.len() as u64 == blob.size),
+      Ok(bytes) => match decode(&bytes, blob.compression) {
+        Ok(bytes) => Ok(sha256_hex(&bytes) == blob.hash && bytes.len() as u64 == blob.size),
+        Err(StoreError::Invalid(_)) => Ok(false),
+        Err(error) => Err(error),
+      },
       Err(error) if StoreError::is_missing(&error) => Ok(false),
       Err(error) => Err(StoreError::Io(error)),
     }
+  }
+
+  fn parse_relative(&self, reference: &str) -> Result<(PathBuf, BlobCompression), StoreError> {
+    let invalid = || StoreError::Invalid(format!("not a blob reference: {reference}"));
+    let rest = reference.strip_prefix("blobs/").ok_or_else(invalid)?;
+    let (shard, filename) = rest.split_once('/').ok_or_else(invalid)?;
+    if filename.contains('/') || reference.contains("..") {
+      return Err(invalid());
+    }
+    let (hash, suffix) = filename
+      .rsplit_once('.')
+      .map_or((filename, None), |(hash, suffix)| (hash, Some(suffix)));
+    let compression = BlobCompression::from_suffix(suffix).ok_or_else(invalid)?;
+    if hash.len() != 64
+      || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+      || shard.len() != 2
+      || !hash.starts_with(shard)
+    {
+      return Err(invalid());
+    }
+    Ok((self.base.join(shard).join(filename), compression))
   }
 
   /// Delete payloads that no listed record references.
@@ -201,7 +247,8 @@ impl BlobStore {
 }
 
 fn verify_file(path: &Path, blob: &BlobRef) -> Result<(), StoreError> {
-  let bytes = fs::read(path)?;
+  let encoded = fs::read(path)?;
+  let bytes = decode(&encoded, blob.compression)?;
   if sha256_hex(&bytes) != blob.hash || bytes.len() as u64 != blob.size {
     let _ = fs::remove_file(path);
     return Err(StoreError::Invalid(format!(
@@ -210,6 +257,35 @@ fn verify_file(path: &Path, blob: &BlobRef) -> Result<(), StoreError> {
     )));
   }
   Ok(())
+}
+
+fn encode(bytes: &[u8], compression: BlobCompression) -> Result<Vec<u8>, StoreError> {
+  match compression {
+    BlobCompression::None => Ok(bytes.to_vec()),
+    BlobCompression::Deflate => deflate(bytes),
+  }
+}
+
+fn deflate(bytes: &[u8]) -> Result<Vec<u8>, StoreError> {
+  let mut encoder = DeflateEncoder::new(Vec::new(), FlateCompression::default());
+  encoder.write_all(bytes)?;
+  encoder
+    .finish()
+    .map_err(|error| StoreError::Invalid(format!("cannot finish deflate payload: {error}")))
+}
+
+fn decode(bytes: &[u8], compression: BlobCompression) -> Result<Vec<u8>, StoreError> {
+  match compression {
+    BlobCompression::None => Ok(bytes.to_vec()),
+    BlobCompression::Deflate => {
+      let mut decoder = DeflateDecoder::new(bytes);
+      let mut decoded = Vec::new();
+      decoder
+        .read_to_end(&mut decoded)
+        .map_err(|error| StoreError::Invalid(format!("cannot decode deflate payload: {error}")))?;
+      Ok(decoded)
+    }
+  }
 }
 
 fn collect_files(dir: &Path) -> Result<Vec<PathBuf>, StoreError> {
@@ -245,6 +321,17 @@ mod tests {
     BlobStore::for_session(&layout, &SessionId::from_string("018f-blobs".to_string())).unwrap()
   }
 
+  fn compressed_store(tmp: &TempDir) -> BlobStore {
+    let layout = StateLayout::new(tmp.path());
+    layout.create().unwrap();
+    BlobStore::for_session_with_compression(
+      &layout,
+      &SessionId::from_string("018f-blobs".to_string()),
+      BlobCompression::Deflate,
+    )
+    .unwrap()
+  }
+
   #[test]
   fn put_is_content_addressed_and_deduplicated() {
     let tmp = TempDir::new("blob-put");
@@ -265,6 +352,74 @@ mod tests {
     assert_eq!(store.bytes().unwrap(), 13, "dedup must not store twice");
     assert_eq!(store.get(&first).unwrap(), b"payload bytes");
     assert!(store.verify(&first).unwrap());
+  }
+
+  #[test]
+  fn compression_is_opt_in_and_references_logical_bytes() {
+    let tmp = TempDir::new("blob-compression");
+    let store = compressed_store(&tmp);
+    let bytes = b"repeated payload ".repeat(4 * 1024);
+    let blob = store.put(&bytes, Some("text/plain")).unwrap();
+
+    assert_eq!(blob.compression, BlobCompression::Deflate);
+    assert!(blob.relative_path().ends_with(".deflate"));
+    assert_eq!(blob.size, bytes.len() as u64);
+    assert_eq!(blob.hash, sha256_hex(&bytes));
+    assert_eq!(store.get(&blob).unwrap(), bytes);
+    assert_eq!(store.get_relative(&blob.relative_path()).unwrap(), bytes);
+    assert!(store.verify(&blob).unwrap());
+    assert!(fs::metadata(store.path_for(&blob)).unwrap().len() < blob.size);
+  }
+
+  #[test]
+  fn incompressible_payload_falls_back_to_the_legacy_raw_reference() {
+    let tmp = TempDir::new("blob-compression-fallback");
+    let store = compressed_store(&tmp);
+    let mut bytes = Vec::with_capacity(16 * 1024);
+    let mut state = 0x1234_5678_u32;
+    for _ in 0..16 * 1024 {
+      state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+      bytes.push((state >> 24) as u8);
+    }
+    let blob = store.put(&bytes, None).unwrap();
+
+    assert_eq!(blob.compression, BlobCompression::None);
+    assert!(!blob.relative_path().contains(".deflate"));
+    assert_eq!(store.get(&blob).unwrap(), bytes);
+  }
+
+  #[test]
+  fn compressed_store_reads_legacy_raw_references() {
+    let tmp = TempDir::new("blob-compression-legacy");
+    let layout = StateLayout::new(tmp.path());
+    layout.create().unwrap();
+    let session = SessionId::from_string("018f-blobs".to_string());
+    let raw = BlobStore::for_session(&layout, &session).unwrap();
+    let bytes = b"legacy payload";
+    let blob = raw.put(bytes, None).unwrap();
+    let compressed =
+      BlobStore::for_session_with_compression(&layout, &session, BlobCompression::Deflate).unwrap();
+
+    assert_eq!(compressed.get(&blob).unwrap(), bytes);
+    assert_eq!(
+      compressed.get_relative(&blob.relative_path()).unwrap(),
+      bytes
+    );
+    assert!(compressed.verify(&blob).unwrap());
+  }
+
+  #[test]
+  fn corrupted_compressed_payload_is_rejected() {
+    let tmp = TempDir::new("blob-compression-corrupt");
+    let store = compressed_store(&tmp);
+    let blob = store.put(&b"repeated payload ".repeat(128), None).unwrap();
+    fs::write(store.path_for(&blob), b"not-deflate").unwrap();
+
+    assert!(!store.verify(&blob).unwrap());
+    assert!(matches!(
+      store.get(&blob),
+      Err(StoreError::Invalid(message)) if message.contains("deflate")
+    ));
   }
 
   #[test]

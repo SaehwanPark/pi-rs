@@ -473,6 +473,12 @@ blobs/
 tool-results/
 ```
 
+Blob payload compression is an optional storage policy, disabled by default. The
+append-only JSONL trace remains plain and appendable; only content-addressed payload
+bytes may use a recorded encoding such as Deflate. A compressed reference keeps the
+hash and size of the redacted logical bytes, so old raw references remain readable and
+redaction still precedes hashing and encoding.
+
 The runtime should be able to reconstruct what happened without loading every large payload into active memory.
 
 ---

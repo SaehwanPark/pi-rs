@@ -214,6 +214,8 @@ High-resolution historical execution.
 
 A journal line carries an inline budget. Above it, whole fields move to the session's content-addressed blob store and the line keeps a bounded preview naming the reference and the original size, plus an `externalized` record beside it so a program can follow the pointer without parsing prose. Envelope bookkeeping and pointer-shaped fields (`*_id`, `*_ref`, `hash`, a `blob` record) are never elided: a line that cannot be attributed, or a pointer that cannot be followed, is worse than a long line. Redaction runs first, so the bytes that leave the line are already sanitized.
 
+Blob payload compression is optional and disabled by default. When enabled, the store prefers raw Deflate only when it reduces the logical payload; the persisted `BlobRef` records the encoding suffix while its hash and size remain those of the redacted uncompressed bytes. Existing raw references remain readable, and the append-only JSONL journal itself is never compressed so tail recovery, inspection, and export remain plain-file operations.
+
 Possible layout:
 
 ```text

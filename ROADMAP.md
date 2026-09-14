@@ -184,7 +184,7 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [x] Add `trace.jsonl`.
 - [x] Add blob storage for large payloads.
 - [x] Add content hashing for stored payloads.
-- [ ] Add optional compression.
+- [x] Add optional compression (opt-in raw Deflate for content-addressed blob payloads; `trace.jsonl` remains plain, references retain logical hash/size and encoding, and old raw references remain readable).
 - [x] Add trace retention configuration.
 - [x] Keep raw provider payload capture disabled by default.
 

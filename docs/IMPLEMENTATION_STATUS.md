@@ -216,8 +216,9 @@ The following items are not blockers for the canonical initial MVP, but remain e
 8. Project trust is explicit at compatibility-reader call sites, but a persisted interactive
    trust-decision workflow remains open. MCP network transport, package installation, and
    the `rkb-rs` integration remain roadmap work.
-9. Optional trace compression and reconstructed-rationale production remain unimplemented;
-   no producer may infer hidden chain-of-thought or relabel it as recovered.
+9. Optional trace compression is implemented for content-addressed payload blobs (opt-in
+   raw Deflate; plain JSONL remains appendable). Reconstructed-rationale production remains
+   unimplemented; no producer may infer hidden chain-of-thought or relabel it as recovered.
 10. TypeScript extensions, MCP worker mode, replay tooling, adaptive optimization,
     telemetry, and GitHub Pages are deliberately deferred beyond the initial MVP.
 
