@@ -1,9 +1,11 @@
-# Slice: a cold-start benchmark that reports something true
+# Slice (historical): a cold-start benchmark that reports something true
 
-ROADMAP line "Add cold-start benchmark" is still open; `bench/startup.sh` measures **warm** runs of
-the same binary path and says so. This slice adds the cold half — and is allowed to conclude that a
-given machine cannot measure cold start honestly, as long as it proves that rather than inventing a
-number.
+At the time this slice was written, ROADMAP line "Add cold-start benchmark" was still open;
+`bench/startup.sh` measured **warm** runs of
+the same binary path and says so. The cold
+benchmark described here is now delivered; current evidence is recorded in
+`docs/MVP_VALIDATION.md`. The remaining text
+preserves this slice's design and verification contract.
 
 ## Definition, pinned (write it in the script header)
 Dropping the page cache needs root, which this project does not assume. So define cold as:

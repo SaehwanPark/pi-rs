@@ -250,26 +250,29 @@ pub enum AgentEvent {
   /// Ordering: at a turn or phase boundary, never mid-request.
   /// Persistence: always. Replay: applies the compaction marker.
   /// UI: rare, shows the level and reason.
-  /// Producer: none found at 2026-09-07, test fixtures only
-  /// (docs/COMPACT_EVENT_AUDIT.md).
+  /// Producer: `TurnLoop::compact` and `TurnLoop::compact_phase` in
+  /// `crates/pi-rs-runtime/src/turn.rs`.
   ContextCompactionStarted(ContextCompactionStarted),
   /// Why: compaction finished and what it retained.
-  /// Ordering: closes a matching compaction start.
+  /// Ordering: closes a matching `ContextCompactionStarted` for L1/L2 compactions.
+  /// L3 checkpoint compaction emits this completion after `CheckpointCreated` as its
+  /// reset marker and has no separate start event.
   /// Persistence: always. Replay: marks the context epoch advanced.
   /// UI: shows retained/removed counts.
-  /// Producer: none found at 2026-09-07, test fixtures only
-  /// (docs/COMPACT_EVENT_AUDIT.md).
+  /// Producer: `TurnLoop::compact`, `TurnLoop::compact_phase`, and
+  /// `TurnLoop::checkpoint` in `crates/pi-rs-runtime/src/turn.rs`.
   ContextCompactionCompleted(ContextCompactionCompleted),
   /// Why: the summary that replaced a compacted range enters canonical history
   /// as a message, and a message-bearing event is what a session log line binds
   /// its content to. The text itself declares that it is a summary of earlier
   /// conversation; this event's role is attribution, not new semantics.
   /// Ordering: after `ContextCompactionStarted`, before the epoch record that
-  /// references the summary.
+  /// references the summary. L3 checkpoint compaction does not emit this variant.
   /// Persistence: always. Replay: one more message in canonical history; the
   /// epoch record, not this event, is what makes it model-visible.
   /// UI: renders like any assistant-visible text when a consumer asks for it.
-  /// Producer: `TurnLoop::compact`.
+  /// Producer: `TurnLoop::compact` and `TurnLoop::compact_phase` in
+  /// `crates/pi-rs-runtime/src/turn.rs`.
   ContextSummary,
   /// Why: a compaction moved the model-visible context to a new epoch, and this is
   /// the durable record of which canonical range it replaced and what stands in
@@ -280,6 +283,8 @@ pub enum AgentEvent {
   /// summary for the replaced range in model-visible context only; canonical
   /// history is replayed unchanged.
   /// UI: rare, and it must read as "context changed", never as "history changed".
+  /// Producer: `TurnLoop::compact` and `TurnLoop::compact_phase` in
+  /// `crates/pi-rs-runtime/src/turn.rs`.
   ContextCompactionEpoch(ContextCompactionEpoch),
   /// Why: an episode checkpoint capsule was written.
   /// Ordering: after the events summarized by the capsule.
@@ -794,10 +799,9 @@ mod tests {
     assert_eq!(decoded, event);
   }
 
-  /// Why: neither compaction variant has a production producer (see
-  /// docs/COMPACT_EVENT_AUDIT.md), so the serialized shape is the only
-  /// contract that keeps it compatible. Pin the `type` tag and every field
-  /// name exactly, so a rename or a dropped field fails here.
+  /// Why: compaction variants have production producers and are part of the
+  /// persisted trace contract. Pin the `type` tag and every field name exactly,
+  /// so a rename or a dropped field fails here.
   #[test]
   fn compaction_started_wire_shape_is_pinned() {
     let event = AgentEvent::ContextCompactionStarted(ContextCompactionStarted {
