@@ -642,6 +642,10 @@ impl<'a> TurnLoop<'a> {
     let clock = Instant::now();
     let mut report = TurnReport::new(turn_id.clone(), self.epoch_index());
     self.requests.store(0, Ordering::SeqCst);
+    // Recovery may rewrite only the history that predates this turn. Keep the
+    // boundary local so one turn's emergency state cannot leak into the next.
+    let mut turn_history_start = self.messages.len();
+    let mut overflow_recovery_used = false;
 
     self.ensure_session_started()?;
 
@@ -681,20 +685,37 @@ impl<'a> TurnLoop<'a> {
         return self.finish(report, TurnStatus::Cancelled, clock, Some(turn_id.clone()));
       }
 
-      let response = match self.attempt(turn_id.clone(), cancel, progress) {
+      let response = match self.attempt(turn_id.clone(), &mut turn_history_start, cancel, progress)
+      {
         Ok(response) => response,
         // Cancellation is reported, never recovered from.
         Err(TurnFailure::Cancelled) => {
+          report.requests = self.requests.load(Ordering::SeqCst);
           return self.finish(report, TurnStatus::Cancelled, clock, Some(turn_id.clone()));
+        }
+        Err(TurnFailure::ProviderOverflow(failure)) => {
+          if overflow_recovery_used {
+            self.diagnostic(
+              Some(turn_id.clone()),
+              DiagnosticLevel::Warn,
+              "provider rejected the compacted request for context overflow; automatic recovery already used for this turn",
+            )?;
+            return self.finish_failure(report, failure, clock, turn_id.clone());
+          }
+          match self.recover_context_overflow(&turn_id, &mut turn_history_start)? {
+            true => {
+              overflow_recovery_used = true;
+              continue;
+            }
+            false => return self.finish_failure(report, failure, clock, turn_id.clone()),
+          }
         }
         Err(TurnFailure::Fatal(failure)) => {
           // The turn ends *before* the error is returned. A trace with no
           // `turn_completed` cannot tell a crashed session from an interrupted one,
           // and a caller that gets an error still needs the session to be coherent.
-          report.status = TurnStatus::Failed { kind: failure.kind };
-          let status = TurnStatus::Failed { kind: failure.kind };
-          let _ = self.finish(report, status, clock, Some(turn_id.clone()))?;
-          return Err(TurnError::Unavailable(failure));
+          report.requests = self.requests.load(Ordering::SeqCst);
+          return self.finish_failure(report, failure, clock, turn_id.clone());
         }
         Err(TurnFailure::Sink(error)) => return Err(TurnError::from(error)),
       };
@@ -922,6 +943,132 @@ impl<'a> TurnLoop<'a> {
     Ok(report)
   }
 
+  /// Close a failed turn before returning the provider's original failure.
+  fn finish_failure(
+    &mut self,
+    mut report: TurnReport,
+    failure: ModelFailure,
+    clock: Instant,
+    turn_id: TurnId,
+  ) -> Result<TurnReport, TurnError> {
+    report.requests = self.requests.load(Ordering::SeqCst);
+    let status = TurnStatus::Failed { kind: failure.kind };
+    let _ = self.finish(report, status, clock, Some(turn_id))?;
+    Err(TurnError::Unavailable(failure))
+  }
+
+  /// Prepare one bounded local recovery candidate after an uncommitted provider
+  /// overflow. The live message vector is not changed until the candidate has
+  /// been assembled with the same request shape used for production requests.
+  fn recover_context_overflow(
+    &mut self,
+    turn_id: &TurnId,
+    turn_history_start: &mut usize,
+  ) -> Result<bool, TurnError> {
+    let prefix_end = (*turn_history_start).min(self.messages.len());
+    if prefix_end == 0 {
+      self.diagnostic(
+        Some(turn_id.clone()),
+        DiagnosticLevel::Warn,
+        "provider rejected the request for context overflow; current-turn content alone cannot be compacted safely",
+      )?;
+      return Ok(false);
+    }
+    if self.requests.load(Ordering::SeqCst) >= self.max_requests {
+      self.diagnostic(
+        Some(turn_id.clone()),
+        DiagnosticLevel::Warn,
+        "provider rejected the request for context overflow; request budget cannot pay for a reissue",
+      )?;
+      return Ok(false);
+    }
+
+    let target = overflow_recovery_target(self.provider().capabilities().context_window);
+    // A proactive structural reduction may already have made the exact live
+    // request fit. Reuse that canonical state instead of opening a redundant
+    // emergency epoch; the normal builder will issue the same request again.
+    if self.turn_has_structural_compaction(turn_id) {
+      let request = self.assemble_request(self.messages.clone());
+      if estimate_tokens(&request) <= target {
+        self.diagnostic(
+          Some(turn_id.clone()),
+          DiagnosticLevel::Info,
+          "provider rejected the request for context overflow; existing compaction already bounded the context, retrying once",
+        )?;
+        return Ok(true);
+      }
+    }
+
+    let prefix = self.messages[..prefix_end].to_vec();
+    let suffix = self.messages[prefix_end..].to_vec();
+    let source = match &self.summarizer {
+      Some(summarizer) => summarizer(&prefix),
+      None => structured_summary(&prefix),
+    };
+
+    // The summary is reduced by character-boundary-safe steps. A bounded number
+    // of attempts keeps a pathological local summarizer from consuming the turn,
+    // while still reaching an empty-summary candidate for very large histories.
+    let mut summary_bytes = source.len();
+    let mut accepted = None;
+    for _ in 0..=64 {
+      let summary = truncate_utf8_to_bytes(&source, summary_bytes).to_string();
+      let mut candidate_messages = Vec::with_capacity(suffix.len() + 1);
+      candidate_messages.push(Message::user(summary.clone()));
+      candidate_messages.extend(suffix.iter().cloned());
+      let request = self.assemble_request(candidate_messages);
+      if estimate_tokens(&request) <= target {
+        accepted = Some(summary);
+        break;
+      }
+      if summary_bytes == 0 {
+        break;
+      }
+      let next = summary_bytes / 2;
+      let next = truncate_utf8_to_bytes(&source, next).len();
+      if next == summary_bytes {
+        summary_bytes = summary_bytes.saturating_sub(1);
+      } else {
+        summary_bytes = next;
+      }
+    }
+
+    let Some(summary) = accepted else {
+      self.diagnostic(
+        Some(turn_id.clone()),
+        DiagnosticLevel::Warn,
+        "provider rejected the request for context overflow; no bounded compacted request fits the active context window",
+      )?;
+      return Ok(false);
+    };
+
+    self.diagnostic(
+      Some(turn_id.clone()),
+      DiagnosticLevel::Info,
+      "provider rejected the request for context overflow; compacting prior history and retrying once",
+    )?;
+    let replaced = self.compact_prefix(turn_id, prefix_end, &summary)?;
+    if replaced == 0 {
+      return Ok(false);
+    }
+    // The prefix was replaced by exactly one summary message. The suffix captured
+    // above is therefore now the complete current-turn tail.
+    *turn_history_start = 1;
+    debug_assert_eq!(self.messages.get(1..), Some(suffix.as_slice()));
+    Ok(true)
+  }
+
+  fn turn_has_structural_compaction(&self, turn_id: &TurnId) -> bool {
+    self.envelopes.iter().any(|envelope| {
+      envelope.meta.turn_id.as_ref() == Some(turn_id)
+        && matches!(
+          &envelope.event,
+          AgentEvent::ContextCompactionCompleted(completed)
+            if completed.level.requires_safe_boundary()
+        )
+    })
+  }
+
   /// One model request, with retries and at most one takeover.
   ///
   /// The loop may re-issue only while nothing has been streamed. That single rule
@@ -929,6 +1076,7 @@ impl<'a> TurnLoop<'a> {
   fn attempt(
     &mut self,
     turn_id: TurnId,
+    turn_history_start: &mut usize,
     cancel: &CancelToken,
     progress: &mut dyn TurnProgress,
   ) -> Result<Response, TurnFailure> {
@@ -943,7 +1091,9 @@ impl<'a> TurnLoop<'a> {
         attempts_on_model = 0;
       }
       attempts_on_model += 1;
-      let request = self.build_request(&turn_id).map_err(TurnFailure::from)?;
+      let request = self
+        .build_request(&turn_id, turn_history_start)
+        .map_err(TurnFailure::from)?;
       // The turn's request budget is spent here, at the point the request exists.
       self.requests.fetch_add(1, Ordering::SeqCst);
       let epoch = self.epoch_index();
@@ -1030,7 +1180,7 @@ impl<'a> TurnLoop<'a> {
           // Output reached the user the moment it was emitted, so it is recorded on
           // the failure rather than inferred afterwards.
           let mut failure = failure;
-          failure.partial_output_emitted = committed;
+          failure.partial_output_emitted |= committed;
           failure
         }
       };
@@ -1080,8 +1230,17 @@ impl<'a> TurnLoop<'a> {
         // must not run.
         return Err(TurnFailure::Cancelled);
       }
+      // Provider overflow is a distinct outcome. It is eligible for the outer
+      // turn's one-shot local compaction only when this request committed no
+      // reasoning, text, or decoded tool call. It must never enter failover.
+      if failure.kind == ModelFailureKind::ContextOverflow {
+        if failure.partial_output_emitted {
+          return Err(TurnFailure::Fatal(failure));
+        }
+        return Err(TurnFailure::ProviderOverflow(failure));
+      }
       match self
-        .recover(turn_id.clone(), &failure, cancel)
+        .recover(turn_id.clone(), &failure, turn_history_start, cancel)
         .map_err(TurnFailure::from)?
       {
         Action::Retry => {
@@ -1137,6 +1296,7 @@ impl<'a> TurnLoop<'a> {
     &mut self,
     turn_id: TurnId,
     failure: &ModelFailure,
+    turn_history_start: &mut usize,
     cancel: &CancelToken,
   ) -> Result<Action, TurnError> {
     if cancel.is_cancelled() || matches!(failure.kind, ModelFailureKind::Cancelled) {
@@ -1195,7 +1355,7 @@ impl<'a> TurnLoop<'a> {
           .iter()
           .any(|gap| matches!(gap, CapabilityGap::ContextWindow { .. }));
         let dropped = if narrow {
-          self.rebudget(turn_id.clone())?
+          self.rebudget(turn_id.clone(), turn_history_start)?
         } else {
           0
         };
@@ -1260,14 +1420,18 @@ impl<'a> TurnLoop<'a> {
   ///
   /// Returns how many turns were dropped, which is the difference between reporting
   /// a rebudget and performing one.
-  fn rebudget(&mut self, turn_id: TurnId) -> Result<u32, TurnError> {
+  fn rebudget(
+    &mut self,
+    turn_id: TurnId,
+    turn_history_start: &mut usize,
+  ) -> Result<u32, TurnError> {
     let target = self
       .failover
       .backup_capabilities
       .as_ref()
       .map(|caps| caps.context_window.saturating_sub(1_024))
       .unwrap_or(4_096);
-    self.evict_oldest(target, &turn_id)
+    self.evict_oldest(target, &turn_id, turn_history_start)
   }
 
   /// Drop the oldest model-visible turns until the estimate reaches `target`, and
@@ -1278,18 +1442,32 @@ impl<'a> TurnLoop<'a> {
   /// every dropped turn — and the event says what left the window and where the
   /// proof lives. The newest turn is never dropped: without it there is nothing to
   /// continue.
-  fn evict_oldest(&mut self, target: u64, turn_id: &TurnId) -> Result<u32, TurnError> {
+  fn evict_oldest(
+    &mut self,
+    target: u64,
+    turn_id: &TurnId,
+    turn_history_start: &mut usize,
+  ) -> Result<u32, TurnError> {
     let before = estimate_messages(&self.messages);
-    let mut dropped = 0u32;
-    while estimate_messages(&self.messages) > target && self.messages.len() > 1 {
-      self.messages.remove(0);
+    let protected = (*turn_history_start).min(self.messages.len());
+    // `protected` is the number of messages before the current-turn suffix;
+    // the suffix itself is the portion that must remain resident.
+    let minimum_len = if protected == 0 {
+      self.messages.len()
+    } else {
+      self.messages.len() - protected
+    };
+    let mut dropped = 0usize;
+    while estimate_messages(&self.messages[dropped..]) > target
+      && self.messages.len().saturating_sub(dropped) > minimum_len
+    {
       dropped += 1;
     }
     if dropped > 0 {
-      self.context_epoch += 1;
-      self.last_compaction = Some(Instant::now());
+      let visible = estimate_messages(&self.messages[dropped..]);
+      let dropped_count = dropped as u32;
       let blob = self.trace.put_payload(
-        format!("dropped {dropped} oldest turns to reach {target} tokens").as_bytes(),
+        format!("dropped {dropped_count} oldest turns to reach {target} tokens").as_bytes(),
       )?;
       let recovery_ref = blob.as_ref().map(BlobRef::recovery_ref);
       self.emit(
@@ -1299,14 +1477,21 @@ impl<'a> TurnLoop<'a> {
             target_tokens: target,
           },
           original_bytes: before,
-          visible_bytes: estimate_messages(&self.messages),
+          visible_bytes: visible,
           recovery_ref,
           blob,
           tool_call_id: None,
         }),
       )?;
+      self.messages.drain(..dropped);
+      if *turn_history_start > 0 {
+        *turn_history_start = (*turn_history_start).saturating_sub(dropped);
+      }
+      self.context_epoch = self.context_epoch.saturating_add(1);
+      self.last_compaction = Some(Instant::now());
+      return Ok(dropped_count);
     }
-    Ok(dropped)
+    Ok(0)
   }
 
   /// Replace the oldest model-visible messages with a summary at this safe
@@ -1335,69 +1520,102 @@ impl<'a> TurnLoop<'a> {
     summary: &str,
     retained: usize,
   ) -> Result<u32, TurnError> {
-    // `retained` counts the messages that survive *besides* the summary, which
-    // is added on top. An empty context keeps nothing; any other context always
-    // keeps its newest message, so a compaction always replaces a range.
+    // `retained` counts messages that survive besides the summary. The summary
+    // is inserted before that untouched suffix so chronological context remains
+    // [summary of older history, retained history].
     let kept = if self.messages.is_empty() {
       0
     } else {
-      // One slot is reserved for the summary itself, so `retained` counts only
-      // the messages that survive *besides* it. It may be zero: then only the
-      // summary stands, and a one-message context still loses its only message.
       retained.min(self.messages.len().saturating_sub(1))
     };
-    let removed = self.messages.len() - kept;
-    if removed == 0 {
-      // Nothing to compact: summarizing a single-message context would open an
-      // epoch that replaced no range.
+    let removed = self.messages.len().saturating_sub(kept);
+    self.compact_range(
+      turn_id,
+      removed,
+      summary,
+      ContextLevel::L1Ordinary,
+      format!("summarizing {removed} oldest messages"),
+    )
+  }
+
+  /// Replace exactly the oldest `prefix_end` messages with one durable summary.
+  ///
+  /// The untouched suffix is never reordered or rewritten. Values beyond the
+  /// live history are clamped, while zero is a no-op so a current turn cannot be
+  /// summarized accidentally when no prior history exists.
+  pub fn compact_prefix(
+    &mut self,
+    turn_id: &TurnId,
+    prefix_end: usize,
+    summary: &str,
+  ) -> Result<u32, TurnError> {
+    let prefix_end = prefix_end.min(self.messages.len());
+    self.compact_range(
+      turn_id,
+      prefix_end,
+      summary,
+      ContextLevel::L1Ordinary,
+      format!("summarizing {prefix_end} oldest messages"),
+    )
+  }
+
+  /// Shared durable lifecycle for prefix compaction. All fallible trace writes
+  /// happen before the live vector is changed, so a sink failure cannot fabricate
+  /// a successful recovery or leave model-visible history half-mutated.
+  fn compact_range(
+    &mut self,
+    turn_id: &TurnId,
+    prefix_end: usize,
+    summary: &str,
+    level: ContextLevel,
+    reason: String,
+  ) -> Result<u32, TurnError> {
+    let prefix_end = prefix_end.min(self.messages.len());
+    if prefix_end == 0 {
       return Ok(0);
     }
-    // Positions must be read before anything new is appended: the replaced
-    // range ends at the newest record that existed when compaction began.
+    let retained = self.messages.len() - prefix_end;
     let replaces_from = self.first_cited_seq();
     let replaces_through = self.last_cited_seq();
-    self.context_epoch += 1;
+    let next_epoch = self.context_epoch.saturating_add(1);
+
     self.emit(
       Some(turn_id.clone()),
-      AgentEvent::ContextCompactionStarted(ContextCompactionStarted {
-        level: ContextLevel::L1Ordinary,
-        reason: format!("summarizing {removed} oldest messages"),
-      }),
+      AgentEvent::ContextCompactionStarted(ContextCompactionStarted { level, reason }),
     )?;
 
-    // Canonical first: the summary is durable before the live context forgets
-    // the messages it replaced. It enters history as a user message: that is the
-    // role providers accept mid-context, and the text itself says it is a summary.
+    // Persist the summary before deleting replaced live context. It is a user
+    // message because providers accept that role mid-conversation.
     let summary_message = Message::user(summary);
     self.emit_message(
       Some(turn_id.clone()),
       AgentEvent::ContextSummary,
       &summary_message,
     )?;
-
     let summary_ref = self.trace.put_payload(summary.as_bytes())?;
     self.emit(
       Some(turn_id.clone()),
       AgentEvent::ContextCompactionEpoch(ContextCompactionEpoch {
-        context_epoch: self.context_epoch,
+        context_epoch: next_epoch,
         summary: summary_ref,
         replaces_from,
         replaces_through,
       }),
     )?;
-    self.messages.drain(..removed);
-    self.messages.push(summary_message);
-    self.last_compaction = Some(Instant::now());
     self.emit(
       Some(turn_id.clone()),
       AgentEvent::ContextCompactionCompleted(ContextCompactionCompleted {
-        level: ContextLevel::L1Ordinary,
-        removed_messages: removed as u32,
-        retained_messages: kept as u32,
-        context_epoch: self.context_epoch,
+        level,
+        removed_messages: prefix_end as u32,
+        retained_messages: retained as u32,
+        context_epoch: next_epoch,
       }),
     )?;
-    Ok(removed as u32)
+
+    self.messages.splice(0..prefix_end, [summary_message]);
+    self.context_epoch = next_epoch;
+    self.last_compaction = Some(Instant::now());
+    Ok(prefix_end as u32)
   }
 
   /// Compact oldest messages using either an explicit summary or a synthesized one.
@@ -1483,18 +1701,6 @@ impl<'a> TurnLoop<'a> {
       return Ok(0);
     }
 
-    let replaces_from = self.first_cited_seq();
-    let replaces_through = self.last_cited_seq();
-    self.context_epoch += 1;
-
-    self.emit(
-      Some(turn_id.clone()),
-      AgentEvent::ContextCompactionStarted(ContextCompactionStarted {
-        level: ContextLevel::L2Phase,
-        reason: format!("semantic phase: {phase}"),
-      }),
-    )?;
-
     let base_summary = match explicit_summary {
       Some(text) => text.to_string(),
       None => {
@@ -1506,40 +1712,13 @@ impl<'a> TurnLoop<'a> {
       }
     };
     let summary_text = format!("[Phase Compaction: {phase}]\n{base_summary}");
-    let summary_message = Message::user(summary_text.clone());
-
-    self.emit_message(
-      Some(turn_id.clone()),
-      AgentEvent::ContextSummary,
-      &summary_message,
-    )?;
-
-    let summary_ref = self.trace.put_payload(summary_text.as_bytes())?;
-    self.emit(
-      Some(turn_id.clone()),
-      AgentEvent::ContextCompactionEpoch(ContextCompactionEpoch {
-        context_epoch: self.context_epoch,
-        summary: summary_ref,
-        replaces_from,
-        replaces_through,
-      }),
-    )?;
-
-    self.messages.drain(..removed);
-    self.messages.push(summary_message);
-    self.last_compaction = Some(Instant::now());
-
-    self.emit(
-      Some(turn_id.clone()),
-      AgentEvent::ContextCompactionCompleted(ContextCompactionCompleted {
-        level: ContextLevel::L2Phase,
-        removed_messages: removed as u32,
-        retained_messages: kept as u32,
-        context_epoch: self.context_epoch,
-      }),
-    )?;
-
-    Ok(removed as u32)
+    self.compact_range(
+      turn_id,
+      removed,
+      &summary_text,
+      ContextLevel::L2Phase,
+      format!("semantic phase: {phase}"),
+    )
   }
 
   /// Synthesize a structured ContextCapsule from messages and context state.
@@ -1676,8 +1855,108 @@ impl<'a> TurnLoop<'a> {
     Ok(event)
   }
 
+  /// Checkpoint only pre-turn history while a turn is active. The current-turn
+  /// suffix remains verbatim so an automatic checkpoint cannot undermine the
+  /// same recovery boundary used for provider overflow.
+  fn checkpoint_turn_prefix(
+    &mut self,
+    turn_id: &TurnId,
+    capsule: ContextCapsule,
+    turn_history_start: &mut usize,
+  ) -> Result<Option<CheckpointCreated>, TurnError> {
+    let prefix_end = (*turn_history_start).min(self.messages.len());
+    if prefix_end == 0 {
+      return Ok(None);
+    }
+    let summarized_events = prefix_end as u64;
+    let (checkpoint_id, path) = match self.trace.create_checkpoint(&capsule)? {
+      Some((id, path)) => (id, path),
+      None => {
+        let id = CheckpointId::new();
+        let path = format!("checkpoints/{id}.json");
+        (id, path)
+      }
+    };
+    let event = CheckpointCreated {
+      checkpoint_id,
+      capsule_version: capsule.version,
+      summarized_events,
+      path,
+    };
+    self.emit(
+      Some(turn_id.clone()),
+      AgentEvent::CheckpointCreated(event.clone()),
+    )?;
+
+    let capsule_message = Message::user(capsule.format_for_model());
+    let retained = self.messages.len() - prefix_end;
+    let next_epoch = self.context_epoch.saturating_add(1);
+    self.emit(
+      Some(turn_id.clone()),
+      AgentEvent::ContextCompactionCompleted(ContextCompactionCompleted {
+        level: ContextLevel::L3Checkpoint,
+        removed_messages: prefix_end as u32,
+        retained_messages: retained as u32,
+        context_epoch: next_epoch,
+      }),
+    )?;
+
+    self.messages.splice(0..prefix_end, [capsule_message]);
+    *turn_history_start = 1;
+    self.context_epoch = next_epoch;
+    self.last_compaction = Some(Instant::now());
+    Ok(Some(event))
+  }
+
+  /// Compact only pre-turn history while a turn is active, preserving the
+  /// current-turn suffix and updating its boundary after replacement.
+  fn compact_turn_prefix(
+    &mut self,
+    turn_id: &TurnId,
+    turn_history_start: &mut usize,
+    level: ContextLevel,
+    reason: String,
+  ) -> Result<u32, TurnError> {
+    let prefix_end = (*turn_history_start).min(self.messages.len());
+    if prefix_end == 0 {
+      return Ok(0);
+    }
+    let prefix = self.messages[..prefix_end].to_vec();
+    let summary = match &self.summarizer {
+      Some(summarizer) => summarizer(&prefix),
+      None => structured_summary(&prefix),
+    };
+    let removed = self.compact_range(turn_id, prefix_end, &summary, level, reason)?;
+    if removed > 0 {
+      *turn_history_start = 1;
+    }
+    Ok(removed)
+  }
+
+  /// Assemble the exact provider request shape without consulting or mutating
+  /// context policy. Emergency overflow recovery uses this same constructor.
+  fn assemble_request(&self, messages: Vec<Message>) -> ModelRequest {
+    let capabilities = self.provider().capabilities();
+    let tools = if capabilities.tools {
+      self.tools.specs()
+    } else {
+      Vec::new()
+    };
+    let mut request = ModelRequest::new(self.active_model(), capabilities, messages)
+      .with_tools(tools)
+      .with_thinking(self.thinking);
+    if let Some(system) = self.system.clone() {
+      request = request.with_system(system);
+    }
+    request
+  }
+
   /// Build the model request, consulting the context policy first.
-  fn build_request(&mut self, turn_id: &TurnId) -> Result<ModelRequest, TurnError> {
+  fn build_request(
+    &mut self,
+    turn_id: &TurnId,
+    turn_history_start: &mut usize,
+  ) -> Result<ModelRequest, TurnError> {
     let capabilities = self.provider().capabilities();
     let state = {
       let mut state = ContextState::zero(capabilities.context_window);
@@ -1715,14 +1994,15 @@ impl<'a> TurnLoop<'a> {
         target_tokens,
       } => {
         let mut compacted = 0;
-        if level == ContextLevel::L2Phase {
-          compacted = self.compact_phase(turn_id, &reason, None, false)?;
-        } else if self.compaction_strategy == CompactionStrategy::Summarize
-          || self.summarizer.is_some()
+        if *turn_history_start > 0
+          && (level == ContextLevel::L2Phase
+            || self.compaction_strategy == CompactionStrategy::Summarize
+            || self.summarizer.is_some())
         {
-          compacted = self.compact_with_summary(turn_id, target_tokens)?;
+          compacted =
+            self.compact_turn_prefix(turn_id, turn_history_start, level, reason.clone())?;
         }
-        if compacted == 0 && self.evict_oldest(target_tokens, turn_id)? == 0 {
+        if compacted == 0 && self.evict_oldest(target_tokens, turn_id, turn_history_start)? == 0 {
           // Nothing could be dropped: the newest turn alone is over the target.
           // The recommendation is the surface's again, so it stays visible.
           self.diagnostic(
@@ -1735,8 +2015,15 @@ impl<'a> TurnLoop<'a> {
       ContextAction::SuggestCheckpoint { reason } => {
         if self.checkpoint_strategy == CheckpointStrategy::Auto {
           let capsule = self.synthesize_capsule(&state, &reason);
-          match self.checkpoint(turn_id, capsule) {
-            Ok(created) => {
+          let checkpoint = if *turn_history_start > 0 {
+            self.checkpoint_turn_prefix(turn_id, capsule, turn_history_start)?
+          } else {
+            // The only resident messages are from this turn. Resetting them
+            // would erase content that overflow recovery is required to keep.
+            None
+          };
+          match checkpoint {
+            Some(created) => {
               self.diagnostic(
                 Some(turn_id.clone()),
                 DiagnosticLevel::Info,
@@ -1746,11 +2033,11 @@ impl<'a> TurnLoop<'a> {
                 ),
               )?;
             }
-            Err(error) => {
+            None => {
               self.diagnostic(
                 Some(turn_id.clone()),
                 DiagnosticLevel::Warn,
-                format!("checkpoint failed under context pressure: {error:?}"),
+                format!("context suggests checkpoint: {reason}"),
               )?;
             }
           }
@@ -1765,20 +2052,7 @@ impl<'a> TurnLoop<'a> {
       ContextAction::Warn { .. } | ContextAction::Keep | ContextAction::ReducePayload { .. } => {}
     }
 
-    // Tool schemas are exposed only when the active model can honour them: a model
-    // without tool support must not be offered a call it will malform.
-    let tools = if capabilities.tools {
-      self.tools.specs()
-    } else {
-      Vec::new()
-    };
-    let mut request = ModelRequest::new(self.active_model(), capabilities, self.messages.clone())
-      .with_tools(tools)
-      .with_thinking(self.thinking);
-    if let Some(system) = self.system.clone() {
-      request = request.with_system(system);
-    }
-    Ok(request)
+    Ok(self.assemble_request(self.messages.clone()))
   }
 
   /// Close fully decoded calls from a response that cannot be acted on.
@@ -2010,6 +2284,9 @@ impl<'a> TurnLoop<'a> {
 enum TurnFailure {
   /// The user stopped it. Not a fault, so never recovered from.
   Cancelled,
+  /// The provider rejected an otherwise uncommitted request for context size.
+  /// The outer turn loop may compact only pre-turn history and reissue once.
+  ProviderOverflow(ModelFailure),
   /// No model can serve the request.
   Fatal(ModelFailure),
   /// The trace could not be written.
@@ -2190,6 +2467,10 @@ fn elapsed_ms(clock: Instant) -> u64 {
 }
 
 /// Rough token estimate for one request, used only until a measurement exists.
+///
+/// The estimate deliberately includes the complete tool schema because a request
+/// can fit by message bytes alone while still exceeding the provider window once
+/// exposed tools are serialized.
 fn estimate_tokens(request: &ModelRequest) -> u64 {
   let mut bytes = request
     .system
@@ -2200,9 +2481,25 @@ fn estimate_tokens(request: &ModelRequest) -> u64 {
     bytes += estimate_message_bytes(message);
   }
   for spec in &request.tools {
-    bytes += spec.description.len() + spec.name.len();
+    bytes += spec.name.len() + spec.description.len() + spec.parameters.to_string().len();
   }
   (bytes / 4).max(1) as u64
+}
+
+/// Leave explicit headroom after a provider has proved the advertised window
+/// estimate was optimistic. The same assembled request is measured before this
+/// target is accepted, so system text, tools, and message ordering all count.
+fn overflow_recovery_target(window: u64) -> u64 {
+  window.saturating_mul(9) / 10
+}
+
+/// Truncate text without ever splitting a UTF-8 code point.
+pub fn truncate_utf8_to_bytes(text: &str, max_bytes: usize) -> &str {
+  let mut end = max_bytes.min(text.len());
+  while end > 0 && !text.is_char_boundary(end) {
+    end -= 1;
+  }
+  &text[..end]
 }
 
 /// Rough token estimate for history alone.
@@ -2613,6 +2910,30 @@ mod tests {
     }
   }
 
+  struct SizedTool {
+    description: String,
+    schema: serde_json::Value,
+  }
+
+  impl Tool for SizedTool {
+    fn metadata(&self) -> ToolMetadata {
+      ToolMetadata::read_only("sized", self.description.clone())
+    }
+
+    fn arguments_schema(&self) -> serde_json::Value {
+      self.schema.clone()
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn execute(
+      &self,
+      _request: &ToolRequest,
+      _progress: &mut dyn pi_rs_core::ToolProgress,
+    ) -> Result<ToolOutcome, pi_rs_core::ToolError> {
+      Ok(ToolOutcome::succeeded("ok"))
+    }
+  }
+
   /// A registry over a throwaway workspace, with `tools` auto-approved.
   fn registry_with(tools: Vec<Box<dyn Tool>>) -> ToolRegistry {
     let policy = pi_rs_core::ToolPolicy {
@@ -2639,6 +2960,28 @@ mod tests {
 
     fn record_message(&mut self, _attributed: &AttributedMessage) -> Result<(), SinkError> {
       Err(SinkError("session log is unavailable".into()))
+    }
+  }
+
+  struct FailingCompactionSink {
+    summary_event: bool,
+  }
+
+  impl Trace for FailingCompactionSink {
+    fn emit(&mut self, envelope: &mut EventEnvelope) -> Result<(), SinkError> {
+      if matches!(envelope.event, AgentEvent::ContextSummary) {
+        self.summary_event = true;
+      }
+      Ok(())
+    }
+
+    fn record_message(&mut self, _attributed: &AttributedMessage) -> Result<(), SinkError> {
+      if self.summary_event {
+        return Err(SinkError(
+          "compaction summary could not be persisted".into(),
+        ));
+      }
+      Ok(())
     }
   }
 
@@ -2815,6 +3158,517 @@ mod tests {
       1,
       "the user turn is the only history a first turn has"
     );
+  }
+
+  #[test]
+  fn provider_overflow_compacts_old_history_and_reissues_once() {
+    let provider = Scripted::new("overflow", vec![text("recovered")]).fails(
+      0,
+      ModelFailure::new(
+        ModelFailureKind::ContextOverflow,
+        FailurePhase::WaitingForResponse,
+        "context window exceeded",
+      ),
+    );
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user("old history")]);
+
+    let report = runtime
+      .run_turn("new turn", &CancelToken::new(), &mut SilentProgress)
+      .expect("the compacted reissue succeeds");
+
+    assert_eq!(report.text, "recovered");
+    assert_eq!(report.requests, 2);
+    assert_eq!(trace.count("context_compaction_epoch"), 1);
+    assert_eq!(trace.count("model_failover"), 0);
+    assert_eq!(trace.count("model_request_started"), 2);
+    assert_eq!(trace.count("model_request_completed"), 2);
+    let reissue = &provider.requests()[1];
+    assert!(
+      reissue.messages[0]
+        .text()
+        .contains("Summary of earlier conversation")
+    );
+    assert_eq!(reissue.messages[1].text(), "new turn");
+  }
+
+  #[test]
+  fn a_second_provider_overflow_is_terminal_after_one_compaction() {
+    let overflow = ModelFailure::new(
+      ModelFailureKind::ContextOverflow,
+      FailurePhase::WaitingForResponse,
+      "context window exceeded",
+    );
+    let provider = Scripted::new("overflow-twice", Vec::new())
+      .fails(0, overflow.clone())
+      .fails(1, overflow);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user("old history")])
+    .run_turn("new turn", &CancelToken::new(), &mut SilentProgress)
+    .expect_err("the second refusal is terminal");
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::ContextOverflow));
+    assert_eq!(provider.requests().len(), 2);
+    assert_eq!(trace.count("context_compaction_epoch"), 1);
+    assert_eq!(trace.count("model_request_started"), 2);
+    assert_eq!(trace.count("model_request_completed"), 2);
+  }
+
+  #[test]
+  fn text_before_context_overflow_is_not_replayed() {
+    let provider = Scripted::new("partial-overflow", vec![text("partial")])
+      .fails_after_stream(ModelFailureKind::ContextOverflow);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user("old history")])
+    .run_turn("new turn", &CancelToken::new(), &mut SilentProgress)
+    .expect_err("committed text makes overflow terminal");
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::ContextOverflow));
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(trace.count("context_compaction_epoch"), 0);
+    assert_eq!(trace.count("assistant_delta"), 1);
+  }
+
+  #[test]
+  fn reasoning_before_context_overflow_is_not_replayed() {
+    let provider = Scripted::new(
+      "reasoning-overflow",
+      vec![vec![ProviderEvent::ReasoningDelta {
+        text: "already committed".into(),
+        provenance: ReasoningProvenance::Native,
+      }]],
+    )
+    .fails_after_stream(ModelFailureKind::ContextOverflow);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user("old history")])
+    .run_turn("new turn", &CancelToken::new(), &mut SilentProgress)
+    .expect_err("committed reasoning makes overflow terminal");
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::ContextOverflow));
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(trace.count("context_compaction_epoch"), 0);
+    assert_eq!(trace.count("reasoning_delta"), 1);
+  }
+
+  #[test]
+  fn decoded_tool_call_before_context_overflow_is_not_replayed() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let provider = Scripted::new(
+      "tool-overflow",
+      vec![tool_call("spy", serde_json::json!({"value": 1}))],
+    )
+    .fails_after_stream(ModelFailureKind::ContextOverflow);
+    let tools = registry_with(vec![Box::new(Spy(Arc::clone(&seen)))]);
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user("old history")])
+    .run_turn("new turn", &CancelToken::new(), &mut SilentProgress)
+    .expect_err("a decoded call commits the failed request");
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::ContextOverflow));
+    assert_eq!(provider.requests().len(), 1);
+    assert!(seen.lock().unwrap().is_empty());
+    assert_eq!(trace.count("context_compaction_epoch"), 0);
+    assert_eq!(trace.count("tool_requested"), 1);
+    assert_eq!(trace.count("tool_failed"), 1);
+  }
+
+  #[test]
+  fn overflow_without_prior_history_is_terminal() {
+    let provider = Scripted::new("no-history", Vec::new()).fails(
+      0,
+      ModelFailure::new(
+        ModelFailureKind::ContextOverflow,
+        FailurePhase::WaitingForResponse,
+        "context window exceeded",
+      ),
+    );
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn(
+      "only current-turn content",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .expect_err("the current turn cannot be summarized away");
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::ContextOverflow));
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(trace.count("context_compaction_epoch"), 0);
+  }
+
+  #[test]
+  fn overflow_preserves_external_and_tool_context_verbatim() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let overflow = ModelFailure::new(
+      ModelFailureKind::ContextOverflow,
+      FailurePhase::WaitingForResponse,
+      "context window exceeded",
+    );
+    let provider = Scripted::new(
+      "preserve-turn",
+      vec![
+        tool_call("spy", serde_json::json!({"value": 1})),
+        text("done"),
+      ],
+    )
+    .fails(1, overflow);
+    let tools = registry_with(vec![Box::new(Spy(Arc::clone(&seen)))]);
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let source = pi_rs_core::trace::ExternalContextSource {
+      provider: "fixture".into(),
+      resource_id: "doc-1".into(),
+      provenance: "fixture/source".into(),
+    };
+    let external = ExternalContextItem::inline(source, "external evidence", Some("C1".into()));
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user("old history")]);
+
+    runtime
+      .run_turn_with_external_context(
+        "new turn",
+        &[external],
+        &CancelToken::new(),
+        &mut SilentProgress,
+      )
+      .expect("the reissue completes");
+
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    let reissue = &requests[2];
+    assert!(
+      reissue.messages[0]
+        .text()
+        .contains("Summary of earlier conversation")
+    );
+    assert!(reissue.messages[1].text().contains("external evidence"));
+    assert_eq!(reissue.messages[2].text(), "new turn");
+    assert!(matches!(reissue.messages[3].role, Role::Assistant));
+    assert!(matches!(reissue.messages[4].role, Role::Tool));
+    assert_eq!(trace.count("context_compaction_epoch"), 1);
+  }
+
+  #[test]
+  fn overflow_recovery_request_budget_resets_on_the_next_turn() {
+    let provider = Scripted::new(
+      "budget-reset",
+      vec![text("first answer"), text("second answer")],
+    )
+    .fails(
+      0,
+      ModelFailure::new(
+        ModelFailureKind::ContextOverflow,
+        FailurePhase::WaitingForResponse,
+        "context window exceeded",
+      ),
+    );
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user("old history")]);
+
+    let first = runtime
+      .run_turn("first", &CancelToken::new(), &mut SilentProgress)
+      .expect("first turn recovers");
+    let second = runtime
+      .run_turn("second", &CancelToken::new(), &mut SilentProgress)
+      .expect("second turn starts with a fresh budget");
+
+    assert_eq!(first.requests, 2);
+    assert_eq!(second.requests, 1);
+    assert_eq!(provider.requests().len(), 3);
+  }
+
+  #[test]
+  fn overflow_summary_bounding_is_utf8_safe() {
+    let provider = {
+      let mut provider = Scripted::new("utf8-overflow", vec![text("done")]).fails(
+        0,
+        ModelFailure::new(
+          ModelFailureKind::ContextOverflow,
+          FailurePhase::WaitingForResponse,
+          "context window exceeded",
+        ),
+      );
+      provider.capabilities.context_window = 128;
+      provider
+    };
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user("old history")])
+    .with_summarizer(|_| "한국어 문장 日本語の文章 🙂🚀 ".repeat(200));
+
+    runtime
+      .run_turn("new turn", &CancelToken::new(), &mut SilentProgress)
+      .expect("bounded UTF-8 summary can be reissued");
+
+    let summary = provider.requests()[1].messages[0].text();
+    assert!(std::str::from_utf8(summary.as_bytes()).is_ok());
+    assert!(summary.len() < 128 * 4);
+    assert_eq!(truncate_utf8_to_bytes("한국어🙂🚀", 1), "");
+    assert_eq!(truncate_utf8_to_bytes("한국어🙂🚀", 9), "한국어");
+  }
+
+  #[test]
+  fn system_prompt_participates_in_overflow_candidate_sizing() {
+    let mut provider = Scripted::new("system-size", vec![text("unused")]).fails(
+      0,
+      ModelFailure::new(
+        ModelFailureKind::ContextOverflow,
+        FailurePhase::WaitingForResponse,
+        "context window exceeded",
+      ),
+    );
+    provider.capabilities.context_window = 2_000;
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_system("system ".repeat(2_000))
+    .with_messages(vec![Message::user("old history")])
+    .run_turn("new turn", &CancelToken::new(), &mut SilentProgress)
+    .expect_err("the system prompt consumes the recovery budget");
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::ContextOverflow));
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(trace.count("context_compaction_epoch"), 0);
+  }
+
+  #[test]
+  fn tool_schema_participates_in_overflow_candidate_sizing() {
+    let mut provider = Scripted::new("tool-size", vec![text("unused")]).fails(
+      0,
+      ModelFailure::new(
+        ModelFailureKind::ContextOverflow,
+        FailurePhase::WaitingForResponse,
+        "context window exceeded",
+      ),
+    );
+    provider.capabilities.context_window = 2_000;
+    let large = "schema ".repeat(600);
+    let tools = registry_with(vec![Box::new(SizedTool {
+      description: large.clone(),
+      schema: serde_json::json!({"type":"object","description":large}),
+    })]);
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user("old history")])
+    .run_turn("new turn", &CancelToken::new(), &mut SilentProgress)
+    .expect_err("tool schemas consume the recovery budget");
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::ContextOverflow));
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(trace.count("context_compaction_epoch"), 0);
+  }
+
+  #[test]
+  fn compaction_sink_failure_does_not_mutate_live_history() {
+    let provider = Scripted::new("compaction-failure", vec![text("unused")]).fails(
+      0,
+      ModelFailure::new(
+        ModelFailureKind::ContextOverflow,
+        FailurePhase::WaitingForResponse,
+        "context window exceeded",
+      ),
+    );
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = FailingCompactionSink {
+      summary_event: false,
+    };
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user("old history")]);
+
+    let error = runtime
+      .run_turn("new turn", &CancelToken::new(), &mut SilentProgress)
+      .expect_err("compaction persistence failure is terminal");
+
+    assert!(matches!(error, TurnError::Sink(message) if message.contains("compaction summary")));
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(runtime.context_epoch, 0);
+    assert_eq!(
+      runtime
+        .messages()
+        .iter()
+        .map(Message::text)
+        .collect::<Vec<_>>(),
+      ["old history", "new turn"]
+    );
+  }
+
+  #[test]
+  fn assembled_request_keeps_production_shape_and_order() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let provider = Scripted::new("assembly", vec![text("ok")]);
+    let tools = registry_with(vec![Box::new(Spy(Arc::clone(&seen)))]);
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_system("system instructions")
+    .with_thinking(ThinkingLevel::High);
+
+    runtime
+      .run_turn("first", &CancelToken::new(), &mut SilentProgress)
+      .unwrap();
+    let request = &provider.requests()[0];
+
+    assert_eq!(request.system.as_deref(), Some("system instructions"));
+    assert_eq!(request.thinking, ThinkingLevel::High);
+    assert_eq!(request.tools.len(), 1);
+    assert_eq!(request.tools[0].name, "spy");
+    assert_eq!(request.messages.len(), 1);
+    assert_eq!(request.messages[0].text(), "first");
   }
 
   #[test]
@@ -4035,6 +4889,46 @@ mod tests {
   }
 
   #[test]
+  fn prefix_compaction_puts_summary_before_an_untouched_suffix() {
+    let provider = Scripted::new("prefix", vec![text("ok")]);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, 32_768);
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![
+      Message::user("m1"),
+      Message::assistant("m2"),
+      Message::user("m3"),
+      Message::assistant("m4"),
+    ]);
+    let suffix = runtime.messages()[2..].to_vec();
+
+    let replaced = runtime
+      .compact_prefix(&TurnId::new(), 2, "summary")
+      .expect("prefix compaction succeeds");
+
+    assert_eq!(replaced, 2);
+    assert_eq!(runtime.messages()[0], Message::user("summary"));
+    assert_eq!(&runtime.messages()[1..], suffix.as_slice());
+    assert_eq!(runtime.context_epoch, 1);
+    let kinds = trace.kinds();
+    let at = |kind: &str| kinds.iter().position(|item| item == kind).unwrap();
+    assert!(
+      at("context_compaction_started") < at("context_summary")
+        && at("context_summary") < at("context_compaction_epoch")
+        && at("context_compaction_epoch") < at("context_compaction_completed")
+    );
+    assert_eq!(trace.count("context_compaction_epoch"), 1);
+  }
+
+  #[test]
   fn compaction_opens_a_durable_epoch_and_leaves_the_summary_visible() {
     let provider = Scripted::new("compacted", vec![text("ok")]);
     let tools = registry_with(Vec::new());
@@ -4135,8 +5029,8 @@ mod tests {
         .iter()
         .map(Message::text)
         .collect::<Vec<_>>(),
-      ["three done", "a summary"],
-      "the summary follows the one message retained across it"
+      ["a summary", "three done"],
+      "the summary precedes the one message retained across it"
     );
     let removed = harness.compact(&turn, "a summary of a summary", 0).unwrap();
     assert_eq!(
@@ -4295,6 +5189,40 @@ mod tests {
         .any(|m| m.text().contains("Summary of earlier conversation")),
       "request carries the synthesized summary"
     );
+  }
+
+  #[test]
+  fn provider_overflow_does_not_open_a_second_epoch_after_proactive_compaction() {
+    let mut provider = Scripted::new("proactive-overflow", vec![text("ok")]).fails(
+      0,
+      ModelFailure::new(
+        ModelFailureKind::ContextOverflow,
+        FailurePhase::WaitingForResponse,
+        "context window exceeded",
+      ),
+    );
+    provider.capabilities.context_window = PRESSURED_WINDOW;
+    let tools = registry_with(Vec::new());
+    let policy =
+      pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, PRESSURED_WINDOW);
+    let mut trace = Recorder::default();
+
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(heavy_turns(16))
+    .with_compaction_strategy(CompactionStrategy::Summarize)
+    .run_turn("go", &CancelToken::new(), &mut SilentProgress)
+    .expect("the existing proactive compaction is reused");
+
+    assert_eq!(report.requests, 2);
+    assert_eq!(provider.requests().len(), 2);
+    assert_eq!(trace.count("context_compaction_epoch"), 1);
   }
 
   #[test]
@@ -4605,7 +5533,7 @@ mod tests {
     assert_eq!(removed, 4);
     assert_eq!(turn_loop.messages().len(), 2); // 1 retained + 1 phase summary message
     assert!(
-      turn_loop.messages()[1]
+      turn_loop.messages()[0]
         .text()
         .contains("[Phase Compaction: implementation complete]")
     );

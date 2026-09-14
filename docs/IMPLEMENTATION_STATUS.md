@@ -7,7 +7,7 @@ yet exercised**.
 Verification for everything marked *done* below:
 
 ```
-cargo test --workspace --all-features      # 955 tests (2026-09-14)
+cargo test --workspace --all-features      # 970 tests (2026-09-14)
 cargo clippy --workspace --all-targets --all-features   # 0 warnings
 cargo fmt --all --check
 cargo doc --workspace --no-deps      # 0 warnings
@@ -21,7 +21,7 @@ cargo doc --workspace --no-deps      # 0 warnings
 | Durability | `pi-rs-store` | done, incl. payload bounding, externalized fields, retention | 136 |
 | Model I/O | `pi-rs-provider` | done, verified against a real endpoint | 82 |
 | Native tools | `pi-rs-tools` | done, lifecycle + failure/unknown outcomes | 92 |
-| Turn loop + recovery | `pi-rs-runtime` | done (failover, cancel, handles) | 57 |
+| Turn loop + recovery | `pi-rs-runtime` | done (failover, cancel, handles, provider-overflow recovery) | 72 |
 | Surface | `pi-rs-tui` | done (raw terminal, editor, status, highlighting, wrap) | 179 |
 | Pi compatibility readers | `pi-rs-compat` | skills, prompts, packages; fixture suites | 93 |
 | MCP client | `pi-rs-mcp` | done, lazy stdio transport, discovery, and tool normalization | 11 |
@@ -86,6 +86,12 @@ projection remain separate files.
   provider-reported cancellation. It is a status, never a fault, and never recovers.
 * `TurnError::kind()` lets a caller distinguish an outage from a quality failure;
   `session_recoverable()` says whether history can still be trusted.
+* Provider-reported `ContextOverflow` is classified after the failed request span is
+  closed. When no reasoning, text, or decoded tool call committed, the active turn may
+  compact only history predating that turn and reissue exactly once. The local structured
+  summary is bounded against the complete assembled request, including system text and
+  tool schemas; a second refusal or any committed output is terminal, and overflow never
+  triggers failover.
 
 ## Contract changes this slice required
 

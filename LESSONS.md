@@ -67,3 +67,26 @@ evidence-backed; delete one when its prevention becomes structurally enforced.
 - Prevention: when resolving conflicts in `TOP_HELP`/`RUN_HELP`, diff the rendered
   `pi-rs --help` output against every `tests/*_cli.rs` assertion before committing
   the merge.
+
+## Context probes must be pure
+
+When a recovery path needs to measure a candidate request, do not call a builder that also
+consults policy and evicts or compacts live messages. Assemble the candidate from a copied
+message vector with the same production provider, system prompt, tools, and thinking settings;
+only commit context changes after that candidate fits. A measurement that mutates the working
+set can make the recovery boundary point at the wrong history and turn a safe retry into a
+false no-op.
+
+## Overflow fixtures must fit the recovery mechanism
+
+A context-window fixture must be large enough to carry the bounded summary, retained current
+turn, system prompt, tool schemas, and request overhead. Tiny windows can make the recovery
+request structurally impossible before the behavior under test is reached. Keep a separate
+no-fit test, but size the success fixtures from the mechanism's own minimum request shape.
+
+## Provider overflow is not failover
+
+A provider's context refusal proves that the exact request was too large; switching models is
+not a substitute for compacting history. Only an uncommitted refusal may trigger one local
+prefix compaction and reissue, and committed reasoning, text, or decoded tool calls must make
+the refusal terminal.
