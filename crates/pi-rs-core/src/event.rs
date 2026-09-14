@@ -267,11 +267,12 @@ pub enum AgentEvent {
   /// its content to. The text itself declares that it is a summary of earlier
   /// conversation; this event's role is attribution, not new semantics.
   /// Ordering: after `ContextCompactionStarted`, before the epoch record that
-  /// references the summary.
+  /// references the summary. L3 checkpoint compaction does not emit this variant.
   /// Persistence: always. Replay: one more message in canonical history; the
   /// epoch record, not this event, is what makes it model-visible.
   /// UI: renders like any assistant-visible text when a consumer asks for it.
-  /// Producer: `TurnLoop::compact`.
+  /// Producer: `TurnLoop::compact` and `TurnLoop::compact_phase` in
+  /// `crates/pi-rs-runtime/src/turn.rs`.
   ContextSummary,
   /// Why: a compaction moved the model-visible context to a new epoch, and this is
   /// the durable record of which canonical range it replaced and what stands in
@@ -282,6 +283,8 @@ pub enum AgentEvent {
   /// summary for the replaced range in model-visible context only; canonical
   /// history is replayed unchanged.
   /// UI: rare, and it must read as "context changed", never as "history changed".
+  /// Producer: `TurnLoop::compact` and `TurnLoop::compact_phase` in
+  /// `crates/pi-rs-runtime/src/turn.rs`.
   ContextCompactionEpoch(ContextCompactionEpoch),
   /// Why: an episode checkpoint capsule was written.
   /// Ordering: after the events summarized by the capsule.
