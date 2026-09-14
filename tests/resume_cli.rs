@@ -154,11 +154,14 @@ impl FakeServer {
               Err(error) => panic!("accept provider request: {error}"),
             }
           };
+          let _ = socket.set_nonblocking(false);
+          let _ = socket.set_read_timeout(Some(Duration::from_secs(10)));
           let request = drain_request(&mut socket);
           socket
             .write_all(response.as_bytes())
             .expect("write response");
           socket.flush().expect("flush response");
+          let _ = socket.shutdown(std::net::Shutdown::Write);
           request
         })
         .collect()

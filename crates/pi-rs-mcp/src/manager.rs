@@ -272,12 +272,14 @@ mod tests {
           )
         };
         let response_text = format!(
-          "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{response}",
+          "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{response}",
           response.len()
         );
         stream
           .write_all(response_text.as_bytes())
           .expect("write HTTP response");
+        stream.flush().expect("flush HTTP response");
+        let _ = stream.shutdown(std::net::Shutdown::Both);
       }
     });
 

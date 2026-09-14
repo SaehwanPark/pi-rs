@@ -694,10 +694,16 @@ mod tests {
         let mut seen = header_text;
         seen.push_str(&String::from_utf8_lossy(&body));
         seen_tx.send(seen).expect("send fixture request");
+        let response = if !response.to_ascii_lowercase().contains("connection:") {
+          response.replacen("\r\n\r\n", "\r\nConnection: close\r\n\r\n", 1)
+        } else {
+          response
+        };
         stream
           .write_all(response.as_bytes())
           .expect("write fixture response");
         stream.flush().expect("flush fixture response");
+        let _ = stream.shutdown(std::net::Shutdown::Both);
       }
     });
     (format!("http://{address}/mcp"), seen_rx, handle)
@@ -709,6 +715,7 @@ mod tests {
       concat!(
         "HTTP/1.1 200 OK\r\n",
         "Content-Type: application/json\r\n",
+        "Connection: close\r\n",
         "Mcp-Session-Id: session-1\r\n",
         "Content-Length: 45\r\n\r\n",
         r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#
@@ -717,6 +724,7 @@ mod tests {
       concat!(
         "HTTP/1.1 200 OK\r\n",
         "Content-Type: text/event-stream\r\n",
+        "Connection: close\r\n",
         "Content-Length: 53\r\n\r\n",
         "data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"ok\":true}}\n\n"
       )
