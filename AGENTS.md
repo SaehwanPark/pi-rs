@@ -97,6 +97,7 @@ Use GitHub proactively as the durable communication channel when human collabora
 * If code is reviewed before opening PR, skip the review step and open the PR directly.
 * Do not merge, close, force-push shared work, or perform other irreversible repository actions unless explicitly authorized or clearly permitted by project policy.
 * Never commit secrets, credentials, private data, or machine-specific sensitive artifacts.
+* Make the project development progress **monitorable via GitHub**. To do so, make sure remote branches are up-to-date with the latest local branches during development. **Do not wait** until the end of development to push to remote branches.
 
 Use local context for active reasoning; use GitHub for durable project state and asynchronous human communication. Make the project owner can monitor the agent's current progress/status accurately via GitHub.
 
