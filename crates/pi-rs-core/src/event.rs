@@ -799,10 +799,9 @@ mod tests {
     assert_eq!(decoded, event);
   }
 
-  /// Why: neither compaction variant has a production producer (see
-  /// docs/COMPACT_EVENT_AUDIT.md), so the serialized shape is the only
-  /// contract that keeps it compatible. Pin the `type` tag and every field
-  /// name exactly, so a rename or a dropped field fails here.
+  /// Why: compaction variants have production producers and are part of the
+  /// persisted trace contract. Pin the `type` tag and every field name exactly,
+  /// so a rename or a dropped field fails here.
   #[test]
   fn compaction_started_wire_shape_is_pinned() {
     let event = AgentEvent::ContextCompactionStarted(ContextCompactionStarted {
