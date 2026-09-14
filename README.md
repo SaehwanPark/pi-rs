@@ -77,10 +77,10 @@ for this command. An explicitly approved `exec` still invokes a shell and is an
 intentional escape hatch, not an OS sandbox; use operating-system isolation when
 untrusted commands require containment.
 
-Each invocation creates a session under `state_dir` and persists attributed user,
-assistant, and tool messages separately from the ordered canonical trace. Use
-`--resume <id|prefix>` to continue an existing session; the command does not provide an
-interactive approval prompt or a REPL.
+A new invocation creates a session under `state_dir` and persists attributed user,
+assistant, and tool messages separately from the ordered canonical trace. `--resume
+<id|prefix>` reopens an existing session and appends to it; the command does not provide
+an interactive approval prompt or a REPL.
 
 ## Major runtime capabilities
 
@@ -174,7 +174,10 @@ Priority targets:
 
 ### External context
 
-Durable knowledge should be representable through rehydratable references rather than copied permanently into working context. The runtime already accepts provenance-aware external context items and records retrieval events; `rkb-rs` is the first planned reference integration.
+Durable knowledge should be representable through rehydratable references rather than
+copied permanently into working context. The runtime already accepts provenance-aware
+external context items and records retrieval events; `rkb-rs` is the first planned
+reference integration.
 
 ## UX philosophy
 

@@ -1,7 +1,8 @@
-# Slice: prove that every tool action leaves a durable lifecycle event
+# Slice (historical): prove that every tool action leaves a durable lifecycle event
 
-Phase 4's gate includes "All tool actions produce durable lifecycle events" (ROADMAP). Nothing in
-the repo demonstrates it end-to-end. This slice makes the claim checkable.
+At the time this slice was written, Phase 4's gate included "All tool actions produce durable
+lifecycle events" (ROADMAP) and nothing in the repo demonstrated it end-to-end. The deliverable
+now exists and the gate is checked; the remaining text preserves the original test contract.
 
 ## Orient with grep, do not read whole files
 - `grep -n "Tool\\|Unknown\\|pub enum" crates/pi-rs-core/src/event.rs | head -40` — the lifecycle

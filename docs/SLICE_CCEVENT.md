@@ -1,4 +1,8 @@
-# Slice: pin the compaction event shapes, and say which have producers
+# Slice (historical): pin the compaction event shapes, and say which have producers
+
+At the time this slice was written, `crates/pi-rs-core/src/event.rs` carried more than one
+context-compaction variant without a producer audit. Runtime producers now exist; their status is
+recorded in `docs/COMPACT_EVENT_AUDIT.md`. The remaining text preserves the original test contract.
 
 `crates/pi-rs-core/src/event.rs` carries more than one context-compaction variant. One of them was
 added recently, one was already there, and nobody has established which of them anything actually

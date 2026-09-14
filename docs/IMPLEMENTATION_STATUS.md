@@ -1,7 +1,8 @@
 # Implementation Status
 
 Working status for the `pi-rs` runtime. Roadmap intent lives in [`ROADMAP.md`](../ROADMAP.md);
-this document records **what exists, what is proven, and what is deliberately deferred or not yet exercised**.
+this document records **what exists, what is proven, and what is deliberately deferred or not
+yet exercised**.
 
 Verification for everything marked *done* below:
 
@@ -231,9 +232,10 @@ live model.
 `pi-rs interactive` holds one durable session in one process: raw mode, crossterm events
 mapped through `pi-rs-tui::keys::intent`, the `pi-rs-tui::editor` buffer drawn with one status
 line, and one turn per submit through `run::SessionHandle`, so the second turn carries the
-first. Ctrl-C is handled before the keymap: while a turn is running,
+first. On Unix, Ctrl-C is handled before the keymap: while a turn is running,
 `interrupt::TurnInterruptGuard` flags the runtime cancellation token; while idle, an empty
-buffer quits and a non-empty buffer keeps its text.
+buffer quits and a non-empty buffer keeps its text. Non-Unix builds use a no-op
+signal guard.
 
 Covered by tests: pure event-to-action logic, frame arithmetic, command routing, completion,
 interactive cancellation, and the CLI surface without a real terminal. Not covered: real-terminal

@@ -250,15 +250,15 @@ pub enum AgentEvent {
   /// Ordering: at a turn or phase boundary, never mid-request.
   /// Persistence: always. Replay: applies the compaction marker.
   /// UI: rare, shows the level and reason.
-  /// Producer: none found at 2026-09-07, test fixtures only
-  /// (docs/COMPACT_EVENT_AUDIT.md).
+  /// Producer: `TurnLoop::compact` and `TurnLoop::compact_phase` in
+  /// `crates/pi-rs-runtime/src/turn.rs`.
   ContextCompactionStarted(ContextCompactionStarted),
   /// Why: compaction finished and what it retained.
   /// Ordering: closes a matching compaction start.
   /// Persistence: always. Replay: marks the context epoch advanced.
   /// UI: shows retained/removed counts.
-  /// Producer: none found at 2026-09-07, test fixtures only
-  /// (docs/COMPACT_EVENT_AUDIT.md).
+  /// Producer: `TurnLoop::compact`, `TurnLoop::compact_phase`, and
+  /// `TurnLoop::checkpoint` in `crates/pi-rs-runtime/src/turn.rs`.
   ContextCompactionCompleted(ContextCompactionCompleted),
   /// Why: the summary that replaced a compacted range enters canonical history
   /// as a message, and a message-bearing event is what a session log line binds
