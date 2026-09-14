@@ -1,7 +1,9 @@
-# Compaction event audit (2026-09-07)
+# Compaction event audit (2026-09-07; historical snapshot)
 
 Scope: which context-compaction variants in `crates/pi-rs-core/src/event.rs` anything actually
-constructs. Audit only — no producer was implemented and no variant was deleted.
+constructed at the time. The findings and line references below record the pre-producer audit;
+its resolution is documented at the end of this file. Runtime producers were added later, and no
+variant was deleted.
 
 ## Variants
 

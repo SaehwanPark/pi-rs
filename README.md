@@ -78,8 +78,9 @@ intentional escape hatch, not an OS sandbox; use operating-system isolation when
 untrusted commands require containment.
 
 Each invocation creates a session under `state_dir` and persists attributed user,
-assistant, and tool messages separately from the ordered canonical trace. The
-command does not provide an interactive approval prompt, session resume, or a REPL.
+assistant, and tool messages separately from the ordered canonical trace. Use
+`--resume <id|prefix>` to continue an existing session; the command does not provide an
+interactive approval prompt or a REPL.
 
 ## Major runtime capabilities
 
@@ -138,7 +139,7 @@ Before a backup takes over, its declared capabilities are compared with what the
 
 `pi-rs` should:
 
-- consume MCP tools/resources as a client;
+- consume MCP tools as a client (the current client uses lazy stdio activation);
 - expose itself as an MCP-accessible worker later;
 - avoid eagerly injecting every MCP tool into model context.
 
@@ -157,7 +158,10 @@ unasked.
 `pi-rs prompts [--project]` does the same for Pi's prompt templates, and
 `pi-rs prompt [--project] <name> [arguments…]` expands one — `$1`, `$@`, `${1:-default}`,
 `${@:N:L}` — and prints only the prompt, so a template written for Pi is usable here before
-any session knows how to invoke one.
+any session knows how to invoke one. Package manifests/discovery and per-surface
+compatibility diagnostics are available through `pi-rs packages` and `pi-rs compat`.
+Pi session import/export is available as a partial, loss-reporting adapter; project package
+installation and executable extension compatibility remain deferred.
 
 Priority targets:
 
@@ -170,9 +174,7 @@ Priority targets:
 
 ### External context
 
-Durable knowledge should be representable through rehydratable references rather than copied permanently into working context.
-
-`rkb-rs` is the first planned reference integration.
+Durable knowledge should be representable through rehydratable references rather than copied permanently into working context. The runtime already accepts provenance-aware external context items and records retrieval events; `rkb-rs` is the first planned reference integration.
 
 ## UX philosophy
 

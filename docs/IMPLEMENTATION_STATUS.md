@@ -1,14 +1,14 @@
 # Implementation Status
 
 Working status for the `pi-rs` runtime. Roadmap intent lives in [`ROADMAP.md`](../ROADMAP.md);
-this document records **what exists, what is proven, and what is deliberately not done yet**.
+this document records **what exists, what is proven, and what is deliberately deferred or not yet exercised**.
 
 Verification for everything marked *done* below:
 
 ```
-cargo test --workspace      # 806 tests (2026-09-08, after the full PR-series merge)
+cargo test --workspace --all-features      # 955 tests (2026-09-14)
 cargo clippy --workspace --all-targets --all-features   # 0 warnings
-cargo fmt --all -- --check
+cargo fmt --all --check
 cargo doc --workspace --no-deps      # 0 warnings
 ```
 
@@ -16,14 +16,15 @@ cargo doc --workspace --no-deps      # 0 warnings
 
 | Layer | Crate | State | Tests |
 | --- | --- | --- | --- |
-| Contracts | `pi-rs-core` | done | 81 |
+| Contracts | `pi-rs-core` | done | 82 |
 | Durability | `pi-rs-store` | done, incl. payload bounding, externalized fields, retention | 136 |
-| Model I/O | `pi-rs-provider` | done, verified against a real endpoint | 78 |
-| Native tools | `pi-rs-tools` | done, lifecycle + failure/unknown outcomes | 88 |
-| Turn loop + recovery | `pi-rs-runtime` | done, incl. failover epochs, cancel tokens, multi-turn handles | 41 |
-| Surface | `pi-rs-tui` | done for the interactive surface: raw terminal, buffer/caret, status line, highlighting, wrap | 165 |
-| Pi compatibility readers | `pi-rs-compat` | skills + prompt-template readers with fixture suites | 48 |
-| Composition root | `pi-rs` binary | run, interactive, trace, skills, prompts, prompt, import-pi, export-pi, run --resume | 169 |
+| Model I/O | `pi-rs-provider` | done, verified against a real endpoint | 82 |
+| Native tools | `pi-rs-tools` | done, lifecycle + failure/unknown outcomes | 92 |
+| Turn loop + recovery | `pi-rs-runtime` | done, incl. failover epochs, cancel tokens, multi-turn handles | 57 |
+| Surface | `pi-rs-tui` | done for the interactive surface: raw terminal, buffer/caret, status line, highlighting, wrap | 179 |
+| Pi compatibility readers | `pi-rs-compat` | skills, prompt-template, and package readers with fixture suites | 93 |
+| MCP client | `pi-rs-mcp` | done, lazy stdio transport, discovery, and tool normalization | 11 |
+| Composition root | `pi-rs` binary | run, interactive, trace, skills, prompts, prompt, packages, compat, import-pi, export-pi, run --resume | 223 |
 
 ## What the merge series added on top of the one-shot command
 
@@ -41,8 +42,9 @@ cargo doc --workspace --no-deps      # 0 warnings
 * Benchmarks: cold start, warm start (continuing a stored session), render, and
   keystroke budgets, each with a script under `bench/`.
 
-The compaction events are pinned in shape but still have **no producer**; pre-emptive
-compaction is the current P0 (see `ROADMAP.md`, “Current priorities”).
+Compaction is now produced at the runtime boundary: pre-emptive reduction, summarizing
+compaction, semantic phase compaction, and runtime-driven checkpoint creation are recorded
+as durable context events with epoch tracking (see `ROADMAP.md`, “Current priorities”).
 
 ## What the one-shot command added
 
@@ -182,32 +184,35 @@ is stderr, and a dry run creates no byte on disk.
 `pi-rs trace` reads an imported session back with no knowledge of Pi, which is the proof
 that the import is a session rather than a transcription.
 
-## Not done yet
+## Not yet exercised or deliberately deferred
 
-1. `pi-rs-tui` — ratatui transcript rendering.
-2. Interactive binary composition root/TUI (the headless one-shot path is
-    complete; `pi-rs-tui::editor` holds the buffer, its rows, and its recall, but
-    nothing yet feeds it terminal events).
-3. End-to-end agent loop against the real local endpoint (the one-shot tool loop is
-   covered against a fake OpenAI server; single completions are verified live;
-   tool round-trips through the real provider are not).
-4. Startup benchmarks with full composition root (`bench/startup.sh` harness implemented).
-5. Phase 6 Pi compatibility fixtures.
-6. Surface write errors are not yet routed through the runtime's fallible event
-   channel; stdout/stderr write failures remain a deferred interactive-surface
-   concern rather than being silently reclassified as model or storage failures.
-7. CLI-level fault injection after a durable session is opened is deferred; the
-   runtime sink-failure seam directly proves cancellation and terminal failure.
-8. Approved `exec` is intentionally not an OS sandbox, and outward-pointing
-   symlinks require operating-system isolation if they are in scope. Platform-specific
-   primitives (`std::os::unix::fs::symlink`, `libc::SIGINT`) and integration test commands
-   (`exec.txt` creation) are guarded with `#[cfg(unix)]` and `#[cfg(windows)]` for Windows
-   build and execution compatibility; full Windows CI matrix coverage remains tracked.
-9. A temporal terminal-streaming benchmark is deferred beyond deterministic
-   multi-chunk ordering tests.
-10. An import carries a Pi conversation into both records a session has — trace journal and
-    message log — but a resumed imported session has not been exercised against a live
-    provider; the resume path is proven by store-level restoration, not by a real request.
+The following items are not blockers for the canonical initial MVP, but remain explicit:
+
+1. `pi-rs-tui` uses a terminal-native semantic renderer; a ratatui widget/backend
+   integration is not currently used.
+2. The end-to-end agent loop against a real local endpoint has not been exercised: the
+   one-shot tool loop is covered against a fake OpenAI server, while single completions
+   and tool schema serialization have been verified live.
+3. Surface write errors are not yet routed through the runtime's fallible event channel;
+   stdout/stderr failures remain an interactive-surface concern rather than being silently
+   reclassified as model or storage failures.
+4. CLI-level fault injection after a durable session is opened is deferred; the runtime
+   sink-failure seam directly proves cancellation and terminal failure.
+5. Approved `exec` is intentionally not an OS sandbox, and outward-pointing symlinks require
+   operating-system isolation when they are in scope. Platform-specific primitives and
+   integration commands are guarded for supported platforms; a full Windows CI matrix
+   remains tracked.
+6. A temporal terminal-streaming benchmark is deferred beyond deterministic multi-chunk
+   ordering tests.
+7. A resumed imported session has not been exercised against a live provider; store-level
+   restoration proves the resume projection, not a real request.
+8. Project trust is explicit at compatibility-reader call sites, but a persisted interactive
+   trust-decision workflow remains open. MCP network transport, package installation, and
+   the `rkb-rs` integration remain roadmap work.
+9. Optional trace compression and reconstructed-rationale production remain unimplemented;
+   no producer may infer hidden chain-of-thought or relabel it as recovered.
+10. TypeScript extensions, MCP worker mode, replay tooling, adaptive optimization,
+    telemetry, and GitHub Pages are deliberately deferred beyond the initial MVP.
 
 ## Real-endpoint verification
 
@@ -226,11 +231,11 @@ live model.
 `pi-rs interactive` holds one durable session in one process: raw mode, crossterm events
 mapped through `pi-rs-tui::keys::intent`, the `pi-rs-tui::editor` buffer drawn with one status
 line, and one turn per submit through `run::SessionHandle`, so the second turn carries the
-first. Ctrl-C is intercepted before the keymap (which maps it to `Intent::Noop` on purpose):
-an empty buffer quits, a non-empty buffer keeps its text.
+first. Ctrl-C is handled before the keymap: while a turn is running,
+`interrupt::TurnInterruptGuard` flags the runtime cancellation token; while idle, an empty
+buffer quits and a non-empty buffer keeps its text.
 
-Covered by tests: the pure decision logic (`event -> LoopAction`), frame arithmetic, the CLI
-surface without a terminal. Not covered: real-terminal rendering by eye, live resize,
-multi-row wrap on a terminal, and a failover that happens mid-session. Turn interruption is a
-separate runtime slice; `Ctrl-C` while a turn runs is a plain SIGINT, which ends the process
-without the closing flush. Bracketed paste is not enabled, so a pasted newline can submit.
+Covered by tests: pure event-to-action logic, frame arithmetic, command routing, completion,
+interactive cancellation, and the CLI surface without a real terminal. Not covered: real-terminal
+rendering by eye, live resize, multi-row wrap on a terminal, and a failover that happens
+mid-session. Bracketed paste is not enabled, so a pasted newline can submit.
