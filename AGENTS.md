@@ -60,13 +60,8 @@
 - Changes affecting startup, rendering (`bash bench/render.sh`, budgets in
   `crates/pi-rs-tui/benches/render.rs`), session resume, or context
   reconstruction must verify performance against defined budgets.
-- Update `ROADMAP.md` only from verified evidence. Keep incomplete work active
-  and do not mark stage gates complete until gate evidence exists.
-- Be aware of AI subscription usage limits and reset windows. Spawn a dedicated
-  subagent to monitor limits per `docs/codexbar.md` (adjust checking frequency
-  smartly) and report back when limits approach. When used percentage is 97% or
-  higher (<=3% remaining), follow the default policy: gracefully stop ongoing
-  work and generate handoff documentation to resume next time.
+- Update `ROADMAP.md` only from verified evidence. Keep incomplete work active and do not mark stage gates complete until gate evidence exists.
+- Be aware of AI subscription usage limits and reset windows. Spawn a dedicated subagent to monitor limits per `docs/codexbar.md` (adjust checking frequency smartly) and report back when limits approach. When used percentage is 97% or higher (<=3% remaining), follow the default policy: gracefully stop ongoing work and generate handoff documentation to resume next time.
 
 ## Subagents
 
