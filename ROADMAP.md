@@ -382,6 +382,9 @@ Open in this area, in order:
 - [x] Retain recent context (retained tail kept alongside canonical summary).
 - [x] Persist compaction event (`ContextCompactionStarted`, `ContextSummary`, `ContextCompactionEpoch`, `ContextCompactionCompleted`).
 - [x] Preserve original trace (original events remain in `trace.jsonl` with epoch tracking).
+- [x] Recover once from an uncommitted provider `ContextOverflow` by compacting only
+      pre-turn history and reissuing the exact normal request shape; committed output,
+      no prehistory, a second refusal, or an unfit candidate remains terminal.
 
 ### L2 semantic phase compaction
 

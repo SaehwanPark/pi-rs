@@ -340,6 +340,14 @@ pub trait ContextPolicy {
 - L2: semantic phase compaction.
 - L3: checkpoint/reset.
 
+Provider-reported context overflow is a reactive reliability path, not a policy
+threshold. If the failed request committed no reasoning, assistant text, or decoded
+tool call, the active turn may compact only the message prefix that predates the turn,
+using one bounded local summary and the exact normal request shape, then reissue once.
+All current-turn messages remain verbatim and in order. A second refusal, an overflow
+after committed output, or a candidate that cannot fit is terminal. Context overflow
+never activates model failover.
+
 ### Structured capsules
 
 Prefer typed semantic state over free-form summaries.
