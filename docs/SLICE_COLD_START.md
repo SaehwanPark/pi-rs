@@ -4,7 +4,7 @@ At the time this slice was written, ROADMAP line "Add cold-start benchmark" was 
 `bench/startup.sh` measured **warm** runs of
 the same binary path and says so. The cold
 benchmark described here is now delivered; current evidence is recorded in
-`_workspace/changes/mvp-evidence-reconciliation/90_validation-report.md`. The remaining text
+`docs/MVP_VALIDATION.md`. The remaining text
 preserves this slice's design and verification contract.
 
 ## Definition, pinned (write it in the script header)

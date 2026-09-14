@@ -254,7 +254,9 @@ pub enum AgentEvent {
   /// `crates/pi-rs-runtime/src/turn.rs`.
   ContextCompactionStarted(ContextCompactionStarted),
   /// Why: compaction finished and what it retained.
-  /// Ordering: closes a matching compaction start.
+  /// Ordering: closes a matching `ContextCompactionStarted` for L1/L2 compactions.
+  /// L3 checkpoint compaction emits this completion after `CheckpointCreated` as its
+  /// reset marker and has no separate start event.
   /// Persistence: always. Replay: marks the context epoch advanced.
   /// UI: shows retained/removed counts.
   /// Producer: `TurnLoop::compact`, `TurnLoop::compact_phase`, and

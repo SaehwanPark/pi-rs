@@ -160,7 +160,7 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
       `src/interactive.rs`).
 - [x] Startup is within an acceptable baseline (latest recorded run: cold 222.06 ms,
       warm median 3.02 ms; see
-      `_workspace/changes/mvp-evidence-reconciliation/90_validation-report.md`; aspirational
+      `docs/MVP_VALIDATION.md`; aspirational
       targets remain documented in README and the canonical design).
 - [x] Optional integrations are not required for basic use (runs fully standalone without Node, MCP, or external tools).
 - [x] All tool actions produce durable lifecycle events (`Requested`, `Started`, `Completed`, `Failed` recorded in `trace.jsonl` and session logs).
