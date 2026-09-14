@@ -21,11 +21,11 @@ cargo doc --workspace --no-deps      # 0 warnings
 | Durability | `pi-rs-store` | done, incl. payload bounding, externalized fields, retention | 136 |
 | Model I/O | `pi-rs-provider` | done, verified against a real endpoint | 82 |
 | Native tools | `pi-rs-tools` | done, lifecycle + failure/unknown outcomes | 92 |
-| Turn loop + recovery | `pi-rs-runtime` | done, incl. failover epochs, cancel tokens, multi-turn handles | 57 |
-| Surface | `pi-rs-tui` | done for the interactive surface: raw terminal, buffer/caret, status line, highlighting, wrap | 179 |
-| Pi compatibility readers | `pi-rs-compat` | skills, prompt-template, and package readers with fixture suites | 93 |
+| Turn loop + recovery | `pi-rs-runtime` | done (failover epochs, cancellation, multi-turn handles) | 57 |
+| Surface | `pi-rs-tui` | done (raw terminal, editor, status, highlighting, wrap) | 179 |
+| Pi compatibility readers | `pi-rs-compat` | skills, prompts, packages; fixture suites | 93 |
 | MCP client | `pi-rs-mcp` | done, lazy stdio transport, discovery, and tool normalization | 11 |
-| Composition root | `pi-rs` binary | run, interactive, trace, skills, prompts, prompt, packages, compat, import-pi, export, run --resume | 223 |
+| Composition root | binary | CLI: run, interactive, trace, compatibility, import/export, resume | 223 |
 
 ## What the merge series added on top of the one-shot command
 
