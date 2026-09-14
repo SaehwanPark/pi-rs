@@ -193,7 +193,7 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [x] Render native reasoning distinctly.
 - [x] Render provider summaries distinctly.
 - [x] Add declared-rationale representation.
-- [ ] Add reconstructed-rationale representation.
+- [x] Add reconstructed-rationale representation (typed `Reconstructed` provenance, `ReasoningChunk` serialization, and distinct TUI role/label; no producer is enabled until an explicit evidence-scoped analysis contract exists).
 - [x] Prevent provenance loss during serialization.
 
 > Provenance is decided by the endpoint's declared `exposed_reasoning` rather than by

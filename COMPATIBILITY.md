@@ -39,7 +39,7 @@ Use the following status vocabulary:
 | `SKILL.md` skills | Supported |
 | Prompt templates | Supported |
 | Package discovery | Supported |
-| Package installation | Supported |
+| Package installation | Partial |
 | Package manifests | Supported |
 | Session import | Partial |
 | Session export | Partial |
@@ -138,7 +138,10 @@ and `--no-prompt-templates` are supported. The `prompts` array in settings is de
 
 ## 7. Packages
 
-Support Pi-style package discovery and installation as early as practical.
+Support Pi-style package discovery and installation as early as practical. Discovery and
+surface diagnostics are supported; the install/update path remains a roadmap item and must
+not be represented as available until its source, trust, and dependency-execution contract
+is implemented.
 
 Goals:
 
