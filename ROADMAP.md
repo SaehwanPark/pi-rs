@@ -47,7 +47,7 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 - [x] Add cold-start benchmark (`bench/cold_start.sh` and integrated `bench/startup.sh --cold` benchmark
       first-exec-of-a-fresh-inode vs execs #2-#3 across iterations; limitations and requirement for root
-      `drop_caches` or fresh-VM boot harness documented per `docs/SLICE_COLD_START.md`).
+      `drop_caches` or fresh-VM boot harness documented per `docs/archive/slices/SLICE_COLD_START.md`).
 - [x] Add warm-start benchmark (`bench/startup.sh` reports min/mean/median/max over N warm runs;
       `bench/warm_start.sh` benchmarks relaunching a process that continues a stored session).
 - [x] Add TUI render benchmark (`bench/render.sh`; cases in
@@ -160,7 +160,7 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
       `src/interactive.rs`).
 - [x] Startup is within an acceptable baseline (latest recorded run: cold 222.06 ms,
       warm median 3.02 ms; see
-      `docs/MVP_VALIDATION.md`; aspirational
+      `docs/archive/proposals/MVP_VALIDATION.md`; aspirational
       targets remain documented in README and the canonical design).
 - [x] Optional integrations are not required for basic use (runs fully standalone without Node, MCP, or external tools).
 - [x] All tool actions produce durable lifecycle events (`Requested`, `Started`, `Completed`, `Failed` recorded in `trace.jsonl` and session logs).

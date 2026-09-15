@@ -2,12 +2,12 @@
 
 > **Historical snapshot.** This document describes the schemas and producer inventory as
 > audited on 2026-09-08. Later runtime producers and compatibility work make some details
-> below stale; use [`docs/COMPACT_EVENT_AUDIT.md`](COMPACT_EVENT_AUDIT.md),
+> below stale; use [`archive/proposals/COMPACT_EVENT_AUDIT.md`](archive/proposals/COMPACT_EVENT_AUDIT.md),
 > [`docs/IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md), and the source for current
 > status.
 
 It was written from `grep` output and `Read`, not from the slice spec's recollection. Where
-the slice spec (`docs/SLICE_SCHEMAS.md`) disagreed with the repository at that time, the
+the slice spec (`docs/archive/slices/SLICE_SCHEMAS.md`) disagreed with the repository at that time, the
 repository won and the mismatch is recorded in place.
 
 ## Method and scope
@@ -299,7 +299,7 @@ path).
 
 ### 2.1 Spec correction: `session_record_kind()` is not found
 
-`docs/SLICE_SCHEMAS.md:11-13` asks for "`session_record_kind()`'s mapping in
+`docs/archive/slices/SLICE_SCHEMAS.md:11-13` asks for "`session_record_kind()`'s mapping in
 `src/session.rs`". That function does not exist, and neither does that path:
 
 ```console

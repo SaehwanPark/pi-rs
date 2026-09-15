@@ -1,0 +1,70 @@
+# pi-rs Documentation Index
+
+Welcome to the `pi-rs` documentation. This directory and repository contain the
+specifications, architectural contracts, user guides, and historical development
+records for `pi-rs`—a minimal, Pi-inspired coding-agent runtime implemented in
+Rust.
+
+---
+
+## 1. Public-Facing Documentation & Guides
+
+For end users and system integrators, the primary documentation is published via
+**GitHub Pages** (built with mdBook):
+
+- **Online Documentation:** [https://saehwanpark.github.io/pi-rs/](https://saehwanpark.github.io/pi-rs/)
+- **Source Files:** [`book/src/`](../book/src/)
+- **Topics Covered:**
+  - **Quickstart Guide:** Get running with local or remote models in under 60 seconds.
+  - **Installation:** Cargo, source builds, prebuilt binaries.
+  - **CLI Reference:** Detailed usage of `run`, `interactive`, `trace`, `replay`, `skills`, `prompts`, `packages`, `trust`, `compat`, `import`, and `export`.
+  - **Interactive TUI:** Keyboard shortcuts, editor buffer, syntax highlighting, status line.
+  - **Provenance Model:** Understanding `[native reasoning]`, `[provider summary]`, `[declared]`, and `[reconstructed]`.
+  - **Failover & Recovery:** Primary/backup model configuration and capability matching.
+  - **Tool Sandbox & Security:** Workspace confinement, auto-approvals, mutating tool protection.
+  - **Model Context Protocol (MCP):** Lazy stdio client integration.
+  - **Pi Ecosystem Compatibility:** Running Pi skills, prompts, packages, and importing/exporting sessions.
+
+---
+
+## 2. Core Specifications & Architectural Authorities
+
+These documents serve as the authoritative sources of truth for the codebase:
+
+| Document | Purpose |
+| :--- | :--- |
+| [`docs/PROJECT_DESIGN_CANONICAL.md`](PROJECT_DESIGN_CANONICAL.md) | **Canonical design authority.** Explains system thesis, core contracts, lifecycle, and component invariants. |
+| [`ARCHITECTURE.md`](../ARCHITECTURE.md) | Runtime boundaries, subsystem contracts, crate breakdown, and concurrency invariants. |
+| [`COMPATIBILITY.md`](../COMPATIBILITY.md) | Upstream Pi behavioral compatibility targets, coverage status, and regression fixtures. |
+| [`docs/SCHEMA_REFERENCE.md`](SCHEMA_REFERENCE.md) | Authoritative reference for event payloads, session logs, and serialized structures. |
+| [`docs/SESSION_COMPATIBILITY.md`](SESSION_COMPATIBILITY.md) | Bidirectional mapping between Pi session JSONL and pi-rs store schemas. |
+| [`docs/IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) | Implementation inventory, verified capabilities, and phase deliverables. |
+
+---
+
+## 3. Developer & Contribution Guides
+
+| Document | Purpose |
+| :--- | :--- |
+| [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Verification workflows (`fmt`, `clippy`, `test`, `bench`), PR slicing, and coding conventions. |
+| [`ROADMAP.md`](../ROADMAP.md) | Staged milestone roadmap and active tracking of project phases. |
+| [`AGENTS.md`](../AGENTS.md) | Operational guidelines, invariant requirements, and usage policies for autonomous coding agents. |
+| [`LESSONS.md`](../LESSONS.md) | Durable architectural lessons, edge cases encountered, and rationale for key design choices. |
+| [`docs/codexbar.md`](codexbar.md) | Subscription quota monitoring rules and loop boundary policies. |
+| [`docs/subagents_policy.md`](subagents_policy.md) | Subagent delegation topologies, memory conservation, and handoff protocols. |
+| [`docs/harness/pi-rs-development/team-spec.md`](harness/pi-rs-development/team-spec.md) | Delivery harness specification and specialist agent roles. |
+
+---
+
+## 4. Historical Archive (`docs/archive/`)
+
+Historical development artifacts from early bootstrapping and intermediate phases
+are preserved for provenance and auditing:
+
+- [`docs/archive/slices/`](archive/slices/): Individual slice specifications and
+  validation contracts from Phases 1 through 11 (e.g., `SLICE_CLI.md`,
+  `SLICE_EPOCH.md`, `SLICE_STATUSLINE.md`, `SLICE_WARM_START.md`).
+- [`docs/archive/handoffs/`](archive/handoffs/): Milestone handoff reports from
+  prior development sessions.
+- [`docs/archive/proposals/`](archive/proposals/): Initial project proposal,
+  early MVP validation reports, and compaction event audit records.

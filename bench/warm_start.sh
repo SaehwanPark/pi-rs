@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Warm-start benchmark for pi-rs: relaunching a process that continues a stored session.
 #
-# Definition (pinned in docs/SLICE_WARM_START.md)
+# Definition (pinned in docs/archive/slices/SLICE_WARM_START.md)
 #   Warm start is the time from exec to exit for
 #     pi-rs run --config <file> --cwd <workspace> --resume <id> --prompt <text>
 #   against a session that already exists in the store, compared against the same
@@ -281,7 +281,7 @@ else:
     print("  Inside noise: no. The delta is larger than the run-to-run spread.")
 print("  Note: not a cold-start number (page cache and binary inode are warm), and")
 print("  both arms pay one provider round trip. No budget is applied here.")
-print("  See docs/SLICE_WARM_START.md.")
+print("  See docs/archive/slices/SLICE_WARM_START.md.")
 
 results = {
     "resume_min_ms": round(resume["min"], 3),
