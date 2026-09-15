@@ -5,6 +5,7 @@ mod import_pi;
 mod interactive;
 mod packages;
 mod prompts;
+mod replay;
 mod run;
 mod skills;
 mod trace;
@@ -30,6 +31,7 @@ fn main() {
     cli::Command::Packages(args) => report(packages::execute(args)),
     cli::Command::Trust(args) => report(trust::execute(args)),
     cli::Command::Compat(args) => report(compat::execute(args)),
+    cli::Command::Replay(args) => report(replay::execute(args)),
     cli::Command::Import(args) => report(import_pi::execute(args)),
     cli::Command::Export(args) => report(export_pi::execute(args)),
   }

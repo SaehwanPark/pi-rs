@@ -529,11 +529,13 @@ dependencies = [
  "pi-rs-extension",
  "pi-rs-mcp",
  "pi-rs-provider",
+ "pi-rs-replay",
  "pi-rs-rkb",
  "pi-rs-runtime",
  "pi-rs-store",
  "pi-rs-tools",
  "pi-rs-tui",
+ "serde",
  "serde_json",
  "tempfile",
 ]
@@ -584,6 +586,15 @@ dependencies = [
  "serde",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "pi-rs-replay"
+version = "0.1.0"
+dependencies = [
+ "pi-rs-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

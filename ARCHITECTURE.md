@@ -512,8 +512,23 @@ constructed by relabelling reasoning. `trace` is a bounded coarse projection con
 ordering and attribution, not raw event payloads or implementation paths. Diff and artifact
 resources report explicit availability rather than fabricating data. The stdio dispatcher
 accepts MCP `initialize`, `tools/list`, `tools/call`, `resources/list`, and `resources/read`
-without scraping terminal output. Checkpoint and historical-event branching remain Phase 10
-concerns until an engine supplies historical snapshots.
+without scraping terminal output. Checkpoint and historical-event branching are now owned by
+read-only `pi-rs-replay` plans; the worker still does not execute historical branches itself.
+
+### 15.1 Replay and research tooling
+
+`pi-rs-replay` is a pure projection boundary over redacted `TraceEntry` values joined with
+optional `SessionRecord` messages. `pi-rs replay` is read-only: it never opens a provider,
+executes a tool, or treats historical records as a new generation. Sequence numbers define
+ordering; timestamps are used only for timing views. Filters, inclusive replay-until-event,
+model-visible context snapshots, epoch/compaction/failover timelines, provenance summaries,
+and trace export all derive from the same canonical records.
+
+Historical branch plans carry a `HistoricalEventRef` and a context snapshot, and explicitly
+separate copied history from a future generated continuation. A branch plan is not execution.
+Unknown or mutating tool states remain marked for reconciliation and are never replayed blindly;
+reasoning provenance remains attached and reconstructed rationale is never claimed as hidden
+model reasoning.
 
 ## 16. External context
 

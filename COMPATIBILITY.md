@@ -413,8 +413,13 @@ stdio JSON-RPC. An embedding application must explicitly provide a trusted headl
 `WorkerEngine`; the adapter never discovers project code or starts a provider by itself.
 Run handles are asynchronous and cancellable, waits are capped, summaries are kept
 separate from coarse trace projections, and unavailable diff/artifact data is reported
-explicitly. Full replay/history branching and streamable HTTP worker transport remain
-Phase 10/deferred surfaces.
+explicitly. Read-only replay/history analysis is provided by `pi-rs-replay`; worker-side
+execution of historical branches and streamable HTTP worker transport remain deferred.
+
+`pi-rs replay <trace-or-session.jsonl>` provides deterministic tools/reasoning/timing filters,
+inclusive historical cutoffs, model-visible context snapshots, dry branch plans, structural
+continuation comparison, timelines, provenance summaries, and redacted trace export. It does
+not launch a provider or execute a recorded tool.
 
 ## 14. Compatibility tests
 

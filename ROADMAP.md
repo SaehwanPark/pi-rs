@@ -657,31 +657,31 @@ Open in this area, in order:
 
 ### Replay
 
-- [ ] Implement replay command.
-- [ ] Filter by tools.
-- [ ] Filter by reasoning.
-- [ ] Filter by timing.
-- [ ] Replay until event.
-- [ ] Reconstruct model-visible context at an event.
+- [x] Implement read-only `pi-rs replay` over canonical trace/session JSONL.
+- [x] Filter by tools.
+- [x] Filter by reasoning.
+- [x] Filter by timing.
+- [x] Replay until event (inclusive, ordered by sequence number).
+- [x] Reconstruct model-visible context at an event while retaining canonical history separately.
 
 ### Branching
 
-- [ ] Branch from historical event.
-- [ ] Mark new execution separately from history.
-- [ ] Compare two continuations from same state.
+- [x] Plan a dry branch from a historical event without executing it.
+- [x] Mark any future execution boundary separately from historical replay.
+- [x] Compare two continuations structurally from the same historical state.
 
 ### Analysis
 
-- [ ] Add model-epoch timeline.
-- [ ] Add compaction timeline.
-- [ ] Add failover timeline.
-- [ ] Add provenance summary.
-- [ ] Add trace export.
+- [x] Add model-epoch timeline.
+- [x] Add compaction timeline.
+- [x] Add failover timeline.
+- [x] Add provenance summary without inferring hidden reasoning.
+- [x] Add redacted trace export that omits raw payload references/content.
 
 ### Stage gate
 
-- [ ] Historical execution can be inspected deterministically without confusing replay with new generation.
-- [ ] Model-visible context can be reconstructed for selected events.
+- [x] Historical execution can be inspected deterministically without confusing replay with new generation.
+- [x] Model-visible context can be reconstructed for selected events.
 
 ---
 
