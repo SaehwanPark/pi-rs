@@ -392,6 +392,10 @@ pub fn plan_historical_branch(
 }
 
 /// Compare two possible continuations structurally without judging output quality.
+///
+/// Each input is normally a full trace containing `base`; when its event id is absent, the input
+/// is treated as an already-sliced continuation. Sequence numbers can restart on a branch, so
+/// they are never used to discard such records implicitly.
 pub fn compare_continuations(
   base: HistoricalEventRef,
   left: &[TraceEntry],
@@ -1186,20 +1190,11 @@ fn continuation_after(base: &HistoricalEventRef, entries: &[TraceEntry]) -> Vec<
   {
     return ordered.into_iter().skip(index + 1).cloned().collect();
   }
-  let Some(base_seq) = base.seq else {
-    return ordered.into_iter().cloned().collect();
-  };
-  ordered
-    .into_iter()
-    .filter(|entry| {
-      entry
-        .envelope
-        .meta
-        .seq
-        .is_some_and(|entry_seq| entry_seq > base_seq)
-    })
-    .cloned()
-    .collect()
+  // A missing base id is intentionally not treated as evidence that records before `base.seq`
+  // are historical. Branch traces may restart sequence numbers; dropping those records would
+  // silently hide the beginning of a continuation. Callers comparing full histories must include
+  // the base event in each input, while continuation-only inputs are accepted as-is.
+  ordered.into_iter().cloned().collect()
 }
 
 fn structural_signature(entries: &[TraceEntry]) -> Vec<EventShape> {
@@ -1713,6 +1708,33 @@ mod tests {
         }),
       ),
     ];
+    let comparison = compare_continuations(base, &left, &right);
+    assert!(comparison.structurally_equal);
+    assert_eq!(comparison.left_len, 1);
+    assert_eq!(comparison.right_len, 1);
+  }
+
+  #[test]
+  fn continuation_only_traces_keep_restarted_sequence_numbers() {
+    let base = HistoricalEventRef {
+      session_id: SessionId::from_string("original"),
+      event_id: EventId::from_string("base-event"),
+      seq: Some(EventSeq(10)),
+    };
+    let left = vec![entry(
+      1,
+      AgentEvent::AssistantDelta(AssistantDelta {
+        text: "left".into(),
+        chunk_index: 0,
+      }),
+    )];
+    let right = vec![entry(
+      1,
+      AgentEvent::AssistantDelta(AssistantDelta {
+        text: "right".into(),
+        chunk_index: 0,
+      }),
+    )];
     let comparison = compare_continuations(base, &left, &right);
     assert!(comparison.structurally_equal);
     assert_eq!(comparison.left_len, 1);
