@@ -903,9 +903,12 @@ The invariant is:
 
 ## 21. MCP Server / Worker Mode
 
-`pi-rs` should also be able to expose itself as an MCP-accessible worker.
+`pi-rs-mcp::worker` now provides the explicit MCP-accessible worker boundary. An embedding
+application supplies a trusted headless `WorkerEngine`; the adapter owns asynchronous run
+handles, cancellation, bounded waits, and stable JSON projections rather than terminal
+transcript scraping.
 
-Potential semantic operations:
+The verified semantic operations are:
 
 ```text
 agent.start
@@ -915,7 +918,7 @@ agent.branch
 agent.compact
 ```
 
-Potential resources:
+The verified resources are:
 
 ```text
 session://<id>/state
@@ -927,7 +930,11 @@ session://<id>/artifacts
 session://<id>/checkpoint/latest
 ```
 
-The external interface should expose coarse, stable agent semantics rather than every internal event.
+The summary projection carries explicit external provenance and remains separate from the
+coarse trace projection. Raw event payloads, implementation paths, and hidden reasoning are
+not exposed. Checkpoint and historical-event branching belong to replay tooling until an
+engine supplies historical snapshots; unavailable diff and artifact producers return typed
+availability rather than fabricated results.
 
 ---
 

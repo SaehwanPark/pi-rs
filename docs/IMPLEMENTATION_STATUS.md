@@ -226,8 +226,10 @@ The following items are not blockers for the canonical initial MVP, but remain e
    raw Deflate; plain JSONL remains appendable). Reconstructed-rationale production remains
    unimplemented; no producer may infer hidden chain-of-thought or relabel it as recovered.
 10. The selected TypeScript extension host is implemented as an explicit optional
-    `pi-rs-extension` boundary with focused fixtures. MCP worker mode, replay tooling,
-    adaptive optimization, telemetry, and GitHub Pages remain deliberately deferred.
+    `pi-rs-extension` boundary with focused fixtures. The typed MCP worker boundary is
+    implemented in `pi-rs-mcp::worker` with an injected headless engine, asynchronous
+    run/cancel handles, coarse `session://` resources, and stdio JSON-RPC fixtures;
+    replay tooling, adaptive optimization, telemetry, and GitHub Pages remain deferred.
 
 ## Real-endpoint verification
 
