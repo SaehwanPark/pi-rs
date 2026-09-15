@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Cold-start benchmark for pi-rs: first exec of a fresh binary inode.
 #
-# Definition (pinned in docs/SLICE_COLD_START.md)
+# Definition (pinned in docs/archive/slices/SLICE_COLD_START.md)
 #   Dropping the page cache needs root, which this project does not assume. So
 #   cold is defined as: the first execution of a freshly-linked binary inode,
 #   with no prior exec of that inode. Each iteration copies
@@ -158,7 +158,7 @@ print(f"    median:       {warm['median']:.2f} ms")
 print(f"    max:          {warm['max']:.2f} ms")
 print(f"  Delta (cold median - warm median): {delta_median_ms:+.2f} ms")
 print("  Note: first-exec-of-a-new-inode tax only; the page cache is never")
-print("  dropped (needs root). See header and docs/SLICE_COLD_START.md.")
+print("  dropped (needs root). See header and docs/archive/slices/SLICE_COLD_START.md.")
 
 results = {
     "cold_min_ms": round(cold["min"], 3),

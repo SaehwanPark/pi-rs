@@ -121,7 +121,7 @@ if cold_mode == 1:
   print(f"    max:          {warm['max']:.2f} ms")
   print(f"  Delta (cold median - warm median): {delta_median_ms:+.2f} ms")
   print("  Note: first-exec-of-a-new-inode tax only; the page cache is never")
-  print("  dropped (needs root). See header and docs/SLICE_COLD_START.md.")
+  print("  dropped (needs root). See header and docs/archive/slices/SLICE_COLD_START.md.")
 
   results = {
     "cold_mode": True,

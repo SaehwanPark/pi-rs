@@ -34,5 +34,11 @@ jobs:
         run: cargo test --workspace
       - name: docs
         run: cargo doc --workspace --no-deps
+      - name: Setup mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: '0.4.40'
+      - name: mdbook build
+        run: mdbook build book
       - name: startup benchmark
         run: bench/startup.sh --json bench/results/startup-ci.json
