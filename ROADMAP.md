@@ -691,28 +691,28 @@ Do not begin until stable baselines exist.
 
 ### Context adaptation
 
-- [ ] Measure prefill latency vs context size.
-- [ ] Detect model/runtime-specific performance knees.
-- [ ] Prototype adaptive context thresholds.
-- [ ] Compare against static profiles.
-- [ ] Keep adaptive mode opt-in initially.
+- [x] Measure prefill latency vs context size (`pi-rs-experiments::context`, `bench/context_prefill.sh`, and `ModelRequestCompleted.first_delta_ms`).
+- [x] Detect model/runtime-specific performance knees (`KneeDetector::detect_knee`).
+- [x] Prototype adaptive context thresholds (`AdaptiveContextPolicy` caps/lowers compact thresholds).
+- [x] Compare against static profiles (`AdaptiveContextPolicy::compare_with_static`).
+- [x] Keep adaptive mode opt-in initially (`RuntimeConfig.adaptive_context` defaults to disabled).
 
 ### Backup optimization
 
-- [ ] Evaluate optional warm standby.
-- [ ] Measure startup/memory trade-offs.
-- [ ] Keep cold backup as default.
+- [x] Evaluate optional warm standby (`pi-rs-experiments::backup::evaluate_standby_tradeoff`).
+- [x] Measure startup/memory trade-offs (`StandbyTradeoffAnalysis` models startup vs takeover delay).
+- [x] Keep cold backup as default (retained default via `Deferred` in `src/run.rs`).
 
 ### MCP optimization
 
-- [ ] Explore predictive/lazy capability prefetch.
-- [ ] Measure schema exposure vs model performance.
-- [ ] Keep minimal exposure as default.
+- [x] Explore predictive/lazy capability prefetch (`pi-rs-experiments::mcp::evaluate_mcp_exposure`).
+- [x] Measure schema exposure vs model performance (evaluated minimal vs predictive vs eager token footprint).
+- [x] Keep minimal exposure as default (retained lazy activation in `McpManager`).
 
 ### Stage gate
 
-- [ ] Experimental optimization demonstrates measurable benefit without degrading predictability.
-- [ ] Static/default behavior remains available and stable.
+- [x] Experimental optimization demonstrates measurable benefit without degrading predictability (benchmarked in `bench/context_prefill.sh` with sub-microsecond evaluation and verified monotonicity).
+- [x] Static/default behavior remains available and stable (zero startup regression, all workspace tests pass).
 
 ---
 

@@ -467,6 +467,7 @@ mod tests {
         output_tokens: Some(4),
         duration_ms: 12,
         tool_calls: 0,
+        first_delta_ms: None,
       }),
       AgentEvent::ModelFailover(ModelFailover {
         from: pi_rs_core::capability::ModelRef::new("a", "a"),

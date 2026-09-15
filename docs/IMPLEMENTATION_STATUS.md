@@ -28,6 +28,7 @@ cargo doc --workspace --no-deps      # 0 warnings
 | RKB integration | `pi-rs-rkb` | done, lazy citation-preserving MCP adapter, references, and rehydration | focused gate fixtures |
 | TypeScript host | `pi-rs-extension` | done, lazy Node RPC, selected Pi APIs, tool wrapper, failure isolation | focused gate fixtures |
 | Replay | `pi-rs-replay` | done, deterministic read-only projections, context reconstruction, branch plans, analysis, export | 12 + CLI fixtures |
+| Optimization experiments | `pi-rs-experiments` | done, context knee detection, adaptive thresholds, standby backup trade-offs, MCP exposure | 6 + benchmarks |
 | Composition root | `pi-rs` | run, interactive, replay, trace, compatibility, import/export, resume, RKB skill discovery | 245 |
 
 ## What the merge series added on top of the one-shot command

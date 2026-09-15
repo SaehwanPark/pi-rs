@@ -372,6 +372,10 @@ pub struct ModelRequestCompleted {
   /// were coalesced or reduced.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub reasoning_provenance: Option<ReasoningProvenance>,
+  /// Duration in milliseconds from request dispatch until the first provider event
+  /// (first text delta, reasoning chunk, or tool call), if observed.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub first_delta_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

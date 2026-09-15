@@ -61,20 +61,30 @@
   `crates/pi-rs-tui/benches/render.rs`), session resume, or context
   reconstruction must verify performance against defined budgets.
 - Update `ROADMAP.md` only from verified evidence. Keep incomplete work active and do not mark stage gates complete until gate evidence exists.
-- Be aware of AI subscription usage limits and reset windows. Spawn a dedicated subagent to monitor limits per `docs/codexbar.md` (adjust checking frequency smartly) and report back when limits approach. When used percentage is 97% or higher (<=3% remaining), follow the default policy: gracefully stop ongoing work and generate handoff documentation to resume next time.
+- Be aware of AI subscription usage limits and reset windows. The parent/current
+  agent checks limits directly per `docs/codexbar.md`; never spawn a model-backed
+  subagent solely to monitor usage. Before starting a new substantive slice,
+  apply the default usage policy: below 85% may proceed; at 85-94% do not start
+  another slice and instead finish the current bounded action, verify/push, and
+  prepare a resumable handoff; at 95% or higher finish only the immediate safe
+  action and stop with a handoff.
 
 ## Subagents
 
-Use subagents proactively to reduce main-context growth.
+Stay single-agent by default. Delegate only when the context, specialization, or
+parallel-latency benefit clearly outweighs the additional model-turn cost.
 
+* Default to at most one active model-backed child. Use two concurrently only for clearly independent work with an explicit benefit and healthy usage headroom.
 * Delegate bounded, self-contained investigation or implementation tasks when the parent mainly needs the result, not the working process.
-* Prefer subagents for work that requires reading many files, logs, tests, documentation, or other large intermediate context.
+* Prefer a child for unusually read-heavy or specialized work, not as the default way to run tests, inspect a few files, monitor quota, or perform routine verification.
 * Give subagents only the context and scope needed for their task; avoid copying the full parent conversation unless necessary.
 * Ask subagents to return concise findings, evidence/references, risks, and recommended actions rather than raw working context.
-* Keep architectural decisions, cross-component integration, and final verification with the parent agent.
+* Keep architectural decisions, cross-component integration, final verification, and usage monitoring with the parent agent.
+* Do not recursively spawn model-backed grandchildren unless the user or change owner explicitly authorizes that topology.
+* Do not silently escalate a child to a more expensive model tier. Inherit the exact parent route or use an explicitly configured same/lower-cost route. Sol/Astra-class routes require explicit user authorization for repository development.
 * Avoid redundant subagents inspecting the same scope unless independent review is intentional.
 * If a subagent's scope expands substantially, it should escalate back to the parent rather than absorbing unrelated work.
-* Use the main context for decisions; use subagent contexts for discovery.
+* Use the main context for decisions; use subagent contexts only where they provide a clear net benefit.
 
 See `docs/subagents_policy.md` for detailed delegation patterns and guidance.
 
@@ -98,14 +108,19 @@ Use local context for active reasoning; use GitHub for durable project state and
 
 ## Agentic Loop
 
-Use agentic loops for long-running tasks or when pursuing goals.
+Use agentic loops for long-running tasks or when pursuing goals, but keep each
+loop bounded by both a target slice and the current subscription budget.
 
 One loop is defined by
 
-1. Select target slice (what to implement/examine/do)
+1. Check current usage and select one target slice (what to implement/examine/do)
 2. Design a plan
 3. Execute the plan
 4. Test and verify
 5. Update documents if necessary
 6. PR handoff and merge autonomously
-7. Move on to the next task or slice
+7. Re-check usage, then move to the next slice only when below the soft-stop threshold
+
+Do not use autonomous continuation as a reason to consume the remaining budget.
+When the soft-stop threshold is reached, leave durable GitHub state and a concise
+handoff rather than beginning another slice.

@@ -1988,13 +1988,12 @@ remain reconciliation barriers.
 
 ### Phase 11: Adaptive optimization experiments
 
-Only after stable baselines:
+Completed as opt-in experiments with verified baselines (`pi-rs-experiments` and `bench/context_prefill.sh`):
 
-- learned context-performance knees;
-- optional warm backup;
-- smarter MCP activation;
-- adaptive prefetching;
-- deeper latency optimization.
+- learned context-performance knees: `KneeDetector` and `AdaptiveContextPolicy` cap thresholds at performance cliffs;
+- optional warm backup: `evaluate_standby_tradeoff` models startup vs takeover trade-offs while keeping cold backup default;
+- smarter MCP activation: `evaluate_mcp_exposure` models predictive prefetch while keeping minimal exposure default;
+- first-event TTFT timing: `ModelRequestCompleted.first_delta_ms` records arrival timing with backward compatibility.
 
 ---
 

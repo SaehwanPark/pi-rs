@@ -356,6 +356,7 @@ fn model_request_completed_round_trips() {
     duration_ms: 9_012,
     tool_calls: 2,
     reasoning_provenance: Some(ReasoningProvenance::Native),
+    first_delta_ms: Some(1_234),
   });
   let entry = round_trip(original.clone());
   let restored = &entry.envelope.event;
@@ -376,6 +377,20 @@ fn model_request_completed_round_trips() {
     Some(ReasoningProvenance::Native),
     "provenance must survive even when the reasoning deltas themselves were reduced"
   );
+  assert_eq!(body.first_delta_ms, Some(1_234));
+}
+
+#[test]
+fn model_request_completed_deserializes_without_first_delta_ms() {
+  let legacy_json = serde_json::json!({
+    "epoch": 0,
+    "model": "openai/gpt-4o",
+    "duration_ms": 1200,
+    "tool_calls": 0
+  });
+  let completed: ModelRequestCompleted =
+    serde_json::from_value(legacy_json).expect("deserialization of legacy JSON succeeds");
+  assert_eq!(completed.first_delta_ms, None);
 }
 
 #[test]
@@ -945,6 +960,7 @@ fn all_variants() -> Vec<AgentEvent> {
       duration_ms: 25,
       tool_calls: 0,
       reasoning_provenance: Some(ReasoningProvenance::Native),
+      first_delta_ms: None,
     }),
     AgentEvent::ModelRetry(ModelRetry {
       attempt: 1,

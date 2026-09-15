@@ -1,29 +1,39 @@
 ## Subagent Delegation and Context Management
 
-Use subagents proactively to keep the primary agent's context focused and compact.
+Stay single-agent by default. Subagents are context-isolation and specialization
+tools, not the normal execution path. Delegate only when the expected context,
+quality, or latency benefit clearly outweighs the extra model-turn cost.
+
+### Budget and routing guardrails
+
+* Default to one active model-backed child at a time.
+* Use two concurrent children only for clearly independent tasks when parallelism has a concrete benefit and subscription usage has healthy headroom.
+* Do not recursively spawn model-backed grandchildren unless explicitly authorized by the change owner or user.
+* Never spawn a model-backed agent solely to monitor subscription usage, run `codexbar`, or perform another cheap local observation.
+* Children should inherit the exact parent model route unless a specific route is intentionally configured.
+* Do not silently upgrade a child to a more expensive model tier. Sol/Astra-class routes require explicit user authorization for repository development.
+* If current usage is at or above the soft-stop threshold in `docs/codexbar.md`, do not start new delegated work.
 
 ### When to spawn a subagent
 
-Prefer delegating work when a task:
+Consider delegating work when a task:
 
 * can be investigated or completed independently;
-* requires reading many files, logs, tests, documentation pages, or external sources;
-* involves a specialized concern such as testing, debugging, security, performance, API research, or code review;
-* produces substantial intermediate reasoning that the parent agent does not need to retain;
-* can be expressed as a bounded question with a clear expected output;
-* would otherwise add large amounts of low-value detail to the main context.
+* requires reading enough files, logs, tests, documentation, or external sources that isolating the working context materially helps the parent;
+* involves a specialized concern such as debugging, security, performance, API research, or an independent review;
+* produces substantial intermediate reasoning that the parent does not need to retain;
+* can be expressed as a bounded question with a clear expected output.
 
 Typical examples include:
 
-* locating the implementation responsible for a behavior;
-* investigating a failing test or error trace;
-* reviewing one subsystem or module;
-* researching an external API or dependency;
-* comparing several implementation alternatives;
-* running tests and diagnosing failures;
-* auditing a patch for regressions, security issues, or edge cases.
+* investigating a difficult failure spanning many files or logs;
+* reviewing one subsystem with a clearly separate concern;
+* researching an external API or dependency in depth;
+* performing an intentionally independent regression/security review.
 
-Do not spawn a subagent merely to repeat work already understood by the parent or for tiny tasks where delegation overhead exceeds the context saved.
+Prefer direct parent work for locating one symbol, reading a few files, running
+routine tests, checking quota, applying formatting, or other tasks whose
+delegation overhead is comparable to the work itself.
 
 ### Delegate bounded tasks, not entire conversations
 
@@ -68,23 +78,18 @@ Treat a subagent as an expendable working context.
 
 A useful pattern is:
 
-`parent identifies question -> subagent investigates -> subagent returns compact report -> parent incorporates conclusions`
+`parent identifies question -> child investigates -> child returns compact report -> parent incorporates conclusions`
 
-The parent should not reproduce the subagent's entire investigation in its own context. If deeper details are later required, re-open the relevant artifact or delegate another focused investigation.
+The parent should not reproduce the child's entire investigation in its own context. If deeper details are later required, re-open the relevant artifact rather than automatically spawning another child.
 
-### Prefer decomposition by concern
+### Decompose without automatic fan-out
 
-For larger tasks, split work along boundaries that minimize shared state, for example:
+For larger tasks, identify concern boundaries such as architecture, implementation,
+tests, performance, security, documentation, or dependency research. Decomposition
+does not imply parallel execution: run concerns serially through the parent or one
+child unless concurrency has a specific, measurable benefit.
 
-* architecture / design;
-* implementation discovery;
-* tests;
-* performance;
-* security;
-* documentation;
-* dependency or API research.
-
-Run independent investigations in parallel when useful, but avoid spawning multiple agents that inspect the same material without a specific reason.
+Avoid spawning multiple agents that inspect the same material without a specific reason.
 
 ### Preserve ownership
 
@@ -92,6 +97,7 @@ The parent agent remains responsible for:
 
 * the overall objective;
 * architectural decisions;
+* subscription-budget checks and stop decisions;
 * reconciling conflicting subagent findings;
 * integration across components;
 * final verification.
@@ -105,14 +111,17 @@ If a subagent discovers that its task requires substantially more context or cro
 The parent can then decide whether to:
 
 * provide additional context;
-* spawn another specialized subagent;
-* broaden the assignment;
-* handle the issue directly.
+* broaden the existing assignment;
+* handle the issue directly;
+* exceptionally authorize another specialized child when the benefit justifies the cost.
 
 ### Practical rule
 
-When deciding whether to delegate, ask:
+When deciding whether to delegate, ask both:
 
 > "Will the parent need the investigation process later, or only its conclusions?"
+>
+> "Is isolating this work worth another model-backed context and its quota cost?"
 
-If only the conclusions matter, strongly prefer a subagent.
+Delegate only when both answers favor a child. When uncertain, keep the work in
+the parent.

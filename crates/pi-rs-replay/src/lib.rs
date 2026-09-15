@@ -1432,6 +1432,7 @@ mod tests {
           duration_ms: 42,
           tool_calls: 0,
           reasoning_provenance: None,
+          first_delta_ms: None,
         }),
       ),
     ];

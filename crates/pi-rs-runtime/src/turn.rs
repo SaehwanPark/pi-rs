@@ -1125,7 +1125,13 @@ impl<'a> TurnLoop<'a> {
         model: model.clone(),
       };
       let provider = self.provider();
-      let mut collector = Collector::new(progress, &mut *self.trace, attribution, cancel.clone());
+      let mut collector = Collector::new(
+        progress,
+        &mut *self.trace,
+        attribution,
+        cancel.clone(),
+        clock,
+      );
       let outcome = provider.stream(&request, &mut collector, cancel);
       let duration_ms = elapsed_ms(clock);
       let Collector {
@@ -1135,6 +1141,7 @@ impl<'a> TurnLoop<'a> {
         reasoning_provenance: provenance,
         assistant_introduced_by,
         sink_error,
+        first_delta_ms,
         ..
       } = collector;
       if let Some(error) = sink_error {
@@ -1166,6 +1173,7 @@ impl<'a> TurnLoop<'a> {
                     duration_ms,
                     tool_calls,
                     reasoning_provenance: provenance,
+                    first_delta_ms,
                   }),
                 )
                 .map_err(TurnFailure::from)?;
@@ -1204,6 +1212,7 @@ impl<'a> TurnLoop<'a> {
             duration_ms,
             tool_calls: calls.len() as u32,
             reasoning_provenance: provenance,
+            first_delta_ms,
           }),
         )
         .map_err(TurnFailure::from)?;
@@ -2334,6 +2343,8 @@ struct Collector<'a> {
   trace: &'a mut dyn Trace,
   attribution: StreamAttribution,
   cancel: CancelToken,
+  clock: Instant,
+  first_delta_ms: Option<u64>,
   text: String,
   calls: Vec<ToolCallBlock>,
   committed: bool,
@@ -2350,12 +2361,15 @@ impl<'a> Collector<'a> {
     trace: &'a mut dyn Trace,
     attribution: StreamAttribution,
     cancel: CancelToken,
+    clock: Instant,
   ) -> Self {
     Self {
       progress,
       trace,
       attribution,
       cancel,
+      clock,
+      first_delta_ms: None,
       text: String::new(),
       calls: Vec::new(),
       committed: false,
@@ -2364,6 +2378,12 @@ impl<'a> Collector<'a> {
       reasoning_provenance: None,
       assistant_introduced_by: None,
       sink_error: None,
+    }
+  }
+
+  fn mark_first_delta(&mut self) {
+    if self.first_delta_ms.is_none() {
+      self.first_delta_ms = Some(elapsed_ms(self.clock));
     }
   }
 
@@ -2390,6 +2410,7 @@ impl<'a> Collector<'a> {
 
 impl pi_rs_core::ProviderEventSink for Collector<'_> {
   fn emit(&mut self, event: &pi_rs_core::ProviderEvent) {
+    self.mark_first_delta();
     match event {
       pi_rs_core::ProviderEvent::ReasoningDelta { text, provenance } => {
         let traced = self.trace_event(AgentEvent::ReasoningDelta(ReasoningDelta {

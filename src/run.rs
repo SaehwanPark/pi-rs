@@ -113,27 +113,37 @@ pub(crate) fn open_session(
     skills_prompt.push_str(setup.skill());
   }
 
-  let mut policy = pi_rs_core::ProfilePolicy::new(
-    config.context_profile,
-    provider.capabilities().context_window,
-  );
-  if let Some(overrides) = &config.context_overrides {
-    if let Some(value) = overrides.warn_tokens {
-      policy.thresholds.warn_tokens = value;
-    }
-    if let Some(value) = overrides.reduce_tokens {
-      policy.thresholds.reduce_tokens = value;
-    }
-    if let Some(value) = overrides.compact_tokens {
-      policy.thresholds.compact_tokens = value;
-    }
-    if let Some(value) = overrides.checkpoint_tokens {
-      policy.thresholds.checkpoint_tokens = value;
-    }
-    if let Some(value) = overrides.recent_target_tokens {
-      policy.thresholds.recent_target_tokens = value;
-    }
-  }
+  let policy: Box<dyn pi_rs_core::context::ContextPolicy> =
+    if config.adaptive_context.unwrap_or(false) {
+      Box::new(pi_rs_experiments::AdaptiveContextPolicy::new(
+        config.context_profile,
+        provider.capabilities().context_window,
+        true,
+      ))
+    } else {
+      let mut policy = pi_rs_core::ProfilePolicy::new(
+        config.context_profile,
+        provider.capabilities().context_window,
+      );
+      if let Some(overrides) = &config.context_overrides {
+        if let Some(value) = overrides.warn_tokens {
+          policy.thresholds.warn_tokens = value;
+        }
+        if let Some(value) = overrides.reduce_tokens {
+          policy.thresholds.reduce_tokens = value;
+        }
+        if let Some(value) = overrides.compact_tokens {
+          policy.thresholds.compact_tokens = value;
+        }
+        if let Some(value) = overrides.checkpoint_tokens {
+          policy.thresholds.checkpoint_tokens = value;
+        }
+        if let Some(value) = overrides.recent_target_tokens {
+          policy.thresholds.recent_target_tokens = value;
+        }
+      }
+      Box::new(policy)
+    };
   let write_policy = WritePolicy::from_retention(&config.trace, &config.redaction);
   // The name is resolved against a read-only store, before `Store::open`, because `open`
   // creates the state layout: an id the store does not hold must leave the store exactly
@@ -188,7 +198,7 @@ pub(crate) fn open_session(
   let mut runtime = TurnLoop::new(
     &provider,
     &tools,
-    &policy,
+    policy.as_ref(),
     &mut trace,
     session_id,
     TraceId::new(),
