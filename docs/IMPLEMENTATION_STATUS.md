@@ -7,7 +7,7 @@ yet exercised**.
 Verification for everything marked *done* below:
 
 ```
-cargo test --workspace --all-features      # 998 tests (2026-09-14)
+cargo test --workspace --all-features      # all workspace tests pass (2026-09-14)
 cargo clippy --workspace --all-targets --all-features   # 0 warnings
 cargo fmt --all --check
 cargo doc --workspace --no-deps      # 0 warnings
@@ -27,7 +27,8 @@ cargo doc --workspace --no-deps      # 0 warnings
 | MCP client | `pi-rs-mcp` | done, lazy stdio/HTTP transport, discovery, and tool normalization | 19 |
 | RKB integration | `pi-rs-rkb` | done, lazy citation-preserving MCP adapter, references, and rehydration | focused gate fixtures |
 | TypeScript host | `pi-rs-extension` | done, lazy Node RPC, selected Pi APIs, tool wrapper, failure isolation | focused gate fixtures |
-| Composition root | `pi-rs` | run, interactive, trace, compatibility, import/export, resume, RKB skill discovery | 230 |
+| Replay | `pi-rs-replay` | done, deterministic read-only projections, context reconstruction, branch plans, analysis, export | 12 + CLI fixtures |
+| Composition root | `pi-rs` | run, interactive, replay, trace, compatibility, import/export, resume, RKB skill discovery | 245 |
 
 ## What the merge series added on top of the one-shot command
 
