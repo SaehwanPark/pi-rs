@@ -7,7 +7,7 @@
 //! redacted export values. Historical facts stay separate from any future continuation; nothing in
 //! this crate executes a provider request or a tool call.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pi_rs_core::{
   AgentEvent, BlobRef, CapabilityGap, CheckpointId, ContextCapsule, ContextLevel, EpochReason,
@@ -256,20 +256,7 @@ pub fn replay_trace_with_session(
   let mut report = replay_trace(entries, options)?;
   let ordered = ordered_entries(entries);
   let bounded = apply_until(ordered, &options.until)?;
-  let last_seq = bounded
-    .iter()
-    .filter_map(|entry| entry.envelope.meta.seq)
-    .max();
-  let bounded_session = session_records
-    .iter()
-    .filter(|record| match record {
-      SessionRecord::Message(message) => {
-        last_seq.is_none_or(|limit| message.seq.is_none_or(|seq| seq <= limit))
-      }
-      _ => true,
-    })
-    .cloned()
-    .collect::<Vec<_>>();
+  let bounded_session = session_records_until(session_records, options.until.as_ref(), &bounded);
   report.provenance = provenance_summary(&bounded, &bounded_session);
   Ok(report)
 }
@@ -375,8 +362,7 @@ pub fn plan_historical_branch(
       .last()
       .expect("apply_until with a found target returns at least the target"),
   );
-  let until_seq = branch_point.seq;
-  let bounded_session = session_records_until(session_records, until_seq, &bounded);
+  let bounded_session = session_records_until(session_records, Some(&target), &bounded);
   let bounded_owned: Vec<TraceEntry> = bounded.iter().map(|entry| (*entry).clone()).collect();
   let context = reconstruct_context(&bounded_session, &bounded_owned);
   let blocked_tools = tool_replay_states_from_entries(&bounded)
@@ -411,8 +397,8 @@ pub fn compare_continuations(
   left: &[TraceEntry],
   right: &[TraceEntry],
 ) -> ContinuationComparison {
-  let left_signature = structural_signature(left);
-  let right_signature = structural_signature(right);
+  let left_signature = structural_signature(&continuation_after(&base, left));
+  let right_signature = structural_signature(&continuation_after(&base, right));
   let max = left_signature.len().max(right_signature.len());
   let diverged_at = (0..max).find(|&index| left_signature.get(index) != right_signature.get(index));
   ContinuationComparison {
@@ -1108,31 +1094,37 @@ fn apply_context_epoch(working: &mut Vec<WorkingContextItem>, epoch: &ContextEpo
 
 fn session_records_until(
   records: &[SessionRecord],
-  until_seq: Option<EventSeq>,
+  target: Option<&HistoricalTarget>,
   bounded_trace: &[&TraceEntry],
 ) -> Vec<SessionRecord> {
-  let Some(until_seq) = until_seq else {
+  let Some(target) = target else {
     return records.to_vec();
   };
+  let bounded_event_ids = bounded_trace
+    .iter()
+    .map(|entry| entry.envelope.meta.event_id.clone())
+    .collect::<BTreeSet<_>>();
   records
     .iter()
     .filter(|record| match record {
       SessionRecord::Header(_) => true,
-      SessionRecord::Message(message) => message.seq.is_none_or(|seq| seq <= until_seq),
+      SessionRecord::Message(message) => match target {
+        HistoricalTarget::EventId(_) => bounded_event_ids.contains(&message.event_id),
+        HistoricalTarget::Seq(limit) => {
+          message.seq.is_some_and(|seq| seq <= *limit)
+            || bounded_event_ids.contains(&message.event_id)
+        }
+      },
       SessionRecord::CheckpointBarrier(barrier) => bounded_trace.iter().any(|entry| {
         matches!(
           &entry.envelope.event,
-          AgentEvent::CheckpointCreated(created)
-            if created.checkpoint_id == barrier.checkpoint_id
-              && entry.envelope.meta.seq.is_some_and(|seq| seq <= until_seq)
+          AgentEvent::CheckpointCreated(created) if created.checkpoint_id == barrier.checkpoint_id
         )
       }),
       SessionRecord::Epoch(epoch) => bounded_trace.iter().any(|entry| {
         matches!(
           &entry.envelope.event,
-          AgentEvent::ModelEpochStarted(started)
-            if started.epoch == epoch.epoch
-              && entry.envelope.meta.seq.is_some_and(|seq| seq <= until_seq)
+          AgentEvent::ModelEpochStarted(started) if started.epoch == epoch.epoch
         )
       }),
       SessionRecord::Compaction(compaction) => bounded_trace.iter().any(|entry| {
@@ -1140,7 +1132,6 @@ fn session_records_until(
           &entry.envelope.event,
           AgentEvent::ContextCompactionCompleted(completed)
             if completed.context_epoch == compaction.context_epoch
-              && entry.envelope.meta.seq.is_some_and(|seq| seq <= until_seq)
         )
       }),
     })
@@ -1185,6 +1176,30 @@ fn add_provenance(summary: &mut ProvenanceSummary, provenance: ReasoningProvenan
     ReasoningProvenance::Declared => summary.declared_present = true,
     ReasoningProvenance::Reconstructed => summary.reconstructed_present = true,
   }
+}
+
+fn continuation_after(base: &HistoricalEventRef, entries: &[TraceEntry]) -> Vec<TraceEntry> {
+  let ordered = ordered_entries(entries);
+  if let Some(index) = ordered
+    .iter()
+    .position(|entry| entry.envelope.meta.event_id == base.event_id)
+  {
+    return ordered.into_iter().skip(index + 1).cloned().collect();
+  }
+  let Some(base_seq) = base.seq else {
+    return ordered.into_iter().cloned().collect();
+  };
+  ordered
+    .into_iter()
+    .filter(|entry| {
+      entry
+        .envelope
+        .meta
+        .seq
+        .is_some_and(|entry_seq| entry_seq > base_seq)
+    })
+    .cloned()
+    .collect()
 }
 
 fn structural_signature(entries: &[TraceEntry]) -> Vec<EventShape> {
@@ -1318,6 +1333,76 @@ mod tests {
     assert_eq!(report.events.len(), 2);
     assert_eq!(report.events[0].reference.seq, Some(EventSeq(1)));
     assert_eq!(report.events[1].reference.seq, Some(EventSeq(2)));
+  }
+
+  #[test]
+  fn event_id_cutoff_excludes_seq_less_session_messages_after_the_target() {
+    let first = entry(
+      1,
+      AgentEvent::UserMessage(UserMessage {
+        text: "first".into(),
+        attachments: 0,
+      }),
+    );
+    let mut target = entry(
+      2,
+      AgentEvent::UserMessage(UserMessage {
+        text: "target".into(),
+        attachments: 0,
+      }),
+    );
+    let mut future = entry(
+      3,
+      AgentEvent::ReasoningDelta(ReasoningDelta {
+        text: "future".into(),
+        provenance: ReasoningProvenance::Declared,
+        chunk_index: 0,
+      }),
+    );
+    target.envelope.meta.seq = None;
+    future.envelope.meta.seq = None;
+    let session = vec![
+      session_message(1, Role::User, Message::user("first")),
+      session_message(2, Role::User, Message::user("target")),
+      session_message(3, Role::Assistant, Message::assistant("future")),
+    ];
+    let mut session = session;
+    for (record, trace) in session.iter_mut().zip([&first, &target, &future]) {
+      let SessionRecord::Message(message) = record else {
+        unreachable!()
+      };
+      message.event_id = trace.envelope.meta.event_id.clone();
+      if trace.envelope.meta.seq.is_none() {
+        message.seq = None;
+      }
+    }
+    let report = replay_trace_with_session(
+      &[first.clone(), target.clone(), future],
+      &session,
+      &ReplayOptions {
+        filters: ReplayFilters::all(),
+        until: Some(HistoricalTarget::EventId(
+          target.envelope.meta.event_id.clone(),
+        )),
+      },
+    )
+    .unwrap();
+    assert_eq!(report.provenance.reasoning_chunks, 0);
+    let plan = plan_historical_branch(
+      &[first.clone(), target.clone()],
+      &session,
+      HistoricalTarget::EventId(target.envelope.meta.event_id.clone()),
+    )
+    .unwrap();
+    assert_eq!(plan.context.canonical.messages.len(), 2);
+    assert!(
+      plan
+        .context
+        .canonical
+        .messages
+        .iter()
+        .all(|message| message.message.text() != "future")
+    );
   }
 
   #[test]
@@ -1582,6 +1667,56 @@ mod tests {
       comparison.right_at_divergence.unwrap().reasoning_provenance,
       Some(ReasoningProvenance::ProviderSummary)
     );
+  }
+
+  #[test]
+  fn continuation_comparison_slices_full_histories_after_the_base() {
+    let base_entry = entry(
+      2,
+      AgentEvent::UserMessage(UserMessage {
+        text: "base".into(),
+        attachments: 0,
+      }),
+    );
+    let base = HistoricalEventRef::from_entry(&base_entry);
+    let left = vec![
+      entry(
+        1,
+        AgentEvent::UserMessage(UserMessage {
+          text: "before".into(),
+          attachments: 0,
+        }),
+      ),
+      base_entry.clone(),
+      entry(
+        3,
+        AgentEvent::AssistantDelta(AssistantDelta {
+          text: "left".into(),
+          chunk_index: 0,
+        }),
+      ),
+    ];
+    let right = vec![
+      entry(
+        1,
+        AgentEvent::UserMessage(UserMessage {
+          text: "different before".into(),
+          attachments: 0,
+        }),
+      ),
+      base_entry,
+      entry(
+        3,
+        AgentEvent::AssistantDelta(AssistantDelta {
+          text: "right".into(),
+          chunk_index: 0,
+        }),
+      ),
+    ];
+    let comparison = compare_continuations(base, &left, &right);
+    assert!(comparison.structurally_equal);
+    assert_eq!(comparison.left_len, 1);
+    assert_eq!(comparison.right_len, 1);
   }
 
   #[test]
