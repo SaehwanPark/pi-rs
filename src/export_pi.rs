@@ -422,6 +422,7 @@ mod tests {
           duration_ms: 1_000,
           tool_calls: 0,
           reasoning_provenance: None,
+          first_delta_ms: None,
         }),
         from_ms + 4,
       ),

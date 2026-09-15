@@ -1220,6 +1220,7 @@ mod tests {
         duration_ms: 1500,
         tool_calls: 2,
         reasoning_provenance: Some(ReasoningProvenance::Reconstructed),
+        first_delta_ms: None,
       }),
       AgentEvent::ModelRetry(pi_rs_core::ModelRetry {
         attempt: 1,

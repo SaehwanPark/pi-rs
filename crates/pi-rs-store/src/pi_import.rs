@@ -977,6 +977,7 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
               // reasoning gets no provenance at all: naming one would claim a reasoning
               // channel for a request the file says nothing about.
               reasoning_provenance: saw_reasoning.then_some(ReasoningProvenance::ProviderSummary),
+              first_delta_ms: None,
             }),
             None,
             None,
