@@ -530,6 +530,22 @@ Unknown or mutating tool states remain marked for reconciliation and are never r
 reasoning provenance remains attached and reconstructed rationale is never claimed as hidden
 model reasoning.
 
+### 15.2 Optimization experiments and adaptive policies
+
+`pi-rs-experiments` defines pure evaluation and measurement boundaries for adaptive context
+policies, standby backup analysis, and MCP capability exposure:
+- **Context adaptation**: `KneeDetector` tracks `first_delta_ms` against context token estimates
+  to detect non-linear prefill latency knees. `AdaptiveContextPolicy` only lowers or caps
+  profile-derived thresholds when a knee occurs before `compact_tokens`; thresholds never exceed
+  static profile limits, and adaptive mode remains opt-in (`RuntimeConfig.adaptive_context`).
+- **Backup standby evaluation**: `evaluate_standby_tradeoff` models startup latency and RSS memory
+  overheads against takeover speedup. Cold lazy backup remains the default execution posture.
+- **MCP capability exposure**: `evaluate_mcp_exposure` measures token footprint across minimal,
+  predictive prefetch, and eager strategies. Minimal exposure remains the default posture to
+  protect model working context.
+- **Timing provenance**: Request first-event/TTFT timing is recorded via optional, backward-compatible
+  `ModelRequestCompleted.first_delta_ms`.
+
 ## 16. External context
 
 Represent external knowledge through durable references.

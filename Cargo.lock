@@ -526,6 +526,7 @@ dependencies = [
  "libc",
  "pi-rs-compat",
  "pi-rs-core",
+ "pi-rs-experiments",
  "pi-rs-extension",
  "pi-rs-mcp",
  "pi-rs-provider",
@@ -553,6 +554,15 @@ name = "pi-rs-core"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pi-rs-experiments"
+version = "0.1.0"
+dependencies = [
+ "pi-rs-core",
  "serde",
  "serde_json",
 ]

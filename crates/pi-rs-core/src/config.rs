@@ -199,6 +199,8 @@ pub struct RuntimeConfig {
   pub context_profile: ContextProfile,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub context_overrides: Option<ContextOverrides>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub adaptive_context: Option<bool>,
   pub thinking: ThinkingLevel,
   /// State root for sessions, traces, and checkpoints.
   pub state_dir: String,
@@ -308,6 +310,7 @@ impl RuntimeConfig {
       backup: None,
       context_profile: ContextProfile::default(),
       context_overrides: None,
+      adaptive_context: None,
       thinking: ThinkingLevel::default(),
       state_dir: state_dir.into(),
       endpoints: Vec::new(),
