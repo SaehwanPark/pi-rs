@@ -1386,17 +1386,14 @@ fn read_bounded_line<R: BufRead>(reader: &mut R) -> Result<Option<Vec<u8>>, Work
         Ok(Some(line))
       };
     }
-    let take = buffer
-      .iter()
-      .position(|byte| *byte == b'\n')
-      .map_or(buffer.len(), |index| index + 1);
+    let newline = buffer.iter().position(|byte| *byte == b'\n');
+    let take = newline.map_or(buffer.len(), |index| index + 1);
     if line.len() + take > MAX_REQUEST_BYTES {
       return Err(WorkerServerError::RequestTooLarge);
     }
-    let has_more = take < buffer.len();
     line.extend_from_slice(&buffer[..take]);
     reader.consume(take);
-    if has_more {
+    if newline.is_some() {
       return Ok(Some(line));
     }
   }
@@ -1475,7 +1472,7 @@ impl std::str::FromStr for WorkerCompactMode {
 mod tests {
   use super::*;
   use crate::protocol::{ClientCapabilities, ClientInfo};
-  use std::sync::atomic::AtomicU64;
+  use std::{io::Cursor, sync::atomic::AtomicU64};
 
   #[derive(Debug)]
   struct ScriptedEngine {
@@ -1715,6 +1712,13 @@ mod tests {
     assert_eq!(call.is_error, Some(false));
     let unknown = server.handle(JsonRpcRequest::new(4, "unknown", None));
     assert_eq!(unknown.error.unwrap().code, -32601);
+  }
+
+  #[test]
+  fn bounded_reader_returns_at_a_newline_at_the_buffer_boundary() {
+    let mut reader = BufReader::with_capacity(8, Cursor::new(b"1234567\n"));
+    let line = read_bounded_line(&mut reader).unwrap().unwrap();
+    assert_eq!(line, b"1234567\n");
   }
 
   #[test]
