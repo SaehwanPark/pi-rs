@@ -616,33 +616,40 @@ Open in this area, in order:
 
 ### Agent API
 
-- [ ] Implement `agent.start`.
-- [ ] Implement `agent.continue`.
-- [ ] Implement `agent.cancel`.
-- [ ] Implement `agent.branch`.
-- [ ] Implement `agent.compact`.
+- [x] Implement `agent.start` (`pi-rs-mcp::worker::WorkerService` returns a stable session/run
+      handle and accepts an optional bounded wait).
+- [x] Implement `agent.continue` against the same worker session.
+- [x] Implement `agent.cancel` with a per-run cancellation token and terminal cancellation state.
+- [x] Implement `agent.branch` for current-state branches; checkpoint/event branch requests are
+      explicitly unsupported until an engine supplies historical snapshots (Phase 10).
+- [x] Implement `agent.compact` with conversation/phase/checkpoint modes and a context epoch.
 
 ### Resources
 
-- [ ] Expose session state.
-- [ ] Expose summary.
-- [ ] Expose messages.
-- [ ] Expose trace.
-- [ ] Expose diff.
-- [ ] Expose artifacts.
-- [ ] Expose latest checkpoint.
+- [x] Expose session state.
+- [x] Expose external summary.
+- [x] Expose model-visible messages with bounded sequence pagination.
+- [x] Expose a coarse trace projection with ordering, attribution, and provenance only.
+- [x] Expose diff availability and typed diff entries when an engine supplies them.
+- [x] Expose artifact references and explicit unavailable state.
+- [x] Expose latest checkpoint metadata/capsule when an engine supplies one.
 
 ### Orchestration semantics
 
-- [ ] Support long-running execution semantics.
-- [ ] Keep internal trace separate from external summaries.
-- [ ] Preserve model epochs and failover history.
-- [ ] Keep API coarse and stable.
+- [x] Support long-running execution semantics (asynchronous run handles, bounded `wait_ms`,
+      per-run cancellation, and resource polling).
+- [x] Keep internal trace separate from external summaries; no hidden reasoning is inferred.
+- [x] Preserve model epochs and failover history in the typed worker state projection supplied
+      by the headless engine.
+- [x] Keep API coarse and stable (`agent.*` tools and `session://` JSON resources); the stdio
+      dispatcher exposes no implementation paths or raw event payloads.
 
 ### Stage gate
 
-- [ ] External orchestrator can run and inspect a `pi-rs` worker without scraping terminal output.
-- [ ] Worker API does not expose unnecessary internal implementation details.
+- [x] External orchestrator can run and inspect a `pi-rs` worker without scraping terminal output
+      (`pi-rs-mcp::worker::serve_stdio` and MCP handshake/tools/resources fixtures).
+- [x] Worker API does not expose unnecessary internal implementation details (bounded resource
+      projections, explicit diff/artifact availability, and typed domain errors).
 
 ---
 
@@ -758,8 +765,9 @@ Do not begin until stable baselines exist.
 - [ ] Windows CI matrix (macOS and Linux are gated).
 - [ ] Telemetry, metrics, and analytics surfaces: deferred; privacy and scope decision.
 - [ ] GitHub Pages site.
-- [ ] MCP server/worker mode (Phase 9): untouched; keep behind its adapter boundary
-      when started. The selected TypeScript extension host (Phase 8) is complete above.
+- [x] MCP server/worker mode (Phase 9): the typed `pi-rs-mcp::worker` adapter is implemented;
+      provider/runtime composition remains explicit at its `WorkerEngine` boundary. The selected
+      TypeScript extension host (Phase 8) is complete above.
 
 ---
 

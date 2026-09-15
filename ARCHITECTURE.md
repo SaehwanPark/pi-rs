@@ -480,9 +480,12 @@ Rules:
 
 ## 15. MCP server / worker mode
 
-Later, `pi-rs` should expose coarse agent-level semantics.
+`pi-rs-mcp::worker` exposes a coarse, explicit worker boundary through typed MCP
+JSON-RPC. The embedding application supplies a headless [`WorkerEngine`] adapter (normally
+composed from `TurnLoop`, `StoreTrace`, `CancelToken`, and `SilentProgress`); the MCP layer
+owns run handles, cancellation, bounded waits, and stable resource projections.
 
-Candidate operations:
+The verified operations are:
 
 ```text
 agent.start
@@ -492,7 +495,7 @@ agent.branch
 agent.compact
 ```
 
-Candidate resources:
+Resources use these stable URIs:
 
 ```text
 session://<id>/state
@@ -504,7 +507,13 @@ session://<id>/artifacts
 session://<id>/checkpoint/latest
 ```
 
-Do not expose internal implementation details unless necessary.
+`summary` is an external summary with declared/provider/runtime provenance; it is never
+constructed by relabelling reasoning. `trace` is a bounded coarse projection containing
+ordering and attribution, not raw event payloads or implementation paths. Diff and artifact
+resources report explicit availability rather than fabricating data. The stdio dispatcher
+accepts MCP `initialize`, `tools/list`, `tools/call`, `resources/list`, and `resources/read`
+without scraping terminal output. Checkpoint and historical-event branching remain Phase 10
+concerns until an engine supplies historical snapshots.
 
 ## 16. External context
 

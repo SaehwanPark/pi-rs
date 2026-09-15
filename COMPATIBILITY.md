@@ -407,6 +407,15 @@ document, page, record id, citation, and provenance are retained in the generic 
 context reference and durable retrieval event. No direct dependency on the external
 `rkb-rs` crate is introduced.
 
+The server-side worker boundary is implemented separately in `pi-rs-mcp::worker`. It
+supports the five coarse `agent.*` operations and `session://` resource projections over
+stdio JSON-RPC. An embedding application must explicitly provide a trusted headless
+`WorkerEngine`; the adapter never discovers project code or starts a provider by itself.
+Run handles are asynchronous and cancellable, waits are capped, summaries are kept
+separate from coarse trace projections, and unavailable diff/artifact data is reported
+explicitly. Full replay/history branching and streamable HTTP worker transport remain
+Phase 10/deferred surfaces.
+
 ## 14. Compatibility tests
 
 Maintain fixtures for:
