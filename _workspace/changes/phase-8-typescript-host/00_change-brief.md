@@ -19,7 +19,8 @@ completion.
 ## Acceptance evidence
 
 - constructing/configuring the host performs no Node/process I/O;
-- no configured extension means no Node launch;
+- no configured extension means no Node launch; TypeScript modules require Node 22.6+
+  (`--experimental-strip-types`, pinned in CI);
 - representative Pi-style TypeScript fixture registers a tool and command, dispatches a
   lifecycle event, transforms context, and emits selected UI events;
 - host/protocol/extension failures are typed and isolated; a core session remains usable;

@@ -217,7 +217,7 @@ fn fixture_package_exposes_contained_skills_and_prompts() {
 }
 
 #[test]
-fn fixture_package_reports_extensions_as_unsupported_surface() {
+fn fixture_package_reports_extensions_as_partial_surface() {
   let discovery = Discovery {
     home: Some(fixture_home()),
     cwd: fixture_project(),
@@ -233,7 +233,7 @@ fn fixture_package_reports_extensions_as_unsupported_surface() {
     vec![
       ("skills", package::SurfaceStatus::NotPresent),
       ("prompts", package::SurfaceStatus::NotPresent),
-      ("extensions", package::SurfaceStatus::Unsupported),
+      ("extensions", package::SurfaceStatus::Partial),
     ]
   );
 }

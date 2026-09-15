@@ -35,7 +35,7 @@
 //! |--------------|---------|
 //! | `pi.skills`  | paths extracted; callers integrate with skill discovery |
 //! | `pi.prompts` | paths extracted; callers integrate with prompt discovery |
-//! | `extensions` | recorded as [`Warning::UnsupportedSurface`]; Node host not started |
+//! | `extensions` | recorded as [`Warning::UnsupportedSurface`]; explicit Node host activation required |
 //! | Unknown Pi-namespace keys | recorded as [`Warning::UnknownSurface`] |
 //!
 //! Per-surface diagnostics let a caller report compatibility without refusing the whole
@@ -83,7 +83,7 @@ pub struct Manifest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Warning {
   /// `extensions` was declared. The Node compatibility host is not started by pi-rs
-  /// automatically; TypeScript extensions will not run until Phase 8.
+  /// automatically; callers must explicitly activate the trusted Phase 8 host.
   UnsupportedSurface {
     /// Which surface name (`"extensions"`, etc.).
     surface: String,
@@ -176,6 +176,8 @@ pub struct Package {
 pub enum SurfaceStatus {
   /// Surface is supported and present in this package.
   Supported,
+  /// Surface is present but only a bounded subset is supported in current pi-rs.
+  Partial,
   /// Surface is present but unsupported in current pi-rs.
   Unsupported,
   /// Surface was not declared or found in this package.
@@ -186,6 +188,7 @@ impl SurfaceStatus {
   pub fn symbol(self) -> &'static str {
     match self {
       Self::Supported => "✓",
+      Self::Partial => "△",
       Self::Unsupported => "✗",
       Self::NotPresent => "-",
     }
@@ -297,7 +300,7 @@ impl Package {
       (
         "extensions",
         if self.has_extensions() {
-          SurfaceStatus::Unsupported
+          SurfaceStatus::Partial
         } else {
           SurfaceStatus::NotPresent
         },
@@ -1292,7 +1295,8 @@ impl<'a> Parser<'a> {
           self.parse_pi_namespace(manifest, warnings)?;
         }
         "extensions" => {
-          // Node/TypeScript extension entry points: not supported until Phase 8.
+          // Node/TypeScript entry points are observed here; execution requires an
+          // explicit trusted host activation and is reported as a partial surface.
           let kind = self.value_kind();
           let count = if kind == ValueKind::Array {
             let paths = self.parse_string_array()?;
@@ -1444,7 +1448,7 @@ mod tests {
   // -------------------------------------------------------------------------
 
   #[test]
-  fn extensions_produces_an_unsupported_surface_warning() {
+  fn extensions_produces_a_partial_surface_warning() {
     let p = parse(
       r#"{
         "name": "pkg",
@@ -1955,7 +1959,7 @@ mod tests {
       vec![
         ("skills", SurfaceStatus::Supported),
         ("prompts", SurfaceStatus::NotPresent),
-        ("extensions", SurfaceStatus::Unsupported),
+        ("extensions", SurfaceStatus::Partial),
       ]
     );
   }

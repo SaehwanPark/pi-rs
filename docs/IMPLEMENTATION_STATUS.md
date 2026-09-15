@@ -26,6 +26,7 @@ cargo doc --workspace --no-deps      # 0 warnings
 | Pi compatibility readers | `pi-rs-compat` | skills, prompts, packages; fixture suites | 100 |
 | MCP client | `pi-rs-mcp` | done, lazy stdio/HTTP transport, discovery, and tool normalization | 19 |
 | RKB integration | `pi-rs-rkb` | done, lazy citation-preserving MCP adapter, references, and rehydration | focused gate fixtures |
+| TypeScript host | `pi-rs-extension` | done, lazy Node RPC, selected Pi APIs, tool wrapper, failure isolation | focused gate fixtures |
 | Composition root | `pi-rs` | run, interactive, trace, compatibility, import/export, resume, RKB skill discovery | 230 |
 
 ## What the merge series added on top of the one-shot command
@@ -224,8 +225,9 @@ The following items are not blockers for the canonical initial MVP, but remain e
 9. Optional trace compression is implemented for content-addressed payload blobs (opt-in
    raw Deflate; plain JSONL remains appendable). Reconstructed-rationale production remains
    unimplemented; no producer may infer hidden chain-of-thought or relabel it as recovered.
-10. TypeScript extensions, MCP worker mode, replay tooling, adaptive optimization,
-    telemetry, and GitHub Pages are deliberately deferred beyond the initial MVP.
+10. The selected TypeScript extension host is implemented as an explicit optional
+    `pi-rs-extension` boundary with focused fixtures. MCP worker mode, replay tooling,
+    adaptive optimization, telemetry, and GitHub Pages remain deliberately deferred.
 
 ## Real-endpoint verification
 

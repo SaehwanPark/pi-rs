@@ -623,7 +623,9 @@ Existing Pi TypeScript extensions are strategically important.
 
 Do not force them to become Rust extensions.
 
-A Node compatibility host is preferred initially:
+A Node compatibility host is preferred initially and is implemented as the optional
+`pi-rs-extension` adapter. It accepts trusted module paths and exposes only the selected
+Pi API subset through a typed JSON-lines boundary:
 
 ```text
                  pi-rs
@@ -652,7 +654,10 @@ TypeScript extensions -> compatibility path
 Rust/WASM extensions  -> native path
 ```
 
-The Node host should start lazily only when required.
+The Node host starts lazily only when required. Constructing an empty host and inspecting
+compatibility fixtures do not launch Node. Extension exceptions and process loss remain
+adapter errors; mutating extension tools preserve explicit `Unknown` completion semantics
+rather than being silently converted to success or observed failure.
 
 ---
 
