@@ -6,6 +6,8 @@
 pi-rs interactive --config config.json
 ```
 
+![pi-rs Interactive TUI](../assets/screenshots/interactive-tui.png)
+
 ---
 
 ## TUI Architecture & Layout

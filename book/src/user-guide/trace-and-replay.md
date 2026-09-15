@@ -41,6 +41,8 @@ To inspect and verify past execution without making network calls or mutating di
 pi-rs replay <session-id>
 ```
 
+![pi-rs Trace & Replay](../assets/screenshots/trace-replay.png)
+
 In replay mode:
 - Events are loaded sequentially from `trace.jsonl`.
 - The presentation layer renders the visual session identically to how it was experienced live.

@@ -10,6 +10,10 @@
 pi-rs run --config <file> --cwd <workspace> --prompt <text>
 ```
 
+![pi-rs CLI Runner](../assets/screenshots/cli-run.png)
+
+---
+
 ### Options & Flags
 
 | Flag | Required | Description |
