@@ -621,6 +621,10 @@ fn external_context_retrieved_round_trips() {
     citation: Some("section 4.2".into()),
     bytes: 8_192,
     inline: false,
+    metadata: std::collections::BTreeMap::from([(
+      "source_url".into(),
+      "https://example.test/doc".into(),
+    )]),
   });
   let entry = round_trip(original.clone());
   let restored = &entry.envelope.event;
@@ -634,6 +638,7 @@ fn external_context_retrieved_round_trips() {
   assert_eq!(body.source.provenance, "rkb-rs/citation");
   assert_eq!(body.citation.as_deref(), Some("section 4.2"));
   assert_eq!(body.bytes, 8_192);
+  assert_eq!(body.metadata["source_url"], "https://example.test/doc");
   assert!(
     !body.inline,
     "inline versus referenced changes what replay can recover"
@@ -1003,6 +1008,7 @@ fn all_variants() -> Vec<AgentEvent> {
       citation: None,
       bytes: 512,
       inline: true,
+      metadata: std::collections::BTreeMap::new(),
     }),
     AgentEvent::ContextReduced(ContextReduced {
       reason: ReductionReason::RecentTargetExceeded {

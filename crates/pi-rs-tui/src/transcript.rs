@@ -391,6 +391,11 @@ pub fn render_event(event: &AgentEvent, options: &TranscriptOptions) -> Vec<Rend
       if let Some(citation) = &e.citation {
         fact(&mut line, Role::Meta, citation);
       }
+      for key in ["source_url", "source_document", "page"] {
+        if let Some(value) = e.metadata.get(key) {
+          fact(&mut line, Role::Meta, value);
+        }
+      }
       fact(&mut line, Role::Meta, &format_bytes(e.bytes));
       fact(
         &mut line,
@@ -1281,6 +1286,7 @@ mod tests {
         citation: Some("[1]".into()),
         bytes: 2048,
         inline: true,
+        metadata: std::collections::BTreeMap::new(),
       }),
       AgentEvent::ContextReduced(pi_rs_core::ContextReduced {
         reason: ReductionReason::RecentTargetExceeded {

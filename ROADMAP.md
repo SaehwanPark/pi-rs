@@ -534,26 +534,42 @@ Open in this area, in order:
 
 ### Integration package
 
-- [ ] Create `pi-rs-rkb` package/extension.
-- [ ] Add setup/discovery.
-- [ ] Add RKB skill.
-- [ ] Add MCP connection path.
-- [ ] Add citation-aware rendering.
+- [x] Create `pi-rs-rkb` package/extension (`crates/pi-rs-rkb` is a downstream adapter;
+      its bundled `package.json`/`SKILL.md` are inspectable without linking the external
+      `rkb-rs` crate).
+- [x] Add setup/discovery (`RkbSetup::discover` recognizes caller-provided `rkb`/`rkb-rs`
+      MCP configurations without process or network I/O; `normalize_configs` preserves
+      the endpoint while marking all known retrieval tools read-only before manager use).
+- [x] Add RKB skill (bundled citation and rehydration instructions are offered only when
+      an RKB server is configured, with explicit `/mcp enable` guidance for lazy activation).
+- [x] Add MCP connection path (`RkbAdapter` activates the existing lazy manager only on
+      explicit activation and normalizes read-only RKB retrieval tools).
+- [x] Add citation-aware rendering (`RkbContextEntry` retains citation, URL, document,
+      page, and record metadata; generic TUI rendering displays source metadata).
 
 ### External-context model
 
-- [ ] Implement `ExternalContextRef`.
-- [ ] Preserve durable RKB resource IDs.
-- [ ] Preserve source/citation metadata.
-- [ ] Allow compaction from inline evidence to reference.
-- [ ] Allow rehydration on demand.
-- [ ] Emit external-context retrieval events.
+- [x] Implement `ExternalContextRef` (provider-neutral, serializable identity plus
+      provider-owned metadata).
+- [x] Preserve durable RKB resource IDs (`record_id` is retained in the reference and
+      session projection).
+- [x] Preserve source/citation metadata (retrieval events and `SessionMessage.external_context`
+      retain citation, provenance, URL/document/page, and RKB record fields).
+- [x] Allow compaction from inline evidence to reference (`compact_to_reference` and
+      `RkbContext::compact_to_references` preserve identity without inline bytes).
+- [x] Allow rehydration on demand (`RkbConnection::resolve_external_ref` performs an exact
+      `search_chunks` lookup and fails closed when the resource is unavailable).
+- [x] Emit external-context retrieval events (`TurnLoop::run_turn_with_external_context`
+      emits and durably records the associated model-visible message).
 
 ### Stage gate
 
-- [ ] RKB evidence can enter context, be compacted to references, and later rehydrate.
-- [ ] Source provenance survives all context transformations.
-- [ ] RKB remains an independent project with no core dependency.
+- [x] RKB evidence can enter context, be compacted to references, and later rehydrate
+      (`tests/rkb_integration.rs` gate fixture).
+- [x] Source provenance survives all context transformations (core reference round trip,
+      runtime/store resume fixture, and RKB citation metadata tests).
+- [x] RKB remains an independent project with no core dependency (`pi-rs-rkb` depends on
+      generic core/MCP contracts; `pi-rs-core` has no RKB dependency).
 
 ---
 

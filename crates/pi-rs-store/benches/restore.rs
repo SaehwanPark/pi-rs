@@ -268,6 +268,7 @@ fn create_session_file(
       model: ModelRef::new("benchmark", "model"),
       event_id: EventId::new(),
       seq: Some(EventSeq(seq)),
+      external_context: None,
     });
     log.append(&user_msg).expect("append user message");
     seq += 1;
@@ -281,6 +282,7 @@ fn create_session_file(
       model: ModelRef::new("benchmark", "model"),
       event_id: EventId::new(),
       seq: Some(EventSeq(seq)),
+      external_context: None,
     });
     log
       .append(&assistant_msg)

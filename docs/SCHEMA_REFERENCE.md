@@ -29,10 +29,10 @@ repository won and the mismatch is recorded in place.
   `pub(crate) mod testutil {`, so the cut cannot drop production code.
 * `tests/`, `bench/`, and `#[cfg(test)]` code are excluded from "production".
 
-**Not in scope** (explicitly, per the slice): no schema changes, no new event variants, no
-serde attribute changes, no fixes to the zero-producer variants listed below, and no
-`ROADMAP.md` tick — `ROADMAP.md:57` stays `- [ ] Event/session/provenance schemas are
-documented.` until a human confirms this document is complete.
+**Historical-snapshot scope.** The original audit below predated the Phase 7 external
+context schema extension. No new event variant was needed, but `ExternalContextRetrieved`,
+`SessionMessage`, and their serde-defaulted metadata/reference fields now have verified
+producers. Use the source and the Phase 7 gate fixture for current details.
 
 ## 1. Events
 
@@ -209,10 +209,12 @@ Producers: yes (`crates/pi-rs-runtime/src/turn.rs:1196`)
 
 Purpose: external knowledge entered context, with citation and provenance.
 Fields: `source: ExternalContextSource`, `citation: Option<String>`, `bytes: u64`,
-`inline: bool`.
-Producers: **none found**. Production code only consumes it
-(`crates/pi-rs-tui/src/transcript.rs:384`) and re-exports it
-(`crates/pi-rs-core/src/lib.rs:56`). See §1.4.
+`inline: bool`, and provider-owned `metadata: BTreeMap<String, String>`.
+Producer: `TurnLoop::run_turn_with_external_context`
+(`crates/pi-rs-runtime/src/turn.rs`) emits the event and records the associated
+model-visible message; the session projection carries the typed
+`SessionMessage.external_context` reference for resume. The TUI renders the
+resource, citation, source metadata, byte count, and inline/reference state.
 
 #### `context_reduced` — `AgentEvent::ContextReduced` (`event.rs:248`), payload `event.rs:445`
 
@@ -276,20 +278,18 @@ All three are `#[serde(rename_all = "snake_case")]` and carry no tag.
 
 ### 1.4 Variants with zero production producers
 
-Four of the 22 variants are never constructed by production code:
+Three of the 22 variants are never constructed by production code:
 
 | Variant | `AgentEvent::…` mentions outside `#[cfg(test)]` |
 | --- | --- |
-| `external_context_retrieved` | none |
 | `context_compaction_started` | none |
 | `context_compaction_completed` | none |
 | `checkpoint_created` | none |
 
-This is a documentation finding, not a fix. `docs/SLICE_SCHEMAS.md:19` says Issue #38
-already found three compaction variants with zero producers; that count matches the
-compaction/checkpoint trio here (`context_compaction_started`,
-`context_compaction_completed`, `checkpoint_created`), and `external_context_retrieved` is
-a fourth zero-producer variant. The state still stands; nothing was changed.
+`external_context_retrieved` now has a production producer in
+`TurnLoop::run_turn_with_external_context`; its metadata is retained in the event and
+session projection. The remaining three zero-producer compaction/checkpoint variants are
+still an explicit documentation finding, not a fix.
 
 ## 2. Session records
 
@@ -378,10 +378,13 @@ kept separate "so an import never pretends to be native" (`session.rs:61-62`).
 
 `SessionMessage` (`session.rs:69`) — "A message with the attribution required for
 multi-epoch sessions": `turn_id: TurnId`, `role: Role`, `message: Message`, `epoch: u32`,
-`model: ModelRef`, `event_id: EventId`, `seq: Option<EventSeq>`. `event_id` exists "so a
-session line can always be traced back into the trace" (`session.rs:77-78`); `seq` is
+`model: ModelRef`, `event_id: EventId`, `seq: Option<EventSeq>`, and optional
+`external_context: ExternalContextRef`. `event_id` exists "so a session line can always be
+traced back into the trace" (`session.rs:77-78`); `seq` is
 `#[serde(default, skip_serializing_if = "Option::is_none")]` and is "Sequence number of that
-event, when the log had assigned one" (`session.rs:80`).
+event, when the log had assigned one" (`session.rs:80`). The external reference is
+provider-neutral and retains citation/provenance plus source metadata for resume and
+on-demand rehydration; old session lines decode it as absent.
 
 `SessionEpochRecord` (`session.rs:87`): `epoch: u32`, `model: ModelRef`,
 `reason: crate::capability::EpochReason`.

@@ -24,8 +24,9 @@ cargo doc --workspace --no-deps      # 0 warnings
 | Turn loop + recovery | `pi-rs-runtime` | done (failover, cancel, handles, provider-overflow recovery) | 72 |
 | Surface | `pi-rs-tui` | done (raw terminal, editor, status, highlighting, wrap) | 179 |
 | Pi compatibility readers | `pi-rs-compat` | skills, prompts, packages; fixture suites | 100 |
-| MCP client | `pi-rs-mcp` | done, lazy stdio transport, discovery, and tool normalization | 19 |
-| Composition root | `pi-rs` | run, interactive, trace, compatibility, import/export, resume | 230 |
+| MCP client | `pi-rs-mcp` | done, lazy stdio/HTTP transport, discovery, and tool normalization | 19 |
+| RKB integration | `pi-rs-rkb` | done, lazy citation-preserving MCP adapter, references, and rehydration | focused gate fixtures |
+| Composition root | `pi-rs` | run, interactive, trace, compatibility, import/export, resume, RKB skill discovery | 230 |
 
 ## What the merge series added on top of the one-shot command
 
@@ -216,8 +217,10 @@ The following items are not blockers for the canonical initial MVP, but remain e
 8. Project trust is explicit at compatibility-reader call sites, and `pi-rs trust` now
    persists exact project decisions with fail-closed storage; interactive once/always
    resolution remains open. The bounded MCP HTTP transport and local package-install path
-   are implemented; remote package resolution/dependency execution and the `rkb-rs`
-   integration remain roadmap work.
+   are implemented; remote package resolution/dependency execution remains deferred. The
+   independent `pi-rs-rkb` adapter is covered by focused fake-MCP and runtime/store gate
+   fixtures; direct dependency linkage to the external `rkb-rs` crate remains intentionally
+   absent.
 9. Optional trace compression is implemented for content-addressed payload blobs (opt-in
    raw Deflate; plain JSONL remains appendable). Reconstructed-rationale production remains
    unimplemented; no producer may infer hidden chain-of-thought or relabel it as recovered.

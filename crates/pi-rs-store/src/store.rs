@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 
 use pi_rs_core::{
   capability::ModelRef,
-  context::ContextCapsule,
-  event::EventEnvelope,
+  context::{ContextCapsule, ExternalContextRef},
+  event::{AgentEvent, EventEnvelope},
   ids::{CheckpointId, EventSeq, SessionId, TurnId},
   message::Message,
   redact::RedactionPolicy,
@@ -449,6 +449,16 @@ impl Session {
           .into(),
       )
     })?;
+    let external_context = match &envelope.event {
+      AgentEvent::ExternalContextRetrieved(retrieved) => Some(ExternalContextRef {
+        provider: retrieved.source.provider.clone(),
+        resource_id: retrieved.source.resource_id.clone(),
+        citation: retrieved.citation.clone(),
+        provenance: retrieved.source.provenance.clone(),
+        metadata: retrieved.metadata.clone(),
+      }),
+      _ => None,
+    };
     let record = SessionMessage {
       turn_id: turn_id.clone(),
       role: message.role,
@@ -457,6 +467,7 @@ impl Session {
       model: model.clone(),
       event_id: envelope.meta.event_id.clone(),
       seq: Some(seq),
+      external_context,
     };
     self.log.append(&SessionRecord::Message(record.clone()))?;
     Ok(record)

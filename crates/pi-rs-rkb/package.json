@@ -1,0 +1,8 @@
+{
+  "name": "pi-rs-rkb",
+  "version": "0.1.0",
+  "description": "Citation-preserving RKB knowledge retrieval skill for pi-rs.",
+  "pi": {
+    "skills": ["SKILL.md"]
+  }
+}

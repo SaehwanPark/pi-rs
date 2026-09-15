@@ -961,20 +961,22 @@ This keeps the coding harness minimal while making it composable.
 
 External knowledge should be represented as a durable reference rather than only pasted text.
 
-Conceptually:
+The generic durable contract is:
 
 ```rust
 struct ExternalContextRef {
   provider: String,
   resource_id: String,
   citation: Option<String>,
-  provenance: Provenance,
+  provenance: String,
+  metadata: BTreeMap<String, String>,
 }
 ```
 
-Working context may contain a temporary textual rendering.
-
-The durable session should retain the reference.
+Working context may contain a temporary textual rendering. `ExternalContextItem` can
+replace that rendering with a reference while preserving source metadata, and a
+provider-owned resolver can later return a fresh inline item. Retrieval messages retain
+the typed reference in session state and the retrieval event remains in canonical trace.
 
 This allows evidence to be:
 
@@ -1009,16 +1011,19 @@ rkb-rs
   `- independent knowledge system
 ```
 
-The integration can provide:
+The integration provides:
 
-- MCP setup/discovery;
-- skills describing when to use RKB;
-- citation-aware rendering;
-- durable resource IDs;
-- evidence-aware compaction;
-- rehydration hooks.
+- pure setup/discovery for the verified `rkb mcp` stdio contract;
+- a bundled skill describing when to use RKB;
+- citation-aware rendering with source URL/document/page metadata;
+- durable RKB record IDs and generic `ExternalContextRef` conversion;
+- evidence-aware inline-to-reference compaction;
+- exact-id `search_chunks` rehydration hooks;
+- lazy MCP activation with read-only retrieval tools.
 
-`rkb-rs` should serve as an architectural reference implementation for provenance-aware external knowledge.
+`rkb-rs` remains an independent project and is not a dependency of `pi-rs-core`.
+`pi-rs-rkb` serves as the architectural reference implementation for provenance-aware
+external knowledge.
 
 The generic feature extracted into `pi-rs` is not "RAG."
 
