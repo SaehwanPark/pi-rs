@@ -63,8 +63,6 @@ pub fn execute(args: ReplayArgs) -> Result<(), String> {
     },
   )
   .map_err(|error| error.to_string())?;
-  let report = report;
-
   let context_target = args.context_at.as_deref().map(parse_target).transpose()?;
   let context = context_target
     .as_ref()
