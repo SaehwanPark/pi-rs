@@ -27,6 +27,8 @@
 //!   does not own runtime state and does not receive facts that events do not
 //!   carry.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -469,6 +471,10 @@ pub struct ExternalContextRetrieved {
   /// `true` when the payload entered context inline rather than as a
   /// reference.
   pub inline: bool,
+  /// Provider-owned source metadata that remains attached to the durable
+  /// reference when the model-visible evidence is compacted.
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

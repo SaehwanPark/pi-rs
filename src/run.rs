@@ -59,6 +59,10 @@ pub(crate) fn open_session(
     .map_err(|error| format!("cannot read config '{}': {error}", config.display()))?;
   let config =
     RuntimeConfig::parse(&config_text).map_err(|error| format!("invalid config: {error}"))?;
+  // RKB normalization only enriches the cloned manager configuration with the
+  // provider's read-only retrieval tool names. No MCP process is started here.
+  let mcp_servers = pi_rs_rkb::RkbSetup::normalize_configs(&config.mcp_servers);
+  let rkb_setup = pi_rs_rkb::RkbSetup::discover(&mcp_servers);
   let endpoint = config.endpoint_for(&config.primary).ok_or_else(|| {
     format!(
       "invalid config: primary model {} has no endpoint entry",
@@ -95,9 +99,19 @@ pub(crate) fn open_session(
   // command has no trust decision to consult about the workspace, so the project's
   // own skill files stay unread (and `pi-rs skills --project` stays how one is seen).
   // The scan is two small directories, which is what lets it sit on the startup path.
-  let skills_prompt =
+  let mut skills_prompt =
     pi_rs_compat::skill::discover(&pi_rs_compat::scan::Discovery::new(canonical_cwd.clone()))
       .control_prompt();
+  // RKB setup is config discovery only: the MCP process remains disconnected until
+  // the caller explicitly enables the discovered server. When configured, offer the
+  // first-party skill inline so a packaged binary does not need a source-tree path
+  // merely to explain citation and rehydration rules.
+  if let Some(setup) = &rkb_setup {
+    if !skills_prompt.is_empty() {
+      skills_prompt.push_str("\n\n");
+    }
+    skills_prompt.push_str(setup.skill());
+  }
 
   let mut policy = pi_rs_core::ProfilePolicy::new(
     config.context_profile,
@@ -194,7 +208,7 @@ pub(crate) fn open_session(
     // configuration surface: the policy comes from the primary's own capabilities.
     runtime = runtime.with_backup(backup);
   }
-  let mut mcp_manager = pi_rs_mcp::McpManager::new(config.mcp_servers.clone());
+  let mut mcp_manager = pi_rs_mcp::McpManager::new(mcp_servers);
   let mut session = SessionHandle {
     runtime,
     progress,

@@ -41,6 +41,8 @@
 //!    capsule and post-checkpoint events, keeping resume latency bounded regardless of
 //!    lifetime session length.
 //!
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// The four reduction levels.
@@ -563,6 +565,57 @@ pub struct CapsuleArtifact {
   pub note: String,
 }
 
+/// A durable identity for evidence held by an external knowledge provider.
+///
+/// The reference is intentionally provider-neutral. `resource_id` is owned by the
+/// external provider, while `metadata` carries source details that must survive a
+/// model-context reduction without making the core depend on one knowledge base.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalContextRef {
+  pub provider: String,
+  pub resource_id: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub citation: Option<String>,
+  pub provenance: String,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub metadata: BTreeMap<String, String>,
+}
+
+impl ExternalContextRef {
+  pub fn new(
+    provider: impl Into<String>,
+    resource_id: impl Into<String>,
+    provenance: impl Into<String>,
+    citation: Option<String>,
+  ) -> Self {
+    Self {
+      provider: provider.into(),
+      resource_id: resource_id.into(),
+      citation,
+      provenance: provenance.into(),
+      metadata: BTreeMap::new(),
+    }
+  }
+
+  pub fn source(&self) -> crate::trace::ExternalContextSource {
+    crate::trace::ExternalContextSource {
+      provider: self.provider.clone(),
+      resource_id: self.resource_id.clone(),
+      provenance: self.provenance.clone(),
+    }
+  }
+
+  pub fn with_metadata(mut self, metadata: BTreeMap<String, String>) -> Self {
+    self.metadata = metadata;
+    self
+  }
+
+  pub fn with_metadata_value(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+    self.metadata.insert(key.into(), value.into());
+    self
+  }
+}
+
 /// External context item retrieved for a turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalContextItem {
@@ -572,6 +625,9 @@ pub struct ExternalContextItem {
   #[serde(default)]
   pub text: String,
   pub inline: bool,
+  /// Provider-owned source metadata retained when the item becomes a reference.
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub metadata: BTreeMap<String, String>,
 }
 
 impl ExternalContextItem {
@@ -585,6 +641,7 @@ impl ExternalContextItem {
       citation,
       text: text.into(),
       inline: true,
+      metadata: BTreeMap::new(),
     }
   }
 
@@ -594,6 +651,48 @@ impl ExternalContextItem {
       citation,
       text: String::new(),
       inline: false,
+      metadata: BTreeMap::new(),
+    }
+  }
+
+  /// Add provider-owned source metadata without changing the generic source identity.
+  pub fn with_metadata(mut self, metadata: BTreeMap<String, String>) -> Self {
+    self.metadata = metadata;
+    self
+  }
+
+  /// The durable reference represented by this item.
+  pub fn external_ref(&self) -> ExternalContextRef {
+    ExternalContextRef {
+      provider: self.source.provider.clone(),
+      resource_id: self.source.resource_id.clone(),
+      citation: self.citation.clone(),
+      provenance: self.source.provenance.clone(),
+      metadata: self.metadata.clone(),
+    }
+  }
+
+  /// Replace inline evidence with a model-visible reference while retaining all
+  /// provider identity and source metadata. The canonical retrieval event remains
+  /// unchanged; this only changes the working-set representation.
+  pub fn compact_to_reference(&self) -> Self {
+    Self {
+      source: self.source.clone(),
+      citation: self.citation.clone(),
+      text: String::new(),
+      inline: false,
+      metadata: self.metadata.clone(),
+    }
+  }
+
+  /// Rehydrate a durable reference into inline model-visible evidence.
+  pub fn rehydrate(reference: &ExternalContextRef, text: impl Into<String>) -> Self {
+    Self {
+      source: reference.source(),
+      citation: reference.citation.clone(),
+      text: text.into(),
+      inline: true,
+      metadata: reference.metadata.clone(),
     }
   }
 
@@ -817,6 +916,33 @@ mod tests {
     }
     assert_eq!(ContextProfile::parse("moderate"), None);
     assert_eq!(ContextProfile::default(), ContextProfile::Balanced);
+  }
+
+  #[test]
+  fn external_context_reference_survives_compaction_and_rehydration() {
+    let source = crate::trace::ExternalContextSource {
+      provider: "rkb-rs".into(),
+      resource_id: "chunk-42".into(),
+      provenance: "rkb-rs/agent-context".into(),
+    };
+    let item = ExternalContextItem::inline(source, "original evidence", Some("[1]".into()))
+      .with_metadata(BTreeMap::from([
+        ("source_url".into(), "https://example.test/doc".into()),
+        ("page".into(), "4".into()),
+      ]));
+    let reference = item.compact_to_reference();
+    assert!(!reference.inline);
+    assert!(reference.text.is_empty());
+    assert_eq!(reference.external_ref(), item.external_ref());
+    let encoded = serde_json::to_string(&reference.external_ref()).unwrap();
+    let decoded: ExternalContextRef = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, item.external_ref());
+
+    let rehydrated = ExternalContextItem::rehydrate(&decoded, "rehydrated evidence");
+    assert!(rehydrated.inline);
+    assert_eq!(rehydrated.text, "rehydrated evidence");
+    assert_eq!(rehydrated.external_ref(), item.external_ref());
+    assert!(rehydrated.format_for_model().contains("chunk-42"));
   }
 
   #[test]

@@ -365,6 +365,7 @@ mod tests {
       model: ModelRef::new("local", "qwen"),
       event_id: EventId::new(),
       seq: Some(EventSeq(seq)),
+      external_context: None,
     })
   }
 

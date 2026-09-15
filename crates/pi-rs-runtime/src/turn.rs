@@ -651,17 +651,19 @@ impl<'a> TurnLoop<'a> {
 
     for item in external_context {
       let bytes = item.text.len() as u64;
-      self.emit(
+      let context_text = item.format_for_model();
+      let msg = Message::user(context_text);
+      self.emit_message(
         Some(turn_id.clone()),
         AgentEvent::ExternalContextRetrieved(ExternalContextRetrieved {
           source: item.source.clone(),
           citation: item.citation.clone(),
           bytes,
           inline: item.inline,
+          metadata: item.metadata.clone(),
         }),
+        &msg,
       )?;
-      let context_text = item.format_for_model();
-      let msg = Message::user(context_text);
       self.messages.push(msg);
     }
 

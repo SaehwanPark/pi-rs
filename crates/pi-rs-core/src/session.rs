@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
   capability::ModelRef,
-  context::ContextCapsule,
+  context::{ContextCapsule, ExternalContextRef},
   ids::{CheckpointId, EventId, EventSeq, SessionId, TurnId},
   message::{Message, Role},
 };
@@ -80,6 +80,11 @@ pub struct SessionMessage {
   /// Sequence number of that event, when the log had assigned one.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub seq: Option<EventSeq>,
+  /// External evidence identity when this message was introduced by an
+  /// `external_context_retrieved` event. Keeping it beside the model-visible
+  /// text lets resume and compaction retain a typed rehydration handle.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub external_context: Option<ExternalContextRef>,
 }
 
 /// A model epoch as recorded in session state.
@@ -186,6 +191,7 @@ mod tests {
       model: ModelRef::new("backup", "small"),
       event_id: EventId::new(),
       seq: Some(EventSeq(41)),
+      external_context: None,
     });
     let line = serde_json::to_string(&record).unwrap();
     assert!(line.contains("\"epoch\":2"), "{line}");

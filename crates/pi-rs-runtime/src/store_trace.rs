@@ -94,8 +94,9 @@ fn store_error(error: pi_rs_store::StoreError) -> SinkError {
 #[cfg(test)]
 mod tests {
   use pi_rs_core::{
-    AgentEvent, EventMeta, Message, ModelRef, SessionHeader, SessionId, TraceId, TurnId,
-    UserMessage, session::SESSION_SCHEMA_VERSION,
+    AgentEvent, AttributedMessage, EventMeta, ExternalContextRetrieved, ExternalContextSource,
+    Message, ModelRef, SessionHeader, SessionId, TraceId, TurnId, UserMessage,
+    session::SESSION_SCHEMA_VERSION,
   };
   use pi_rs_store::{StateLayout, Store, TempDir, TraceJournal, WritePolicy};
 
@@ -164,6 +165,68 @@ mod tests {
       );
       assert!(durable.contains("[redacted:"), "{durable}");
     }
+  }
+
+  #[test]
+  fn external_context_reference_is_persisted_for_resume() {
+    let temp = TempDir::new("runtime-store-external-context");
+    let store = Store::open(temp.path(), WritePolicy::default()).unwrap();
+    let session_id = SessionId::new();
+    let model = ModelRef::new("local", "model");
+    let session = store
+      .begin(SessionHeader {
+        session_id: session_id.clone(),
+        version: SESSION_SCHEMA_VERSION,
+        started_at_ms: 1,
+        working_dir: "/workspace".into(),
+        model: model.clone(),
+        parent_session: None,
+        branched_from_event: None,
+        imported_from: None,
+      })
+      .unwrap();
+    let turn_id = TurnId::new();
+    let mut meta = EventMeta::new(session_id.clone(), TraceId::new());
+    meta.turn_id = Some(turn_id.clone());
+    meta.model_epoch = Some(0);
+    meta.model = Some(model.clone());
+    let source = ExternalContextSource {
+      provider: "rkb-rs".into(),
+      resource_id: "chunk-42".into(),
+      provenance: "rkb-rs/agent-context".into(),
+    };
+    let mut metadata = std::collections::BTreeMap::new();
+    metadata.insert("source_url".into(), "https://example.test/doc".into());
+    let item = pi_rs_core::ExternalContextItem::inline(source, "evidence", Some("[1]".into()))
+      .with_metadata(metadata.clone());
+    let message = Message::user(item.format_for_model());
+    let mut envelope = EventEnvelope::new(
+      meta,
+      AgentEvent::ExternalContextRetrieved(ExternalContextRetrieved {
+        source: item.source.clone(),
+        citation: item.citation.clone(),
+        bytes: item.text.len() as u64,
+        inline: true,
+        metadata,
+      }),
+    );
+    let mut trace = StoreTrace::new(session);
+    trace.emit(&mut envelope).unwrap();
+    trace
+      .record_message(&AttributedMessage { envelope, message })
+      .unwrap();
+    trace.flush().unwrap();
+
+    let restored = store.restore(&session_id).unwrap();
+    let context = restored.messages[0]
+      .external_context
+      .as_ref()
+      .expect("external context reference survives resume");
+    assert_eq!(context.provider, "rkb-rs");
+    assert_eq!(context.resource_id, "chunk-42");
+    assert_eq!(context.citation.as_deref(), Some("[1]"));
+    assert_eq!(context.metadata["source_url"], "https://example.test/doc");
+    assert!(restored.messages[0].message.text().contains("evidence"));
   }
 
   #[test]

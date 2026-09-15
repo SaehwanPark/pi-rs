@@ -384,7 +384,13 @@ Requirements:
 - no assumption that every server supports the latest optional extensions;
 - stable internal tool/resource normalization.
 
-`rkb-rs` should be used as an early real-world compatibility fixture.
+`rkb-rs` is integrated through the independent `pi-rs-rkb` adapter. The adapter
+recognizes the verified `rkb mcp` stdio contract, marks its retrieval tools read-only,
+keeps activation lazy, parses citation-bearing `get_agent_context` responses, and
+rehydrates compact references through exact-id `search_chunks` queries. RKB source URL,
+document, page, record id, citation, and provenance are retained in the generic external
+context reference and durable retrieval event. No direct dependency on the external
+`rkb-rs` crate is introduced.
 
 ## 14. Compatibility tests
 

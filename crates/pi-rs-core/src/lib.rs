@@ -50,7 +50,7 @@ pub use config::{
 pub use context::{
   CAPSULE_SCHEMA_VERSION, CapsuleArtifact, CapsuleDecision, ContextAction, ContextCapsule,
   ContextDecision, ContextLevel, ContextPolicy, ContextProfile, ContextState, ContextThresholds,
-  ExternalContextItem, ProfilePolicy, ReductionReason,
+  ExternalContextItem, ExternalContextRef, ProfilePolicy, ReductionReason,
 };
 pub use event::{
   AgentEvent, AssistantDelta, AttributedMessage, CheckpointCreated, ContextCompactionCompleted,

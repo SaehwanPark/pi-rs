@@ -509,7 +509,7 @@ Do not expose internal implementation details unless necessary.
 
 Represent external knowledge through durable references.
 
-Conceptual type:
+The core contract is generic and serializable:
 
 ```rust
 pub struct ExternalContextRef {
@@ -517,17 +517,27 @@ pub struct ExternalContextRef {
   pub resource_id: String,
   pub citation: Option<String>,
   pub provenance: String,
+  pub metadata: BTreeMap<String, String>,
 }
 ```
 
-External context should support:
+`ExternalContextItem::compact_to_reference` changes only the model-visible working
+representation; its provider identity and source metadata remain in the typed reference.
+`ExternalContextItem::rehydrate` is a pure boundary helper. The provider-specific resolver
+performs I/O and returns a fresh inline item, which the runtime records as another
+`ExternalContextRetrieved` event. Retrieval messages are persisted with their typed
+reference in `SessionMessage.external_context`, while canonical trace remains authoritative.
 
-- prompt rendering;
-- compaction to reference;
-- later rehydration;
-- traceable provenance.
+External context therefore supports:
 
-`rkb-rs` is the first planned reference integration.
+- citation-aware prompt/UI rendering;
+- compaction to a durable reference;
+- later provider-owned rehydration;
+- traceable source/provenance metadata;
+- fail-closed unavailable-resource handling.
+
+`pi-rs-rkb` is the first-party reference integration. It depends on generic core/MCP
+contracts, while `pi-rs-core` has no dependency on RKB or its external crate.
 
 ## 17. Pi compatibility layer
 
