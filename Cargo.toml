@@ -11,6 +11,7 @@ members = [
   "crates/pi-rs-mcp",
   "crates/pi-rs-rkb",
   "crates/pi-rs-extension",
+  "crates/pi-rs-replay",
 ]
 
 [workspace.package]
@@ -32,6 +33,7 @@ pi-rs-tui = { path = "crates/pi-rs-tui" }
 pi-rs-mcp = { path = "crates/pi-rs-mcp" }
 pi-rs-rkb = { path = "crates/pi-rs-rkb" }
 pi-rs-extension = { path = "crates/pi-rs-extension" }
+pi-rs-replay = { path = "crates/pi-rs-replay" }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -63,7 +65,9 @@ pi-rs-tui.workspace = true
 pi-rs-mcp.workspace = true
 pi-rs-rkb.workspace = true
 pi-rs-extension.workspace = true
+pi-rs-replay.workspace = true
 crossterm.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(unix)'.dependencies]

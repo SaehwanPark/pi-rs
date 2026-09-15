@@ -229,7 +229,8 @@ The following items are not blockers for the canonical initial MVP, but remain e
     `pi-rs-extension` boundary with focused fixtures. The typed MCP worker boundary is
     implemented in `pi-rs-mcp::worker` with an injected headless engine, asynchronous
     run/cancel handles, coarse `session://` resources, and stdio JSON-RPC fixtures;
-    replay tooling, adaptive optimization, telemetry, and GitHub Pages remain deferred.
+    read-only replay/history analysis is implemented in `pi-rs-replay`; adaptive
+    optimization, telemetry, and GitHub Pages remain deferred.
 
 ## Real-endpoint verification
 

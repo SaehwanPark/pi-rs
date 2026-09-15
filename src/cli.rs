@@ -12,6 +12,7 @@ pub const TOP_HELP: &str = concat!(
   "  run          Run one durable coding-agent turn\n",
   "  interactive  Hold one session across many turns in this process\n",
   "  trace        Read a session's transcript back out of the store\n",
+  "  replay       Inspect a recorded session without generating new work\n",
   "  skills       List the skills that would be offered to a model\n",
   "  prompts      List the prompt templates a session would offer\n",
   "  prompt       Expand one prompt template and print the prompt it becomes\n",
@@ -130,6 +131,31 @@ pub const TRACE_HELP: &str = concat!(
   "  --quiet                  Only warnings, errors, and tool trouble.\n",
   "  --silent                 No transcript (the footer still reports what was read).\n",
   "  -h, --help               Show this help.\n",
+);
+
+pub const REPLAY_HELP: &str = concat!(
+  "Usage: pi-rs replay <trace-or-session.jsonl> [options]\n",
+  "\n",
+  "Inspects recorded history deterministically. Replay never starts a provider,\n",
+  "executes a tool, or treats historical events as a new generation. Output is a\n",
+  "stable event projection unless --json requests the complete analysis report.\n",
+  "\n",
+  "Input and selection:\n",
+  "  <path>                    Trace or session JSONL path\n",
+  "  --until <event:<id>|seq:<n>>\n",
+  "                            Include the selected event and everything before it\n",
+  "  --tools                   Show tool lifecycle events\n",
+  "  --reasoning               Show reasoning/provenance events\n",
+  "  --timing                  Include timestamp and duration fields\n",
+  "  --context-at <event|seq>  Reconstruct model-visible context at an event\n",
+  "  --branch <event|seq>      Print a historical branch plan; never executes it\n",
+  "  --compare <path>          Compare a second continuation structurally\n",
+  "\n",
+  "Output:\n",
+  "  --json                    Emit the complete machine-readable replay report\n",
+  "  --export <path>           Export selected redacted trace entries as JSONL\n",
+  "  --sequence                Prefix human-readable frames with sequence numbers\n",
+  "  -h, --help                Show this help\n",
 );
 
 pub const SKILLS_HELP: &str = concat!(
@@ -309,6 +335,7 @@ pub enum Command {
   Packages(PackagesArgs),
   Trust(TrustArgs),
   Compat(CompatArgs),
+  Replay(ReplayArgs),
   Import(ImportArgs),
   Export(ExportArgs),
 }
@@ -485,6 +512,22 @@ impl Default for TraceArgs {
   }
 }
 
+/// `pi-rs replay`: inspect historical execution without generating a continuation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayArgs {
+  pub input: PathBuf,
+  pub until: Option<String>,
+  pub tools: bool,
+  pub reasoning: bool,
+  pub timing: bool,
+  pub context_at: Option<String>,
+  pub branch: Option<String>,
+  pub compare: Option<PathBuf>,
+  pub json: bool,
+  pub export: Option<PathBuf>,
+  pub sequence: bool,
+}
+
 /// `pi-rs import-pi`: read a Pi session file, and write it only when asked to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportArgs {
@@ -562,6 +605,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
   }
   if command == "compat" {
     return parse_compat(&remaining);
+  }
+  if command == "replay" {
+    return parse_replay(&remaining);
   }
   if command == "import-pi" || command == "import" {
     return parse_import(&remaining);
@@ -1233,8 +1279,87 @@ fn inline_value(arg: &std::ffi::OsStr) -> Option<(&str, &std::ffi::OsStr)> {
       | "--epoch"
       | "--store"
       | "--out"
+      | "--until"
+      | "--context-at"
+      | "--branch"
+      | "--compare"
+      | "--export"
   )
   .then_some((flag, OsStr::new(value)))
+}
+
+/// `pi-rs replay`: inspect recorded history without opening a provider.
+fn parse_replay(remaining: &[OsString]) -> Result<Command, String> {
+  if remaining.iter().any(|arg| arg == "--help" || arg == "-h") {
+    return Ok(Command::Help(REPLAY_HELP));
+  }
+  let mut input: Option<PathBuf> = None;
+  let mut until = None;
+  let mut tools = false;
+  let mut reasoning = false;
+  let mut timing = false;
+  let mut context_at = None;
+  let mut branch = None;
+  let mut compare = None;
+  let mut json = false;
+  let mut export = None;
+  let mut sequence = false;
+  let remaining: &[OsString] = &expand_inline(remaining);
+  let mut index = 0;
+  while index < remaining.len() {
+    let flag = remaining[index]
+      .to_str()
+      .ok_or_else(|| format!("replay argument is not valid UTF-8\n{REPLAY_HELP}"))?;
+    index += 1;
+    match flag {
+      "--until" | "--context-at" | "--branch" | "--compare" | "--export" => {
+        let value = remaining
+          .get(index)
+          .ok_or_else(|| format!("{flag} requires a value\n{REPLAY_HELP}"))?
+          .clone();
+        index += 1;
+        let value = value
+          .into_string()
+          .map_err(|_| format!("{flag} must be valid UTF-8\n{REPLAY_HELP}"))?;
+        if value.trim().is_empty() || value.starts_with('-') {
+          return Err(format!("{flag} needs a non-empty value\n{REPLAY_HELP}"));
+        }
+        match flag {
+          "--until" => set_once(&mut until, value, flag)?,
+          "--context-at" => set_once(&mut context_at, value, flag)?,
+          "--branch" => set_once(&mut branch, value, flag)?,
+          "--compare" => set_once(&mut compare, PathBuf::from(value), flag)?,
+          "--export" => set_once(&mut export, PathBuf::from(value), flag)?,
+          _ => unreachable!("matched above"),
+        }
+      }
+      "--tools" => tools = true,
+      "--reasoning" => reasoning = true,
+      "--timing" => timing = true,
+      "--json" => json = true,
+      "--sequence" => sequence = true,
+      other if !other.starts_with('-') => {
+        if input.is_some() {
+          return Err(format!("replay accepts one input path\n{REPLAY_HELP}"));
+        }
+        input = Some(PathBuf::from(other));
+      }
+      other => return Err(format!("unknown replay argument '{other}'\n{REPLAY_HELP}")),
+    }
+  }
+  Ok(Command::Replay(ReplayArgs {
+    input: input.ok_or_else(|| format!("replay needs an input path\n{REPLAY_HELP}"))?,
+    until,
+    tools,
+    reasoning,
+    timing,
+    context_at,
+    branch,
+    compare,
+    json,
+    export,
+    sequence,
+  }))
 }
 
 /// `pi-rs import-pi`: one Pi session file, and where to put the pi-rs session made from it.
@@ -1953,12 +2078,58 @@ mod tests {
   #[test]
   fn the_new_commands_are_listed_where_commands_are_listed() {
     // A command that is not in the top-level help is a command nobody finds.
-    for command in ["prompts", "prompt", "compat"] {
+    for command in ["prompts", "prompt", "compat", "replay"] {
       assert!(
         TOP_HELP.contains(&format!("  {command} ")),
         "TOP_HELP should list `{command}`: {TOP_HELP}"
       );
     }
+  }
+
+  #[test]
+  fn replay_parses_filters_until_context_branch_and_export() {
+    let Command::Replay(args) = parse(strings(&[
+      "replay",
+      "trace.jsonl",
+      "--tools",
+      "--reasoning",
+      "--timing",
+      "--until=seq:7",
+      "--context-at",
+      "event:evt-7",
+      "--branch=seq:4",
+      "--compare",
+      "other.jsonl",
+      "--json",
+      "--export=selected.jsonl",
+      "--sequence",
+    ]))
+    .expect("replay parses") else {
+      panic!("expected replay command");
+    };
+    assert_eq!(args.input, PathBuf::from("trace.jsonl"));
+    assert_eq!(args.until.as_deref(), Some("seq:7"));
+    assert!(args.tools && args.reasoning && args.timing);
+    assert_eq!(args.context_at.as_deref(), Some("event:evt-7"));
+    assert_eq!(args.branch.as_deref(), Some("seq:4"));
+    assert_eq!(args.compare, Some(PathBuf::from("other.jsonl")));
+    assert!(args.json && args.sequence);
+    assert_eq!(args.export, Some(PathBuf::from("selected.jsonl")));
+  }
+
+  #[test]
+  fn replay_requires_one_input_and_rejects_duplicates() {
+    let error = match parse(strings(&["replay"])) {
+      Err(error) => error,
+      Ok(command) => panic!("expected error, got {command:?}"),
+    };
+    assert!(error.contains("replay needs an input path"), "{error}");
+    let error = match parse(strings(&["replay", "a", "b"])) {
+      Err(error) => error,
+      Ok(command) => panic!("expected error, got {command:?}"),
+    };
+    assert!(error.contains("one input path"), "{error}");
+    assert!(parse(strings(&["replay", "a", "--until"])).is_err());
   }
 
   #[test]
@@ -2002,6 +2173,7 @@ mod tests {
       ("run", RUN_HELP),
       ("interactive", INTERACTIVE_HELP),
       ("trace", TRACE_HELP),
+      ("replay", REPLAY_HELP),
       ("skills", SKILLS_HELP),
       ("prompts", PROMPTS_HELP),
       ("prompt", PROMPT_HELP),
@@ -2037,6 +2209,7 @@ mod tests {
       ("RUN_HELP", RUN_HELP),
       ("INTERACTIVE_HELP", INTERACTIVE_HELP),
       ("TRACE_HELP", TRACE_HELP),
+      ("REPLAY_HELP", REPLAY_HELP),
       ("SKILLS_HELP", SKILLS_HELP),
       ("PROMPTS_HELP", PROMPTS_HELP),
       ("PROMPT_HELP", PROMPT_HELP),

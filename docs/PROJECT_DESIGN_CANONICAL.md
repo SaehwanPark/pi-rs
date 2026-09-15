@@ -575,7 +575,12 @@ Longer-term possibilities:
 - visualize failover epochs;
 - audit tool side effects.
 
-Historical execution must remain clearly separated from newly generated continuation.
+Historical execution must remain clearly separated from newly generated continuation. The
+verified `pi-rs-replay` boundary treats replay as a pure projection over redacted trace entries
+joined with persisted session messages; it uses sequence numbers for order, preserves explicit
+reasoning provenance, and emits dry historical branch plans rather than executing them. Context
+snapshots keep canonical history intact while representing compaction/checkpoint substitutions
+only in the model-visible working projection.
 
 ---
 
@@ -1971,12 +1976,15 @@ Implement:
 
 Add:
 
-- visual replay;
-- historical context reconstruction;
-- branch-from-event;
-- model comparison;
-- trace analysis;
-- reasoning/provenance inspection.
+- deterministic `pi-rs replay` over canonical trace/session records;
+- tools, reasoning, timing, and inclusive replay-until-event projections;
+- historical model-visible context reconstruction with canonical/working separation;
+- dry branch-from-event plans and structural continuation comparison;
+- model-epoch, compaction, failover, provenance, and redacted trace-export analysis.
+
+Replay remains read-only and never executes providers or tools. A historical branch plan is
+explicitly separate from any future generated continuation, and uncertain mutating tool states
+remain reconciliation barriers.
 
 ### Phase 11: Adaptive optimization experiments
 
