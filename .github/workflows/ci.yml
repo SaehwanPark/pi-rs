@@ -20,6 +20,12 @@ jobs:
           components: rustfmt, clippy
       - name: fmt
         run: cargo fmt --all --check
+      - name: Node extension host runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Verify Node extension host runtime
+        run: node --version
       - name: core contracts compile independently
         run: cargo check -p pi-rs-core --all-features
       - name: clippy

@@ -78,7 +78,7 @@ fn packages_show_displays_detailed_surfaces_and_locations() {
 }
 
 #[test]
-fn packages_show_displays_unsupported_extensions() {
+fn packages_show_displays_partial_extensions() {
   let (stdout, _stderr, success) = run(
     &["packages", "--show", "fixture-pkg-ext"],
     fixture_home(),
@@ -86,9 +86,9 @@ fn packages_show_displays_unsupported_extensions() {
   );
   assert!(success, "packages --show should succeed");
   assert!(stdout.contains("Package: fixture-pkg-ext (0.5.0) [global]"));
-  assert!(stdout.contains("✗ extensions"));
+  assert!(stdout.contains("△ extensions"));
   assert!(stdout.contains("Diagnostics:"));
-  assert!(stdout.contains("unsupported surface 'extensions'"));
+  assert!(stdout.contains("extension surface requires explicit trusted Node host activation"));
 }
 
 #[test]

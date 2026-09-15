@@ -452,8 +452,10 @@ pub fn inspect_package(
 
       surfaces.push(SurfaceReport {
         name: "extensions".to_string(),
-        status: CompatibilityLevel::Unsupported,
-        detail: Some("TypeScript host required in Phase 8".to_string()),
+        status: CompatibilityLevel::Partial,
+        detail: Some(
+          "selected TypeScript APIs available; explicit host activation required".to_string(),
+        ),
       });
     } else {
       let entry_count = if !manifest.extension_paths.is_empty() {
@@ -463,9 +465,9 @@ pub fn inspect_package(
       };
       surfaces.push(SurfaceReport {
         name: "extensions".to_string(),
-        status: CompatibilityLevel::Unsupported,
+        status: CompatibilityLevel::Partial,
         detail: Some(format!(
-          "{entry_count} declared entry point(s); TypeScript host required in Phase 8"
+          "{entry_count} declared entry point(s); selected TypeScript APIs available"
         )),
       });
     }
@@ -908,6 +910,9 @@ fn scan_js_ts_files(dir: &Path, files: &mut Vec<PathBuf>) {
 
 fn describe_package_warning(warning: &Warning) -> String {
   match warning {
+    Warning::UnsupportedSurface { surface, count } if surface == "extensions" => {
+      format!("extension surface requires explicit trusted Node host activation (count: {count})")
+    }
     Warning::UnsupportedSurface { surface, count } => {
       format!("unsupported surface '{surface}' (count: {count})")
     }
@@ -1039,7 +1044,7 @@ mod tests {
       report
         .surfaces
         .iter()
-        .any(|s| s.name == "extensions" && s.status == CompatibilityLevel::Unsupported)
+        .any(|s| s.name == "extensions" && s.status == CompatibilityLevel::Partial)
     );
   }
 

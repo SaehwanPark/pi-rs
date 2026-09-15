@@ -108,6 +108,9 @@ pub fn execute(args: PackagesArgs) -> Result<(), String> {
 /// What was declined or warned about, naming the path.
 fn describe(warning: &Warning) -> String {
   match warning {
+    Warning::UnsupportedSurface { surface, count } if surface == "extensions" => {
+      format!("extension surface requires explicit trusted Node host activation (count: {count})")
+    }
     Warning::UnsupportedSurface { surface, count } => {
       format!("unsupported surface '{surface}' (count: {count})")
     }

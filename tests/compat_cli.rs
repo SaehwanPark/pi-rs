@@ -47,7 +47,9 @@ fn compat_inspect_package_with_extension() {
   assert!(stdout.contains("✓ command registration (registerCommand API detected)"));
   assert!(stdout.contains("△ context hook (context lifecycle hook detected)"));
   assert!(stdout.contains("✗ unsupported internal import (internal Pi module import detected)"));
-  assert!(stdout.contains("✗ extensions (TypeScript host required in Phase 8)"));
+  assert!(stdout.contains(
+    "△ extensions (selected TypeScript APIs available; explicit host activation required)"
+  ));
 }
 
 #[test]
@@ -140,7 +142,7 @@ fn compat_inspect_json_output() {
   assert!(
     surfaces
       .iter()
-      .any(|s| s["name"] == "extensions" && s["status"] == "unsupported")
+      .any(|s| s["name"] == "extensions" && s["status"] == "partial")
   );
 }
 

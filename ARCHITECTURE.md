@@ -64,6 +64,7 @@ crates/
   pi-rs-tools/
   pi-rs-mcp/
   pi-rs-pi-compat/
+  pi-rs-extension/
   pi-rs-tui/
 
 src/
@@ -573,9 +574,16 @@ Priority order:
 7. selected lifecycle events;
 8. selected UI compatibility.
 
-A Node host should handle TypeScript extension execution when needed.
+`pi-rs-extension` handles the selected TypeScript extension surface behind a typed
+JSON-lines RPC boundary. It accepts trusted module paths, loads Pi-style default factories,
+and returns normalized tool/command metadata, lifecycle/context results, and selected UI
+notifications. Extension exceptions and process loss remain adapter errors; the core
+session does not infer a successful tool result from a failed host call. Mutating extension
+tools default to `Unknown` when completion is not observed.
 
-The Node host must be lazy-started.
+The Node host must be lazy-started: constructing the host, inspecting compatibility
+fixtures, and running a session without extension modules perform no process I/O. Project
+extensions are never discovered or executed implicitly by the host.
 
 ## 18. TUI boundary
 
@@ -607,7 +615,7 @@ READY
 
 Deferred by default:
 
-- Node extension host;
+- Node extension host (`pi-rs-extension`);
 - MCP connections;
 - backup provider connection/loading;
 - deep trace hydration;

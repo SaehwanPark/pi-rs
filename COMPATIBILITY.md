@@ -44,10 +44,10 @@ Use the following status vocabulary:
 | Session import | Partial |
 | Session export | Partial |
 | Themes | Partial |
-| Extension `registerTool` | Partial -> Supported |
-| Extension `registerCommand` | Partial -> Supported |
-| Extension lifecycle events | Partial |
-| Extension context hooks | Experimental |
+| Extension `registerTool` | Supported (selected host subset) |
+| Extension `registerCommand` | Supported (selected host subset) |
+| Extension lifecycle events | Partial (selected events) |
+| Extension context hooks | Partial (message transformation subset) |
 | Complex custom TUI | Experimental |
 | Arbitrary Pi internal imports | Unsupported |
 | Undocumented Pi internals | Unsupported |
@@ -143,7 +143,8 @@ Support Pi-style package discovery and installation as early as practical. Disco
 surface diagnostics are supported, and `pi-rs packages install <local-directory>` now copies
 an explicit local package into the global or `--project` package root without running
 scripts. npm/git/HTTP sources, dependency installation, update/remove settings, and
-extension execution remain deferred; the surface therefore stays `Partial`.
+automatic extension discovery remain deferred; extension execution is `Partial` through
+the explicitly activated Node host described below.
 
 Goals:
 
@@ -186,36 +187,50 @@ for prompt templates. Project package locations are read only when the project i
 (`--project`), preserving the trust boundary. Manifest surface paths must be relative and
 contained within the package; absolute, parent-traversing, or outward-symlink paths are
 reported and not activated. Duplicate package names resolve to the first package found.
-Unsupported surfaces (such as `extensions` requiring the Node host) produce per-surface
-diagnostics without rejecting the package.
+Deferred or unsupported surfaces produce per-surface diagnostics without rejecting the
+package. Extension entry points are marked partial until a trusted caller explicitly
+constructs the Node host; project-local files are never executed implicitly.
 
 `pi-rs packages --show <name>` displays detailed surface status and contained locations.
 
 ## 8. TypeScript extensions
 
-Existing Pi TypeScript extensions should run through a compatibility host when practical.
+Selected Pi TypeScript extensions run through the optional `pi-rs-extension` host.
+The host is an explicit, trusted boundary: constructing it performs no process I/O, an
+empty module list never launches Node, and only `start`/dispatch of configured modules
+loads code. The host accepts Pi's default factory shape and Node's type-only imports for
+`.ts` fixtures. TypeScript fixtures require Node 22.6+ (`--experimental-strip-types`);
+CI pins Node 22.x. Dependency installation and arbitrary package resolution remain out of
+scope.
 
 Architecture:
 
 ```text
-pi-rs
+pi-rs / pi-rs-compat caller
   |
-extension RPC
+pi-rs-extension (typed JSON-lines RPC + Tool wrapper)
   |
-Node host
+Node host bootstrap
   |
 Pi-style TypeScript extension
 ```
 
-Priority extension APIs:
+Implemented selected APIs:
 
-1. tool registration;
-2. slash-command registration;
-3. lifecycle event subscription;
-4. context hooks;
-5. selected UI facilities.
+1. `pi.registerTool({ name, label, description, parameters, execute })`, with conservative
+   mutating defaults and `ToolExecutionState::Unknown` when completion is uncertain;
+2. `pi.registerCommand(name, { description, handler })`;
+3. `pi.on` for `session_start`, `session_shutdown`, `turn_start`, `turn_end`, `tool_call`,
+   `tool_result`, and `context`;
+4. `ctx.ui.notify`, `setStatus`, and `setWidget`, returned as typed UI events;
+5. context-hook message replacement and structured tool/command results.
 
-The Node host should not start unless a compatible extension requires it.
+The host keeps extension exceptions as typed boundary errors and leaves the process alive
+for later dispatch where possible. Process/protocol loss is distinct and never becomes an
+observed successful core operation. `tests/compat/extensions/` and
+`tests/extension_host.rs` cover registration, lifecycle/context/UI dispatch, lazy startup,
+and failure isolation. Full custom TUI components, shortcuts/flags, provider registration,
+state persistence, and UI prompts remain unsupported or deferred.
 
 ## 9. Native extensions
 
@@ -435,7 +450,7 @@ Target: with-extension (package)
 ✓ command registration (registerCommand API detected)
 △ context hook (context lifecycle hook detected)
 ✗ unsupported internal import (internal Pi module import detected)
-✗ extensions (TypeScript host required in Phase 8)
+△ extensions (selected TypeScript APIs available; explicit host activation required)
 ```
 
 ## 16. Version policy

@@ -1,0 +1,11 @@
+{
+  "name": "phase8-extension-fixtures",
+  "version": "0.1.0",
+  "description": "Representative Pi-style TypeScript extension host fixtures.",
+  "type": "module",
+  "extensions": [
+    "phase8-fixture.ts",
+    "phase8-failure-fixture.ts",
+    "phase8-process-loss.mjs"
+  ]
+}

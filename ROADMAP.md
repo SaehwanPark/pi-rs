@@ -287,7 +287,8 @@ Open in this area, in order:
       `--prompt-template`, and `--no-prompt-templates`. (Settings array remains deferred).
 - [x] Decide trust somewhere other than the file reader, then pass its answer in (`--project` is an explicit caller-owned one-shot grant; `--trust-store <dir>` resolves durable exact canonical project scopes, with denial winning over the one-shot flag; durable high-risk decisions are recorded by `pi-rs trust` in `FileTrustStore`, while runtime once/always prompting remains deferred).
 - [x] Add the compatibility fixture suite (`tests/compat/` holds skill, prompt, and package
-      fixtures; session import/export has targeted CLI coverage and extensions remain deferred).
+      fixtures; session import/export has targeted CLI coverage; TypeScript extension
+      execution is covered by the Phase 8 host fixtures).
 
 ### Packages
 
@@ -325,7 +326,7 @@ Open in this area, in order:
 
 ### Stage gate
 
-> Skills, prompts, and package discovery gates are passed. The bounded local package-install path is covered; `--trust-store` resolves durable project grants/denials for compatibility discovery; remote source resolution, dependency installation, and extensions remain deferred.
+> Skills, prompts, and package discovery gates are passed. The bounded local package-install path is covered; `--trust-store` resolves durable project grants/denials for compatibility discovery; remote source resolution, dependency installation, and automatic extension discovery remain deferred. The selected explicit TypeScript host surface is verified in Phase 8.
 > `tests/compat_skills.rs` drives fixture skills (discovery, body loading, `disable-model-invocation`,
 > `SKILL.md` frontmatter, project trust gate) — all 8 tests pass.
 > `tests/compat_prompts.rs` drives fixture templates (Pi substitution grammar, argument splitting,
@@ -333,7 +334,7 @@ Open in this area, in order:
 > `tests/compat_packages.rs` drives fixture manifests and discovery (minimal, full, extensions, malformed, missing, home/project discovery)
 > — all 9 fixture tests pass; 25 unit tests in `package.rs` pass;
 > `tests/packages_cli.rs`: 6 CLI tests pass.
-> TypeScript extension compatibility remains open (Phase 8).
+> Selected TypeScript extension compatibility is complete in Phase 8; full custom UI, dependency installation, and automatic project extension discovery remain deferred.
 
 - [x] Representative Pi skills run unchanged (`tests/compat_skills.rs`: 8 passing fixture
       tests cover discovery, frontmatter, body loading, and project-trust gate).
@@ -577,25 +578,37 @@ Open in this area, in order:
 
 ### Host runtime
 
-- [ ] Define host RPC protocol.
-- [ ] Spawn Node host lazily.
-- [ ] Implement extension process lifecycle.
-- [ ] Isolate extension failures from core process.
+- [x] Define host RPC protocol (`pi-rs-extension` uses typed request/response values over
+      a private JSON-lines Node boundary; process loss and extension errors are distinct).
+- [x] Spawn Node host lazily (construction and an empty module list perform no process I/O;
+      `start` is the explicit activation boundary).
+- [x] Implement extension process lifecycle (module validation, load, ready/failed/stopped
+      status, lifecycle dispatch, explicit shutdown, and process cleanup).
+- [x] Isolate extension failures from core process (typed boundary errors; a mutating
+      extension tool reports `Unknown` when completion is not observed).
 
 ### Extension APIs
 
-- [ ] Support tool registration.
-- [ ] Support slash-command registration.
-- [ ] Support selected lifecycle events.
-- [ ] Support context hooks.
-- [ ] Support selected TUI hooks.
-- [ ] Add real-world compatibility fixtures.
+- [x] Support tool registration (`pi.registerTool` metadata/schema plus async execution,
+      progress events, and a `pi-rs-core::Tool` wrapper).
+- [x] Support slash-command registration (`pi.registerCommand` and command dispatch).
+- [x] Support selected lifecycle events (`session_start`, `session_shutdown`, `turn_start`,
+      `turn_end`, `tool_call`, and `tool_result`).
+- [x] Support context hooks (`context` message transformation).
+- [x] Support selected TUI hooks (`ctx.ui.notify`, `setStatus`, and `setWidget` as typed
+      UI events; full custom widgets remain deferred).
+- [x] Add representative compatibility fixtures (`tests/compat/extensions/*.ts` uses the
+      documented Pi default factory shape and type-only package import).
 
 ### Stage gate
 
-- [ ] Representative Pi TypeScript extensions run with minimal/no changes.
-- [ ] Node is not launched when no compatible extension requires it.
-- [ ] Extension failure does not corrupt the core session.
+- [x] Representative Pi TypeScript extensions run with minimal/no changes
+      (`tests/extension_host.rs`: tool, command, lifecycle, context, and UI dispatch).
+- [x] Node is not launched when no compatible extension requires it (empty-host test and
+      construction-only API; CI pins/verifies Node 22.x separately).
+- [x] Extension failure does not corrupt the core session (hook error remains a typed host
+      error, process loss is distinct, host stays usable, mutating tool failure is `Unknown`,
+      and a core registry can still be constructed; `tests/extension_host.rs`).
 
 ---
 
@@ -745,8 +758,8 @@ Do not begin until stable baselines exist.
 - [ ] Windows CI matrix (macOS and Linux are gated).
 - [ ] Telemetry, metrics, and analytics surfaces: deferred; privacy and scope decision.
 - [ ] GitHub Pages site.
-- [ ] MCP server/worker mode, TypeScript extension host (Phases 9/8): untouched; keep
-      behind their adapter boundaries when started.
+- [ ] MCP server/worker mode (Phase 9): untouched; keep behind its adapter boundary
+      when started. The selected TypeScript extension host (Phase 8) is complete above.
 
 ---
 
