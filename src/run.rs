@@ -80,7 +80,9 @@ pub(crate) fn open_session(
 
   let workspace = Workspace::new(cwd)
     .map_err(|error| format!("invalid workspace '{}': {error}", cwd.display()))?
-    .with_read_outside(false);
+    .with_read_outside(config.tools.allow_read_outside)
+    .with_search_outside(config.tools.allow_search_outside)
+    .with_write_outside(config.tools.allow_write_outside);
   let canonical_cwd = workspace
     .root()
     .to_str()

@@ -44,8 +44,9 @@ impl std::fmt::Display for PathError {
 pub struct Workspace {
   /// The boundary every tool resolves against.
   pub root: PathBuf,
-  /// Whether single reads may leave `root`. Reads are usually safe and often
-  /// useful (a lockfile in a parent directory, a system log); writes are not.
+  /// Whether single reads may leave `root`. This is disabled by default because
+  /// model-visible file content is an egress boundary; callers must opt in with
+  /// an explicit policy flag when a broader read is intended.
   pub allow_read_outside: bool,
   /// Whether writes may leave `root`. Off by default and only turned on by an
   /// explicit configuration choice.
@@ -72,7 +73,7 @@ impl Workspace {
     }
     Ok(Self {
       root,
-      allow_read_outside: true,
+      allow_read_outside: false,
       allow_write_outside: false,
       allow_search_outside: false,
     })
@@ -108,11 +109,8 @@ impl Workspace {
   /// reads; only an explicit `allow_search_outside` widens it.
   pub fn search_path(&self, requested: &str) -> Result<PathBuf, PathError> {
     let resolved = self.resolve(requested)?;
-    if !self.allow_search_outside && !self.contains(&resolved) {
-      return Err(PathError::OutsideWorkspace {
-        requested: requested.to_string(),
-        resolved: resolved.display().to_string(),
-      });
+    if !self.allow_search_outside {
+      self.check_confined(requested, &resolved)?;
     }
     Ok(resolved)
   }
@@ -120,42 +118,31 @@ impl Workspace {
   /// Resolve a path for reading.
   pub fn read_path(&self, requested: &str) -> Result<PathBuf, PathError> {
     let resolved = self.resolve(requested)?;
-    if !self.allow_read_outside && !self.contains(&resolved) {
-      return Err(PathError::OutsideWorkspace {
-        requested: requested.to_string(),
-        resolved: resolved.display().to_string(),
-      });
+    if !self.allow_read_outside {
+      self.check_confined(requested, &resolved)?;
     }
     Ok(resolved)
   }
 
   /// Resolve a path for writing.
   ///
-  /// Containment is checked on the *lexical* resolution, which is also what the
-  /// tool reports in its result, so the boundary claim in the trace matches the
-  /// decision that was made.
+  /// Containment is checked before the operation and every existing component
+  /// is rejected when it is a symlink. The lexical path is still returned so
+  /// result text and policy diagnostics name the path the tool was asked to use.
   pub fn write_path(&self, requested: &str) -> Result<PathBuf, PathError> {
     let resolved = self.resolve(requested)?;
-    if !self.allow_write_outside && !self.contains(&resolved) {
-      return Err(PathError::OutsideWorkspace {
-        requested: requested.to_string(),
-        resolved: resolved.display().to_string(),
-      });
+    if !self.allow_write_outside {
+      self.check_confined(requested, &resolved)?;
     }
     Ok(resolved)
   }
 
-  /// Resolve a model-supplied path without dereferencing a final component
-  /// that does not exist yet.
+  /// Resolve a model-supplied path without requiring a final component to exist.
   ///
-  /// The path is resolved *lexically*: `.` and `..` are applied as text and no
-  /// component is dereferenced, so a symlink cannot be swapped in between a
-  /// check and a use. The result is absolute, so containment checks are
-  /// meaningful. A symlink inside the workspace that points outward still
-  /// resolves inside the root lexically, which is a deliberate trade: resolving
-  /// it would make every legitimate symlinked checkout a policy violation.
-  /// Mutating tools therefore report the resolved path in their result text, so
-  /// the boundary claim is visible in the trace rather than implied.
+  /// The lexical pass applies `.` and `..` as text and produces an absolute path.
+  /// Confined callers then run [`Self::check_confined`], which inspects every
+  /// existing component and rejects symlink traversal before handing the path to
+  /// a filesystem operation.
   fn resolve(&self, requested: &str) -> Result<PathBuf, PathError> {
     if requested.trim().is_empty() {
       return Err(PathError::Unresolvable("empty path".into()));
@@ -169,6 +156,70 @@ impl Workspace {
 
   fn contains(&self, path: &Path) -> bool {
     path.starts_with(&self.root)
+  }
+
+  /// Verify the path without allowing an existing symlink to redirect a file
+  /// operation. Missing final components are valid for `write`, so validation
+  /// walks only what exists and stops at the first missing component.
+  fn check_confined(&self, requested: &str, resolved: &Path) -> Result<(), PathError> {
+    if !self.contains(resolved) {
+      return Err(PathError::OutsideWorkspace {
+        requested: requested.to_string(),
+        resolved: resolved.display().to_string(),
+      });
+    }
+
+    let relative = resolved.strip_prefix(&self.root).map_err(|_| {
+      PathError::Unresolvable(format!("{} is not under the workspace", resolved.display()))
+    })?;
+    let mut current = self.root.clone();
+    for component in relative.components() {
+      let std::path::Component::Normal(name) = component else {
+        continue;
+      };
+      current.push(name);
+      match fs::symlink_metadata(&current) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+          let target = fs::canonicalize(&current).ok();
+          if let Some(target) = &target
+            && !self.contains(target)
+          {
+            return Err(PathError::OutsideWorkspace {
+              requested: requested.to_string(),
+              resolved: target.display().to_string(),
+            });
+          }
+          return Err(PathError::Unresolvable(format!(
+            "symlink component '{}' is not allowed in a confined path",
+            current.display()
+          )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+        Err(error) => {
+          return Err(PathError::Unresolvable(format!(
+            "cannot inspect '{}': {error}",
+            current.display()
+          )));
+        }
+      }
+    }
+
+    // Re-check an existing target through the OS resolver. This catches a
+    // symlink introduced between the component walk and the operation in the
+    // common (non-racing) case, and ensures final links cannot escape.
+    match fs::canonicalize(resolved) {
+      Ok(canonical) if !self.contains(&canonical) => Err(PathError::OutsideWorkspace {
+        requested: requested.to_string(),
+        resolved: canonical.display().to_string(),
+      }),
+      Ok(_) => Ok(()),
+      Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+      Err(error) => Err(PathError::Unresolvable(format!(
+        "cannot resolve '{}': {error}",
+        resolved.display()
+      ))),
+    }
   }
 }
 
@@ -249,10 +300,10 @@ mod tests {
   }
 
   #[test]
-  fn reads_may_leave_the_root_but_writes_may_not() {
+  fn reads_and_writes_are_confined_by_default() {
     let (_dir, workspace) = root();
     let outside = std::env::temp_dir().join("definitely-not-in-a-workspace");
-    assert!(workspace.read_path(&outside.to_string_lossy()).is_ok());
+    assert!(workspace.read_path(&outside.to_string_lossy()).is_err());
     let error = workspace
       .write_path(&outside.to_string_lossy())
       .unwrap_err();
@@ -301,17 +352,41 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
-  fn the_write_boundary_is_the_path_the_tool_reports() {
-    // The containment check and the reported path must be the same value, or the
-    // trace would make a claim the check never verified. A symlinked directory
-    // inside the root resolves lexically and is therefore allowed; the reported
-    // path is the path under the root.
+  fn outward_parent_symlink_is_refused_for_confined_paths() {
     let (_dir, workspace) = root();
     let outside = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink(outside.path(), workspace.root().join("link")).unwrap();
-    let resolved = workspace.write_path("link/file.txt").unwrap();
-    assert!(resolved.starts_with(workspace.root()), "{resolved:?}");
-    assert_eq!(resolved, workspace.root().join("link/file.txt"));
+    for operation in [
+      workspace.write_path("link/file.txt"),
+      workspace.read_path("link/file.txt"),
+      workspace.search_path("link"),
+    ] {
+      let error = operation.unwrap_err();
+      assert!(
+        matches!(error, PathError::OutsideWorkspace { .. }),
+        "{error}"
+      );
+    }
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn outward_final_symlink_is_refused_for_confined_paths() {
+    let (_dir, workspace) = root();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("secret.txt");
+    fs::write(&target, "secret").unwrap();
+    std::os::unix::fs::symlink(&target, workspace.root().join("secret.txt")).unwrap();
+    let error = workspace.write_path("secret.txt").unwrap_err();
+    assert!(
+      matches!(error, PathError::OutsideWorkspace { .. }),
+      "{error}"
+    );
+    let error = workspace.read_path("secret.txt").unwrap_err();
+    assert!(
+      matches!(error, PathError::OutsideWorkspace { .. }),
+      "{error}"
+    );
   }
 
   #[test]
@@ -346,6 +421,11 @@ mod tests {
     let strict = workspace.clone().with_read_outside(false);
     let outside = std::env::temp_dir().join("some-file");
     assert!(strict.read_path(&outside.to_string_lossy()).is_err());
-    assert!(workspace.read_path(&outside.to_string_lossy()).is_ok());
+    assert!(
+      workspace
+        .with_read_outside(true)
+        .read_path(&outside.to_string_lossy())
+        .is_ok()
+    );
   }
 }

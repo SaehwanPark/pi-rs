@@ -228,6 +228,7 @@ impl ToolRegistry {
   pub fn with_builtins(mut self) -> Self {
     self.register(Box::new(crate::ReadTool::new(self.runtime.clone())));
     self.register(Box::new(crate::WriteTool::new(self.runtime.clone())));
+    self.register(Box::new(crate::AppendTool::new(self.runtime.clone())));
     self.register(Box::new(crate::GrepTool::new(self.runtime.clone())));
     self.register(Box::new(crate::EditTool::new(self.runtime.clone())));
     self.register(Box::new(crate::ExecTool::new(self.runtime.clone())));

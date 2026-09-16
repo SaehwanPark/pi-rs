@@ -5,6 +5,7 @@
 //! which keeps them independently testable and lets an extension replace one
 //! without touching the others.
 
+pub mod append;
 pub mod edit;
 pub mod exec;
 pub mod grep;
@@ -14,6 +15,7 @@ pub mod reduce;
 pub mod registry;
 pub mod write;
 
+pub use append::AppendTool;
 pub use edit::EditTool;
 pub use exec::ExecTool;
 pub use grep::GrepTool;
@@ -80,10 +82,19 @@ impl Runtime {
   pub(crate) fn with_policy(mut self, policy: &pi_rs_core::ToolPolicy) -> Self {
     self.max_output_bytes = policy.max_output_bytes;
     self.shell_timeout_ms = policy.shell_timeout_ms;
-    if let Some(cwd) = policy.cwd.as_deref() {
-      if let Ok(workspace) = Workspace::new(cwd) {
-        self.workspace = workspace;
-      }
+    self.workspace = self
+      .workspace
+      .clone()
+      .with_read_outside(policy.allow_read_outside)
+      .with_search_outside(policy.allow_search_outside)
+      .with_write_outside(policy.allow_write_outside);
+    if let Some(cwd) = policy.cwd.as_deref()
+      && let Ok(workspace) = Workspace::new(cwd)
+    {
+      self.workspace = workspace
+        .with_read_outside(policy.allow_read_outside)
+        .with_search_outside(policy.allow_search_outside)
+        .with_write_outside(policy.allow_write_outside);
     }
     self
   }

@@ -14,11 +14,14 @@
 
 use std::{
   fs::{self, File},
-  io::{BufRead, BufReader},
+  io::BufReader,
   path::Path,
 };
 
-use pi_rs_core::{Tool, ToolError, ToolMetadata, ToolOutcome, ToolProgress, ToolRequest};
+use pi_rs_core::{
+  LineOverflow, Tool, ToolError, ToolExecutionContext, ToolMetadata, ToolOutcome, ToolProgress,
+  ToolRequest, read_bounded_line,
+};
 use serde_json::json;
 
 use crate::{Deadline, Runtime, arg_str};
@@ -95,6 +98,26 @@ impl Tool for GrepTool {
     request: &ToolRequest,
     progress: &mut dyn ToolProgress,
   ) -> Result<ToolOutcome, ToolError> {
+    self.execute_inner(request, progress, &ToolExecutionContext::unbounded())
+  }
+
+  fn execute_with_context(
+    &self,
+    request: &ToolRequest,
+    progress: &mut dyn ToolProgress,
+    context: &ToolExecutionContext,
+  ) -> Result<ToolOutcome, ToolError> {
+    self.execute_inner(request, progress, context)
+  }
+}
+
+impl GrepTool {
+  fn execute_inner(
+    &self,
+    request: &ToolRequest,
+    progress: &mut dyn ToolProgress,
+    context: &ToolExecutionContext,
+  ) -> Result<ToolOutcome, ToolError> {
     let runtime = self.runtime.clone();
     let pattern = arg_str(request, "pattern")?;
     let as_glob = crate::arg_bool(request, "glob", false);
@@ -127,11 +150,31 @@ impl Tool for GrepTool {
     }
 
     let matcher = Matcher::new(pattern, as_glob, ignore_case);
+    if context.is_cancelled_or_expired() {
+      return Ok(ToolOutcome::failed("grep: cancelled before searching"));
+    }
     let mut state = Scan::new(max_matches);
     if root.is_file() {
-      scan_file(&root, &root, &matcher, &mut state, &deadline);
+      scan_file(
+        &root,
+        &root,
+        &matcher,
+        &mut state,
+        &deadline,
+        &runtime.max_line_bytes,
+        context,
+      );
     } else {
-      scan_dir(&root, &root, &matcher, &mut state, 0, &deadline);
+      scan_dir(
+        &root,
+        &root,
+        &matcher,
+        &mut state,
+        0,
+        &deadline,
+        &runtime.max_line_bytes,
+        context,
+      );
     }
 
     let mut out = String::new();
@@ -144,7 +187,13 @@ impl Tool for GrepTool {
       }
     }
     let mut notes = Vec::new();
-    if state.matches.is_empty() && (state.entries_hit_cap || state.timed_out || state.skipped > 0) {
+    if state.matches.is_empty()
+      && (state.entries_hit_cap
+        || state.timed_out
+        || state.cancelled
+        || state.skipped > 0
+        || state.long_lines > 0)
+    {
       // "no matches" must not be read as "the text is absent" when the walk was
       // cut short or a file was never searched.
       notes.push("the search was incomplete, so absence is not established".to_string());
@@ -165,18 +214,31 @@ impl Tool for GrepTool {
         state.skipped
       ));
     }
+    if state.long_lines > 0 {
+      notes.push(format!(
+        "skipped {} file(s) containing lines over the {} byte ingestion limit",
+        state.long_lines, runtime.max_line_bytes
+      ));
+    }
     if state.timed_out {
       notes.push(format!(
         "stopped after {}s; narrow the path",
         GREP_BUDGET.as_secs()
       ));
     }
+    if state.cancelled {
+      notes.push("search cancelled before the walk completed".to_string());
+    }
     if !notes.is_empty() {
       out.push_str(&format!("\n[{}]\n", notes.join("; ")));
     }
 
     crate::BoundedProgress::new(progress, 64 * 1024, deadline).send(&out);
-    Ok(runtime.finish(out))
+    if state.cancelled {
+      Ok(ToolOutcome::failed(out))
+    } else {
+      Ok(runtime.finish(out))
+    }
   }
 }
 
@@ -187,7 +249,9 @@ struct Scan {
   entries: usize,
   entries_hit_cap: bool,
   skipped: usize,
+  long_lines: usize,
   timed_out: bool,
+  cancelled: bool,
   stopped: bool,
 }
 
@@ -200,14 +264,22 @@ impl Scan {
       entries: 0,
       entries_hit_cap: false,
       skipped: 0,
+      long_lines: 0,
       timed_out: false,
+      cancelled: false,
       stopped: false,
     }
   }
 
   /// `false` when scanning must stop.
-  fn allow(&mut self, deadline: &Deadline) -> bool {
+  fn allow(&mut self, deadline: &Deadline, context: &ToolExecutionContext) -> bool {
     if self.stopped {
+      return false;
+    }
+    if context.is_cancelled_or_expired() {
+      self.cancelled = context.is_cancelled();
+      self.timed_out = context.deadline_expired() && !self.cancelled;
+      self.stopped = true;
       return false;
     }
     if self.matches.len() >= self.limit {
@@ -245,6 +317,8 @@ fn scan_dir(
   state: &mut Scan,
   depth: usize,
   deadline: &Deadline,
+  max_line_bytes: &usize,
+  context: &ToolExecutionContext,
 ) {
   if depth > MAX_DEPTH {
     return;
@@ -256,7 +330,7 @@ fn scan_dir(
   // Deterministic order, so two runs of the same query produce the same trace.
   names.sort_by_key(|e| e.file_name());
   for entry in names {
-    if !state.visit() || !state.allow(deadline) {
+    if !state.visit() || !state.allow(deadline, context) {
       return;
     }
     let path = entry.path();
@@ -266,17 +340,42 @@ fn scan_dir(
       if SKIP_DIRS.contains(&name.as_str()) {
         continue;
       }
-      scan_dir(&path, base, matcher, state, depth + 1, deadline);
+      scan_dir(
+        &path,
+        base,
+        matcher,
+        state,
+        depth + 1,
+        deadline,
+        max_line_bytes,
+        context,
+      );
     } else if file_type.is_some_and(|t| t.is_file()) && matcher.matches_path(&path) {
-      scan_file(&path, base, matcher, state, deadline);
+      scan_file(
+        &path,
+        base,
+        matcher,
+        state,
+        deadline,
+        max_line_bytes,
+        context,
+      );
     }
   }
   // A deep tree can exhaust the budget without visiting another entry.
-  state.allow(deadline);
+  state.allow(deadline, context);
 }
 
-fn scan_file(path: &Path, base: &Path, matcher: &Matcher, state: &mut Scan, deadline: &Deadline) {
-  if !state.allow(deadline) {
+fn scan_file(
+  path: &Path,
+  base: &Path,
+  matcher: &Matcher,
+  state: &mut Scan,
+  deadline: &Deadline,
+  max_line_bytes: &usize,
+  context: &ToolExecutionContext,
+) {
+  if !state.allow(deadline, context) {
     return;
   }
   let display = relative(path, base);
@@ -285,21 +384,30 @@ fn scan_file(path: &Path, base: &Path, matcher: &Matcher, state: &mut Scan, dead
     return;
   };
   let mut reader = BufReader::new(file);
-  let mut line = String::new();
   let mut number = 0usize;
+  let line_limit = max_line_bytes.saturating_add(4).max(1);
   loop {
-    if state.stopped {
+    if state.stopped || !state.allow(deadline, context) {
       return;
     }
-    line.clear();
-    let Ok(read) = reader.read_line(&mut line) else {
+    let line = match read_bounded_line(&mut reader, line_limit, LineOverflow::Reject) {
+      Ok(Some(line)) => line,
+      Ok(None) => return,
+      Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+        state.long_lines += 1;
+        return;
+      }
+      Err(_) => {
+        state.skipped += 1;
+        return;
+      }
+    };
+    number += 1;
+    let bytes = line.into_bytes();
+    let Ok(line) = String::from_utf8(bytes) else {
       state.skipped += 1;
       return;
     };
-    if read == 0 {
-      return;
-    }
-    number += 1;
     if line.contains('\0') {
       state.skipped += 1;
       return;

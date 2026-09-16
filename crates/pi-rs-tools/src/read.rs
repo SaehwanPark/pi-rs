@@ -6,12 +6,12 @@
 //! reduction of the assembled result. It also refuses binary content with an
 //! explanation instead of shipping control characters to the model.
 
-use std::{
-  fs::File,
-  io::{BufRead, BufReader},
-};
+use std::{fs::File, io::BufReader};
 
-use pi_rs_core::{Tool, ToolError, ToolMetadata, ToolOutcome, ToolProgress, ToolRequest};
+use pi_rs_core::{
+  LineOverflow, Tool, ToolError, ToolExecutionContext, ToolMetadata, ToolOutcome, ToolProgress,
+  ToolRequest, read_bounded_line,
+};
 use serde_json::json;
 
 use crate::{Deadline, Runtime, arg_str};
@@ -69,6 +69,26 @@ impl Tool for ReadTool {
     request: &ToolRequest,
     progress: &mut dyn ToolProgress,
   ) -> Result<ToolOutcome, ToolError> {
+    self.execute_inner(request, progress, &ToolExecutionContext::unbounded())
+  }
+
+  fn execute_with_context(
+    &self,
+    request: &ToolRequest,
+    progress: &mut dyn ToolProgress,
+    context: &ToolExecutionContext,
+  ) -> Result<ToolOutcome, ToolError> {
+    self.execute_inner(request, progress, context)
+  }
+}
+
+impl ReadTool {
+  fn execute_inner(
+    &self,
+    request: &ToolRequest,
+    progress: &mut dyn ToolProgress,
+    context: &ToolExecutionContext,
+  ) -> Result<ToolOutcome, ToolError> {
     let runtime = self.runtime.clone();
     let path = arg_str(request, "path")?;
     let resolved = runtime
@@ -90,6 +110,9 @@ impl Tool for ReadTool {
       .unwrap_or(DEFAULT_LIMIT)
       .clamp(1, MAX_LIMIT);
 
+    if context.is_cancelled_or_expired() {
+      return Ok(ToolOutcome::failed("read: cancelled before reading"));
+    }
     let file = File::open(&resolved).map_err(|error| {
       ToolError::new(format!(
         "read: cannot open '{}': {error}",
@@ -105,17 +128,22 @@ impl Tool for ReadTool {
     let mut truncated_by_limit = false;
     let mut stopped_early = false;
     let mut binary_at: Option<usize> = None;
-    let mut line = String::new();
+    let line_limit = runtime.max_line_bytes.saturating_add(4).max(1);
 
     loop {
-      line.clear();
-      let read = reader
-        .read_line(&mut line)
-        .map_err(|error| ToolError::new(format!("read: io error: {error}")))?;
-      if read == 0 {
+      if context.is_cancelled_or_expired() {
+        stopped_early = true;
         break;
       }
+      let Some(line) = read_bounded_line(&mut reader, line_limit, LineOverflow::Truncate)
+        .map_err(|error| ToolError::new(format!("read: io error: {error}")))?
+      else {
+        break;
+      };
       line_number += 1;
+      let capped_by_ingestion = line.is_truncated();
+      let bytes = line.into_bytes();
+      let line = String::from_utf8_lossy(&bytes);
       if line.contains('\0') {
         binary_at = Some(line_number);
         break;
@@ -128,9 +156,9 @@ impl Tool for ReadTool {
         break;
       }
       let mut display = line.trim_end_matches(['\n', '\r']);
-      let capped = display.len() > runtime.max_line_bytes;
+      let capped = capped_by_ingestion || display.len() > runtime.max_line_bytes;
       if capped {
-        let mut cut = runtime.max_line_bytes;
+        let mut cut = runtime.max_line_bytes.min(display.len());
         while cut > 0 && !display.is_char_boundary(cut) {
           cut -= 1;
         }
@@ -164,8 +192,7 @@ impl Tool for ReadTool {
     }
     if stopped_early {
       notes.push(format!(
-        "stopped after {}s at line {line_number}; re-read with offset {}",
-        READ_BUDGET.as_secs(),
+        "stopped before completing the read at line {line_number}; re-read with offset {}",
         line_number + 1
       ));
     }
