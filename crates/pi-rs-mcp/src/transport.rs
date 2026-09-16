@@ -3,7 +3,7 @@
 use std::{
   collections::{BTreeMap, HashMap},
   fmt,
-  io::{BufRead, BufReader, Read, Write},
+  io::{BufReader, Read, Write},
   process::{Child, ChildStdin, Command, Stdio},
   sync::{
     Arc, Mutex,
@@ -13,6 +13,7 @@ use std::{
   time::Duration,
 };
 
+use pi_rs_core::{BoundedLineReader, LineOverflow, ToolExecutionContext};
 use serde_json::Value;
 
 use crate::{
@@ -24,6 +25,18 @@ use crate::{
 pub trait McpTransport: Send + Sync {
   /// Send a JSON-RPC request and wait for the response.
   fn call(&self, method: &str, params: Option<Value>) -> Result<Value, McpError>;
+
+  /// Send a request with cancellation/deadline context. Legacy transports may
+  /// delegate to [`Self::call`], while process-backed transports can interrupt
+  /// their worker and classify the result honestly.
+  fn call_with_context(
+    &self,
+    method: &str,
+    params: Option<Value>,
+    _context: &ToolExecutionContext,
+  ) -> Result<Value, McpError> {
+    self.call(method, params)
+  }
 
   /// Send a JSON-RPC notification (no response expected).
   fn notify(&self, method: &str, params: Option<Value>) -> Result<(), McpError>;
@@ -44,6 +57,9 @@ pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_HTTP_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_HTTP_ERROR_BYTES: u64 = 8 * 1024;
 const MAX_HTTP_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+const MAX_STDIO_RESPONSE_LINE_BYTES: usize = 1024 * 1024;
+const MAX_STDIO_DIAGNOSTIC_LINE_BYTES: usize = 64 * 1024;
+const RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 type PendingResponseSender = SyncSender<Result<Value, McpError>>;
 type PendingRequests = Arc<Mutex<HashMap<u64, PendingResponseSender>>>;
@@ -74,6 +90,11 @@ impl StdioTransport {
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    #[cfg(not(target_os = "windows"))]
+    {
+      use std::os::unix::process::CommandExt;
+      cmd.process_group(0);
+    }
 
     let mut child = cmd
       .spawn()
@@ -103,13 +124,29 @@ impl StdioTransport {
       std::thread::Builder::new()
         .name("mcp-stdout-reader".into())
         .spawn(move || {
-          let reader = BufReader::new(stdout);
-          for line in reader.lines() {
-            let line = match line {
-              Ok(l) => l,
-              Err(_) => break,
+          let mut reader = BufReader::new(stdout);
+          let mut lines = BoundedLineReader::new();
+          loop {
+            let line = match lines.read_line(
+              &mut reader,
+              MAX_STDIO_RESPONSE_LINE_BYTES,
+              LineOverflow::Reject,
+            ) {
+              Ok(Some(line)) => line,
+              Ok(None) => break,
+              Err(error) => {
+                alive_clone.store(false, Ordering::SeqCst);
+                let mut map = pending_clone.lock().unwrap();
+                for (_, sender) in map.drain() {
+                  let _ = sender.send(Err(McpError::Protocol(format!(
+                    "bounded MCP stdout read failed: {error}"
+                  ))));
+                }
+                return;
+              }
             };
-            let trimmed = line.trim();
+            let trimmed = String::from_utf8_lossy(line.as_bytes());
+            let trimmed = trimmed.trim();
             if trimmed.is_empty() {
               continue;
             }
@@ -153,15 +190,22 @@ impl StdioTransport {
       std::thread::Builder::new()
         .name("mcp-stderr-reader".into())
         .spawn(move || {
-          let reader = BufReader::new(stderr);
-          for line in reader.lines() {
-            if let Ok(l) = line {
-              let mut log = stderr_log_clone.lock().unwrap();
-              if log.len() < 100 {
-                log.push(l);
-              }
-            } else {
-              break;
+          let mut reader = BufReader::new(stderr);
+          let mut lines = BoundedLineReader::new();
+          while let Ok(Some(line)) = lines.read_line(
+            &mut reader,
+            MAX_STDIO_DIAGNOSTIC_LINE_BYTES,
+            LineOverflow::Truncate,
+          ) {
+            let mut text = String::from_utf8_lossy(line.as_bytes())
+              .trim_end_matches(['\n', '\r'])
+              .to_owned();
+            if line.is_truncated() {
+              text.push_str(" [line truncated]");
+            }
+            let mut log = stderr_log_clone.lock().unwrap();
+            if log.len() < 100 {
+              log.push(text);
             }
           }
         })
@@ -188,12 +232,39 @@ impl StdioTransport {
   pub fn stderr_lines(&self) -> Vec<String> {
     self.stderr_log.lock().unwrap().clone()
   }
+
+  fn terminate_child(&self) {
+    self.alive.store(false, Ordering::SeqCst);
+    let Ok(mut child_guard) = self.child.lock() else {
+      return;
+    };
+    if let Some(mut child) = child_guard.take() {
+      terminate_process_tree(&mut child);
+    }
+  }
 }
 
 impl McpTransport for StdioTransport {
   fn call(&self, method: &str, params: Option<Value>) -> Result<Value, McpError> {
+    self.call_with_context(method, params, &ToolExecutionContext::unbounded())
+  }
+
+  fn call_with_context(
+    &self,
+    method: &str,
+    params: Option<Value>,
+    context: &ToolExecutionContext,
+  ) -> Result<Value, McpError> {
     if !self.is_alive() {
       return Err(McpError::ProcessExited(None));
+    }
+    if context.is_cancelled_or_expired() {
+      self.terminate_child();
+      return Err(if context.is_cancelled() {
+        McpError::Cancelled
+      } else {
+        McpError::Timeout
+      });
     }
 
     let id = self.next_id.fetch_add(1, Ordering::SeqCst);
@@ -205,31 +276,56 @@ impl McpTransport for StdioTransport {
     }
 
     let req = JsonRpcRequest::new(id, method, params);
-    let serialized = serde_json::to_string(&req)
-      .map_err(|e| McpError::Protocol(format!("failed to serialize request: {e}")))?;
+    let serialized = match serde_json::to_string(&req) {
+      Ok(serialized) => serialized,
+      Err(error) => {
+        self.pending.lock().unwrap().remove(&id);
+        return Err(McpError::Protocol(format!(
+          "failed to serialize request: {error}"
+        )));
+      }
+    };
 
     {
       let mut stdin = self.stdin.lock().unwrap();
-      writeln!(stdin, "{serialized}").map_err(|e| {
+      if let Err(error) = writeln!(stdin, "{serialized}").and_then(|_| stdin.flush()) {
+        self.pending.lock().unwrap().remove(&id);
         self.alive.store(false, Ordering::SeqCst);
-        McpError::Transport(format!("failed to write to child stdin: {e}"))
-      })?;
-      stdin.flush().map_err(|e| {
-        self.alive.store(false, Ordering::SeqCst);
-        McpError::Transport(format!("failed to flush child stdin: {e}"))
-      })?;
+        self.terminate_child();
+        return Err(McpError::Transport(format!(
+          "failed to write to child stdin: {error}"
+        )));
+      }
     }
 
-    match rx.recv_timeout(self.timeout) {
-      Ok(res) => res,
-      Err(mpsc::RecvTimeoutError::Timeout) => {
-        let mut map = self.pending.lock().unwrap();
-        map.remove(&id);
-        Err(McpError::Timeout)
+    let call_deadline = std::time::Instant::now() + self.timeout;
+    loop {
+      if context.is_cancelled_or_expired() {
+        self.pending.lock().unwrap().remove(&id);
+        self.terminate_child();
+        return Err(if context.is_cancelled() {
+          McpError::Cancelled
+        } else {
+          McpError::Timeout
+        });
       }
-      Err(mpsc::RecvTimeoutError::Disconnected) => {
-        self.alive.store(false, Ordering::SeqCst);
-        Err(McpError::ProcessExited(None))
+      let remaining = call_deadline.saturating_duration_since(std::time::Instant::now());
+      if remaining.is_zero() {
+        self.pending.lock().unwrap().remove(&id);
+        self.terminate_child();
+        return Err(McpError::Timeout);
+      }
+      let wait = context
+        .remaining()
+        .map(|deadline| deadline.min(remaining).min(RESPONSE_POLL_INTERVAL))
+        .unwrap_or_else(|| remaining.min(RESPONSE_POLL_INTERVAL));
+      match rx.recv_timeout(wait) {
+        Ok(res) => return res,
+        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+          self.alive.store(false, Ordering::SeqCst);
+          return Err(McpError::ProcessExited(None));
+        }
       }
     }
   }
@@ -261,11 +357,7 @@ impl McpTransport for StdioTransport {
 
   fn close(&mut self) -> Result<(), McpError> {
     self.alive.store(false, Ordering::SeqCst);
-    let mut child_guard = self.child.lock().unwrap();
-    if let Some(mut child) = child_guard.take() {
-      let _ = child.kill();
-      let _ = child.wait();
-    }
+    self.terminate_child();
     Ok(())
   }
 }
@@ -431,6 +523,26 @@ impl McpTransport for HttpTransport {
     self.alive.store(false, Ordering::SeqCst);
     Ok(())
   }
+}
+
+fn terminate_process_tree(child: &mut Child) {
+  #[cfg(unix)]
+  {
+    let pid = child.id().to_string();
+    let _ = Command::new("kill")
+      .args(["-KILL", &format!("-{pid}")])
+      .stderr(Stdio::null())
+      .status();
+  }
+  #[cfg(windows)]
+  {
+    let pid = child.id().to_string();
+    let _ = Command::new("taskkill")
+      .args(["/PID", pid.as_str(), "/T", "/F"])
+      .status();
+  }
+  let _ = child.kill();
+  let _ = child.wait();
 }
 
 fn valid_header_name(name: &str) -> bool {
@@ -707,6 +819,44 @@ mod tests {
       }
     });
     (format!("http://{address}/mcp"), seen_rx, handle)
+  }
+
+  #[test]
+  fn stdio_response_overflow_closes_the_protocol_before_materializing_the_line() {
+    let script = "IFS= read -r line; head -c 1048577 /dev/zero";
+    let transport = StdioTransport::spawn(
+      "sh",
+      &["-c".to_string(), script.to_string()],
+      &BTreeMap::new(),
+    )
+    .expect("spawns overflow fixture");
+    let error = transport.call("overflow", None).unwrap_err();
+    assert!(format!("{error}").contains("bounded MCP stdout"), "{error}");
+    assert!(!transport.is_alive());
+  }
+
+  #[test]
+  fn stdio_call_cancellation_terminates_a_hung_server() {
+    let transport = StdioTransport::spawn(
+      "sh",
+      &[
+        "-c".to_string(),
+        "while IFS= read -r line; do sleep 30; done".to_string(),
+      ],
+      &BTreeMap::new(),
+    )
+    .expect("spawns hanging fixture");
+    let cancel = pi_rs_core::CancelToken::new();
+    let trigger = cancel.clone();
+    let killer = thread::spawn(move || {
+      thread::sleep(Duration::from_millis(100));
+      trigger.cancel();
+    });
+    let context = ToolExecutionContext::new(cancel, Duration::from_secs(10));
+    let result = transport.call_with_context("hang", None, &context);
+    killer.join().unwrap();
+    assert!(matches!(result, Err(McpError::Cancelled)), "{result:?}");
+    assert!(!transport.is_alive());
   }
 
   #[test]

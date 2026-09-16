@@ -6,7 +6,9 @@
 //! the point — the alternative, hand-parsing framing inside the adapter, is
 //! where stream-state bugs usually hide.
 
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, BufReader, Read};
+
+use pi_rs_core::{BoundedLineReader, LineOverflow};
 
 /// Largest accepted event payload.
 ///
@@ -35,6 +37,9 @@ impl SseEvent {
 /// Incremental event reader over a byte stream.
 pub struct SseStream<R> {
   reader: BufReader<R>,
+  lines: BoundedLineReader,
+  pending_data: String,
+  pending_received: bool,
   finished: bool,
 }
 
@@ -42,6 +47,9 @@ impl<R: Read> SseStream<R> {
   pub fn new(reader: R) -> Self {
     Self {
       reader: BufReader::with_capacity(8 * 1024, reader),
+      lines: BoundedLineReader::new(),
+      pending_data: String::new(),
+      pending_received: false,
       finished: false,
     }
   }
@@ -55,22 +63,44 @@ impl<R: Read> SseStream<R> {
     if self.finished {
       return Ok(None);
     }
-    let mut data = String::new();
-    let mut received = false;
+    let mut data = std::mem::take(&mut self.pending_data);
+    let mut received = self.pending_received;
+    self.pending_received = false;
     loop {
-      let mut line = String::new();
-      if self.reader.read_line(&mut line)? == 0 {
-        // EOF. A trailing event without a blank line is still a real event.
+      let line = match self
+        .lines
+        .read_line(&mut self.reader, MAX_EVENT_BYTES, LineOverflow::Reject)
+      {
+        Ok(Some(line)) => line,
+        Ok(None) => {
+          // EOF. A trailing event without a blank line is still a real event.
+          self.finished = true;
+          self.pending_data.clear();
+          self.pending_received = false;
+          return if received {
+            Ok(Some(SseEvent { data }))
+          } else {
+            Ok(None)
+          };
+        }
+        Err(error) => {
+          // A socket read timeout is transient. Keep the event accumulated so
+          // far in the stream and let the adapter check cancellation before it
+          // retries. Other errors still close the protocol.
+          self.pending_data = data;
+          self.pending_received = received;
+          return Err(error);
+        }
+      };
+      let line = String::from_utf8(line.into_bytes()).map_err(|error| {
         self.finished = true;
-        return if received {
-          Ok(Some(SseEvent { data }))
-        } else {
-          Ok(None)
-        };
-      }
+        io::Error::new(io::ErrorKind::InvalidData, error)
+      })?;
       let trimmed = line.trim_end_matches(['\n', '\r']);
       if trimmed.is_empty() {
         self.finished |= received && data.trim() == DONE;
+        self.pending_data.clear();
+        self.pending_received = false;
         return if received {
           Ok(Some(SseEvent { data }))
         } else {
@@ -89,6 +119,7 @@ impl<R: Read> SseStream<R> {
       if field == "data" {
         {
           if data.len() + value.len() > MAX_EVENT_BYTES {
+            self.finished = true;
             return Err(io::Error::new(
               io::ErrorKind::InvalidData,
               format!("sse event exceeds {MAX_EVENT_BYTES} bytes"),
@@ -99,6 +130,7 @@ impl<R: Read> SseStream<R> {
           }
           data.push_str(value);
           received = true;
+          self.pending_received = received;
         }
       }
       // `event:`, `id:`, and `retry:` are irrelevant for chat completions, and
@@ -161,6 +193,15 @@ mod tests {
 
   #[test]
   fn an_endpoint_that_never_blanks_the_line_cannot_grow_the_buffer() {
+    let line = format!("data: {}", "x".repeat(MAX_EVENT_BYTES + 2048));
+    let error = SseStream::new(line.as_bytes())
+      .next_event()
+      .expect_err("oversized line must fail, not allocate");
+    assert!(error.to_string().contains("exceeds"), "{error}");
+  }
+
+  #[test]
+  fn an_event_with_many_data_lines_is_bounded_as_a_whole() {
     let line = format!("data: {}\n", "x".repeat(2048));
     let flood = line.repeat(1_000);
     let error = SseStream::new(flood.as_bytes())

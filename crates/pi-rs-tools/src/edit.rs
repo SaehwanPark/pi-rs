@@ -19,7 +19,8 @@
 use std::{fs, io::Write};
 
 use pi_rs_core::{
-  ReconciliationStatus, Tool, ToolError, ToolMetadata, ToolOutcome, ToolProgress, ToolRequest,
+  ReconciliationStatus, Tool, ToolError, ToolExecutionContext, ToolMetadata, ToolOutcome,
+  ToolProgress, ToolRequest,
 };
 use serde_json::json;
 
@@ -74,7 +75,31 @@ impl Tool for EditTool {
   fn execute(
     &self,
     request: &ToolRequest,
+    progress: &mut dyn ToolProgress,
+  ) -> Result<ToolOutcome, ToolError> {
+    self.execute_inner(request, progress, &ToolExecutionContext::unbounded())
+  }
+
+  fn execute_with_context(
+    &self,
+    request: &ToolRequest,
+    progress: &mut dyn ToolProgress,
+    context: &ToolExecutionContext,
+  ) -> Result<ToolOutcome, ToolError> {
+    self.execute_inner(request, progress, context)
+  }
+
+  fn reconcile(&self, request: &ToolRequest) -> Result<ReconciliationStatus, ToolError> {
+    self.reconcile_inner(request)
+  }
+}
+
+impl EditTool {
+  fn execute_inner(
+    &self,
+    request: &ToolRequest,
     _progress: &mut dyn ToolProgress,
+    context: &ToolExecutionContext,
   ) -> Result<ToolOutcome, ToolError> {
     let runtime = self.runtime.clone();
     let path = arg_str(request, "path")?;
@@ -88,6 +113,9 @@ impl Tool for EditTool {
         "edit: 'find' and 'replace' are identical, so nothing would change",
       ));
     }
+    if context.is_cancelled_or_expired() {
+      return Ok(ToolOutcome::failed("edit: cancelled before reading"));
+    }
 
     let resolved = runtime
       .workspace
@@ -99,6 +127,9 @@ impl Tool for EditTool {
         resolved.display()
       ))
     })?;
+    if context.is_cancelled_or_expired() {
+      return Ok(ToolOutcome::failed("edit: cancelled after reading"));
+    }
 
     let hits = count_overlapping(&original, find);
     if hits == 0 {
@@ -121,7 +152,16 @@ impl Tool for EditTool {
     debug_assert!(hits == 1 || replace_all);
     debug_assert!(!replace_all || updated.matches(find).count() == 0);
 
+    if context.is_cancelled_or_expired() {
+      return Ok(ToolOutcome::failed("edit: cancelled before writing"));
+    }
     write_atomic(&resolved, updated.as_bytes()).map_err(after_start)?;
+    if context.is_cancelled_or_expired() {
+      return Ok(ToolOutcome::unknown(format!(
+        "edit of '{}' completed at the filesystem boundary but the caller was interrupted; inspect before retrying",
+        resolved.display()
+      )));
+    }
 
     let verb = if replace_all && hits > 1 {
       format!("replaced {hits} occurrences in")
@@ -137,7 +177,7 @@ impl Tool for EditTool {
     )))
   }
 
-  fn reconcile(&self, request: &ToolRequest) -> Result<ReconciliationStatus, ToolError> {
+  fn reconcile_inner(&self, request: &ToolRequest) -> Result<ReconciliationStatus, ToolError> {
     let path = arg_str(request, "path")?;
     let find = arg_str(request, "find")?;
     let replace = arg_str(request, "replace")?;
@@ -233,7 +273,14 @@ fn edit_failure_text<'a>(
 fn write_atomic(target: &std::path::Path, bytes: &[u8]) -> Result<(), std::io::Error> {
   let temp = crate::write::temp_path_for(target);
   let result = (|| -> Result<(), std::io::Error> {
-    let mut file = fs::File::create(&temp)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::OpenOptionsExt;
+      options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(&temp)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     fs::rename(&temp, target)
@@ -414,6 +461,27 @@ mod tests {
       fs::read_to_string(dir.path().join("a.rs")).unwrap(),
       "head\nnew one\nnew two\ntail\n"
     );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn outward_final_symlink_is_refused_before_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("important.txt");
+    fs::write(&target, "keep this").unwrap();
+    std::os::unix::fs::symlink(&target, dir.path().join("link.txt")).unwrap();
+    let tool = EditTool::new(runtime(&dir));
+    let mut recorder = Recorder::default();
+    let error = tool
+      .execute(
+        &request(json!({"path": "link.txt", "find": "keep", "replace": "change"})),
+        &mut recorder,
+      )
+      .unwrap_err();
+    assert!(!error.started);
+    assert!(error.message.contains("outside"), "{}", error.message);
+    assert_eq!(fs::read_to_string(&target).unwrap(), "keep this");
   }
 
   #[test]

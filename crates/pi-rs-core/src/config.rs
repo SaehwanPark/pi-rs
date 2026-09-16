@@ -142,6 +142,17 @@ pub struct ToolPolicy {
   /// Working directory root for relative paths used by file tools.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub cwd: Option<String>,
+  /// Permit the read tool to access an explicitly requested path outside the
+  /// workspace. Disabled by default because model-visible reads are an egress
+  /// boundary, not merely harmless inspection.
+  #[serde(default)]
+  pub allow_read_outside: bool,
+  /// Permit a grep/exec working-directory walk outside the workspace.
+  #[serde(default)]
+  pub allow_search_outside: bool,
+  /// Permit mutating tools to write outside the workspace. Disabled by default.
+  #[serde(default)]
+  pub allow_write_outside: bool,
 }
 
 impl Default for ToolPolicy {
@@ -153,6 +164,9 @@ impl Default for ToolPolicy {
       shell_timeout_ms: 120_000,
       max_output_bytes: 8 * 1024,
       cwd: None,
+      allow_read_outside: false,
+      allow_search_outside: false,
+      allow_write_outside: false,
     }
   }
 }
@@ -562,6 +576,21 @@ mod tests {
     assert_eq!(parsed, config);
     assert_eq!(parsed.version, CONFIG_SCHEMA_VERSION);
     assert_eq!(parsed.context_profile, ContextProfile::Balanced);
+    assert!(!parsed.tools.allow_read_outside);
+    assert!(!parsed.tools.allow_search_outside);
+    assert!(!parsed.tools.allow_write_outside);
+  }
+
+  #[test]
+  fn filesystem_policy_flags_round_trip_explicit_widening() {
+    let mut config = sample_config();
+    config.tools.allow_read_outside = true;
+    config.tools.allow_search_outside = true;
+    config.tools.allow_write_outside = true;
+    let parsed = RuntimeConfig::parse(&config.to_json_string().unwrap()).unwrap();
+    assert!(parsed.tools.allow_read_outside);
+    assert!(parsed.tools.allow_search_outside);
+    assert!(parsed.tools.allow_write_outside);
   }
 
   #[test]

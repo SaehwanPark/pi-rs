@@ -86,25 +86,50 @@ impl OpenAiCompat {
   /// Cold path only: the typed failure carries phase and partial-output state, and
   /// boxing it would add indirection to every match without protecting a hot path.
   #[allow(clippy::result_large_err)]
-  fn send(&self, body: &str) -> Result<ureq::Response, ModelFailure> {
-    let mut call = self
-      .agent
-      .post(&self.config.chat_completions_url())
-      .set("content-type", "application/json")
-      .set("accept", "text/event-stream");
-    if let Some(key) = self.config.credential() {
-      call = call.set("authorization", &format!("Bearer {key}"));
-    }
-    for (name, value) in &self.config.headers {
-      call = call.set(name, value);
-    }
-    match call.send_string(body) {
-      Ok(response) => Ok(response),
-      Err(ureq::Error::Status(status, response)) => Err(self::http_failure_from(status, response)),
-      Err(other) => Err(decode::transport_failure(
-        &other.to_string(),
-        FailurePhase::WaitingForResponse,
-      )),
+  fn send(&self, body: &str, cancel: &CancelToken) -> Result<ureq::Response, ModelFailure> {
+    // A short socket poll is needed for cancellation, but a request may also be
+    // queued behind a busy local endpoint. Retry only transient status-line read
+    // timeouts, within the configured logical idle budget; never retry an HTTP
+    // response or another transport class that could represent a semantic error.
+    let deadline = std::time::Instant::now().checked_add(std::time::Duration::from_millis(
+      self.config.read_timeout_ms.max(1),
+    ));
+    loop {
+      let mut call = self
+        .agent
+        .post(&self.config.chat_completions_url())
+        .set("content-type", "application/json")
+        .set("accept", "text/event-stream");
+      if let Some(key) = self.config.credential() {
+        call = call.set("authorization", &format!("Bearer {key}"));
+      }
+      for (name, value) in &self.config.headers {
+        call = call.set(name, value);
+      }
+      match call.send_string(body) {
+        Ok(response) => return Ok(response),
+        Err(ureq::Error::Status(status, response)) => {
+          return Err(self::http_failure_from(status, response));
+        }
+        Err(other) if is_ureq_timeout(&other) => {
+          if cancel.is_cancelled() {
+            return Err(decode::cancelled(false));
+          }
+          if deadline.is_some_and(|deadline| std::time::Instant::now() < deadline) {
+            continue;
+          }
+          return Err(decode::transport_failure(
+            &other.to_string(),
+            FailurePhase::WaitingForResponse,
+          ));
+        }
+        Err(other) => {
+          return Err(decode::transport_failure(
+            &other.to_string(),
+            FailurePhase::WaitingForResponse,
+          ));
+        }
+      }
     }
   }
 
@@ -128,6 +153,12 @@ impl OpenAiCompat {
       }
       let event = match stream.next_event() {
         Ok(event) => event,
+        Err(error) if is_transient_read_timeout(&error) => {
+          // The transport uses a short socket timeout as a cancellation poll.
+          // Preserve the partially framed event in SseStream and retry after
+          // checking the token instead of turning a quiet model into failure.
+          continue;
+        }
         Err(error) => {
           // A cancel that lands while blocked in `read` surfaces as an IO
           // error: the user's intent outranks the transport symptom.
@@ -178,9 +209,22 @@ impl OpenAiCompat {
     &self,
     response: ureq::Response,
     sink: &mut dyn ProviderEventSink,
+    cancel: &CancelToken,
   ) -> Result<CompletionUsage, ModelFailure> {
-    let body = read_body(response, crate::config::MAX_ERROR_BODY_BYTES as u64 * 64)
-      .map_err(|error| decode::stream_failure(&error, false).with_model(self.model_ref()))?;
+    if cancel.is_cancelled() {
+      return Err(decode::cancelled(false).with_model(self.model_ref()));
+    }
+    let body =
+      read_body(response, crate::config::MAX_ERROR_BODY_BYTES as u64 * 64).map_err(|error| {
+        if cancel.is_cancelled() {
+          decode::cancelled(false).with_model(self.model_ref())
+        } else {
+          decode::stream_failure(&error, false).with_model(self.model_ref())
+        }
+      })?;
+    if cancel.is_cancelled() {
+      return Err(decode::cancelled(false).with_model(self.model_ref()));
+    }
     let value = decode_chunk(std::str::from_utf8(&body).unwrap_or(""))
       .map_err(|failure| failure.with_model(self.model_ref()))?;
     let mut decoder = Decoder::new(self.config.capabilities.exposed_reasoning);
@@ -233,6 +277,24 @@ fn decode_chunk(data: &str) -> Result<serde_json::Value, ModelFailure> {
   })
 }
 
+fn is_ureq_timeout(error: &ureq::Error) -> bool {
+  let ureq::Error::Transport(transport) = error else {
+    return false;
+  };
+  transport.kind() == ureq::ErrorKind::Io
+    && transport
+      .to_string()
+      .to_ascii_lowercase()
+      .contains("timed out")
+}
+
+fn is_transient_read_timeout(error: &io::Error) -> bool {
+  matches!(
+    error.kind(),
+    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+  )
+}
+
 fn annotated(failure: &ModelFailure, emitted_output: bool) -> ModelFailure {
   failure.clone().with_partial_output(emitted_output)
 }
@@ -278,16 +340,20 @@ impl ModelProvider for OpenAiCompat {
       );
     }
     let body = request_body(&self.config, request).to_string();
-    let response = self
-      .send(&body)
-      .map_err(|failure| failure.with_model(model.clone()))?;
+    let response = match self.send(&body, cancel) {
+      Ok(response) => response,
+      Err(_failure) if cancel.is_cancelled() => {
+        return Err(decode::cancelled(false).with_model(model));
+      }
+      Err(failure) => return Err(failure.with_model(model)),
+    };
     if self.config.stream {
       self
         .read_stream(response, sink, cancel)
         .map_err(|failure| failure.with_model(model))
     } else {
       self
-        .read_one_shot(response, sink)
+        .read_one_shot(response, sink, cancel)
         .map_err(|failure| failure.with_model(model))
     }
   }

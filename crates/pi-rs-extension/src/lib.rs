@@ -8,17 +8,29 @@
 
 use std::{
   collections::BTreeMap,
-  io::{BufRead, BufReader, Write},
+  io::{BufReader, Write},
   path::{Path, PathBuf},
-  process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-  sync::{Arc, Mutex},
+  process::{Child, ChildStdin, Command, Stdio},
+  sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+    mpsc,
+  },
+  thread,
+  time::Duration,
 };
 
-use pi_rs_core::{Tool, ToolError, ToolMetadata, ToolOutcome, ToolProgress, ToolRequest};
+use pi_rs_core::{
+  BoundedLineReader, LineOverflow, Tool, ToolError, ToolExecutionContext, ToolMetadata,
+  ToolOutcome, ToolProgress, ToolRequest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const BOOTSTRAP: &str = include_str!("bootstrap.mjs");
+const MAX_RESPONSE_LINE_BYTES: usize = 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+const RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Configuration for the compatibility host. Paths are trusted inputs supplied
 /// by the caller; the host never discovers or executes project files implicitly.
@@ -173,26 +185,60 @@ pub struct DispatchResult {
 #[derive(Clone)]
 pub struct ExtensionHost {
   inner: Arc<Mutex<HostInner>>,
+  start_lock: Arc<Mutex<()>>,
 }
 
 struct HostInner {
   config: ExtensionHostConfig,
   status: HostStatus,
-  child: Option<Process>,
+  child: Option<Arc<Process>>,
   tools: BTreeMap<String, ExtensionToolInfo>,
   commands: BTreeMap<String, ExtensionCommandInfo>,
 }
 struct Process {
-  child: Child,
+  control: Arc<ProcessControl>,
+  io: Mutex<ProcessIo>,
+  responses: Mutex<mpsc::Receiver<Result<Vec<u8>, HostError>>>,
+  request_lock: Mutex<()>,
+  next_id: AtomicU64,
+  reader: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+struct ProcessControl {
+  child: Mutex<Child>,
+}
+
+struct ProcessIo {
   stdin: ChildStdin,
-  stdout: BufReader<ChildStdout>,
-  next_id: u64,
+}
+
+impl Process {
+  fn is_exited(&self) -> Result<Option<std::process::ExitStatus>, HostError> {
+    self
+      .control
+      .child
+      .lock()
+      .map_err(|_| HostError::Io("extension process lock poisoned".into()))?
+      .try_wait()
+      .map_err(|error| HostError::Io(error.to_string()))
+  }
+
+  fn terminate(&self) {
+    let Ok(mut child) = self.control.child.lock() else {
+      return;
+    };
+    terminate_process_tree(&mut child);
+  }
 }
 
 impl Drop for Process {
   fn drop(&mut self) {
-    let _ = self.child.kill();
-    let _ = self.child.wait();
+    self.terminate();
+    if let Ok(mut reader) = self.reader.lock()
+      && let Some(reader) = reader.take()
+    {
+      let _ = reader.join();
+    }
   }
 }
 
@@ -206,6 +252,7 @@ impl ExtensionHost {
         tools: BTreeMap::new(),
         commands: BTreeMap::new(),
       })),
+      start_lock: Arc::new(Mutex::new(())),
     }
   }
 
@@ -244,14 +291,87 @@ impl ExtensionHost {
   /// Start and load all configured modules. With no modules this is a cheap
   /// no-op and, importantly, does not launch Node.
   pub fn start(&self) -> Result<(), HostError> {
+    self.start_with_context(&ToolExecutionContext::unbounded())
+  }
+
+  fn start_with_context(&self, context: &ToolExecutionContext) -> Result<(), HostError> {
+    // Serialize startup races without reusing the lifecycle mutex as a protocol
+    // I/O lock. `stop` intentionally does not take this guard, so cancellation
+    // can still tear down a host while its load request is waiting.
+    let _start_guard = self.start_lock.lock().expect("extension start lock");
+    let config = {
+      let mut h = self.inner.lock().expect("extension host lock");
+      if h.status == HostStatus::Ready {
+        return Ok(());
+      }
+      if h.config.modules.is_empty() {
+        h.status = HostStatus::Ready;
+        return Ok(());
+      }
+      h.config.clone()
+    };
+    if let Err(error) = validate_modules(&config) {
+      self.inner.lock().expect("extension host lock").status = HostStatus::Failed;
+      return Err(error);
+    }
+    self.inner.lock().expect("extension host lock").status = HostStatus::Starting;
+    if context.is_cancelled_or_expired() {
+      self.stop();
+      return Err(HostError::ProcessLost(
+        "extension host start was interrupted".into(),
+      ));
+    }
+    let modules: Vec<String> = config
+      .modules
+      .iter()
+      .map(|path| path_to_file_url(path, config.working_directory.as_deref()))
+      .collect::<Result<_, _>>()?;
+    let process = match spawn_process(&config) {
+      Ok(process) => Arc::new(process),
+      Err(error) => {
+        self.inner.lock().expect("extension host lock").status = HostStatus::Failed;
+        return Err(error);
+      }
+    };
+    {
+      let mut h = self.inner.lock().expect("extension host lock");
+      h.child = Some(process.clone());
+    }
+    let response = process.request("load", json!({"modules": modules}), context);
     let mut h = self.inner.lock().expect("extension host lock");
-    h.start()
+    match response {
+      Ok(result) => {
+        h.tools = result
+          .tools
+          .into_iter()
+          .map(|tool| (tool.name.clone(), tool))
+          .collect();
+        h.commands = result
+          .commands
+          .into_iter()
+          .map(|command| (command.name.clone(), command))
+          .collect();
+        h.status = HostStatus::Ready;
+        Ok(())
+      }
+      Err(error) => {
+        h.status = HostStatus::Failed;
+        h.child = None;
+        Err(error)
+      }
+    }
   }
 
   /// Stop the Node process without starting a host that has not been activated.
   pub fn stop(&self) {
-    let mut h = self.inner.lock().expect("extension host lock");
-    h.stop();
+    let process = {
+      let mut h = self.inner.lock().expect("extension host lock");
+      h.status = HostStatus::Stopped;
+      h.child.take()
+    };
+    if let Some(process) = process {
+      process.terminate();
+    }
   }
 
   /// Dispatch `session_shutdown` when active, then always stop the process.
@@ -276,9 +396,25 @@ impl ExtensionHost {
     call_id: &str,
     arguments: Value,
   ) -> Result<DispatchResult, HostError> {
-    self.request(
+    self.dispatch_tool_call_with_context(
+      name,
+      call_id,
+      arguments,
+      &ToolExecutionContext::unbounded(),
+    )
+  }
+
+  pub fn dispatch_tool_call_with_context(
+    &self,
+    name: &str,
+    call_id: &str,
+    arguments: Value,
+    context: &ToolExecutionContext,
+  ) -> Result<DispatchResult, HostError> {
+    self.request_with_context(
       "call_tool",
       json!({"name": name, "tool_call_id": call_id, "arguments": arguments}),
+      context,
     )
   }
   pub fn dispatch_command(
@@ -286,9 +422,10 @@ impl ExtensionHost {
     name: &str,
     arguments: Value,
   ) -> Result<DispatchResult, HostError> {
-    self.request(
+    self.request_with_context(
       "call_command",
       json!({"name": name, "arguments": arguments}),
+      &ToolExecutionContext::unbounded(),
     )
   }
   pub fn dispatch_lifecycle(&self, event: &str, value: Value) -> Result<DispatchResult, HostError> {
@@ -306,7 +443,11 @@ impl ExtensionHost {
         "unsupported lifecycle event '{event}'"
       )));
     }
-    self.request("lifecycle", json!({"event": event, "value": value}))
+    self.request_with_context(
+      "lifecycle",
+      json!({"event": event, "value": value}),
+      &ToolExecutionContext::unbounded(),
+    )
   }
 
   pub fn dispatch_event(
@@ -317,19 +458,39 @@ impl ExtensionHost {
     self.dispatch_lifecycle(event.as_str(), value)
   }
   pub fn dispatch_context(&self, value: Value) -> Result<DispatchResult, HostError> {
-    self.request("context", value)
+    self.request_with_context("context", value, &ToolExecutionContext::unbounded())
   }
 
-  fn request(&self, method: &str, params: Value) -> Result<DispatchResult, HostError> {
-    let mut h = self.inner.lock().expect("extension host lock");
-    if h.config.modules.is_empty() {
-      return Err(HostError::Extension {
-        message: "no extensions configured".into(),
-        code: None,
-      });
+  fn request_with_context(
+    &self,
+    method: &str,
+    params: Value,
+    context: &ToolExecutionContext,
+  ) -> Result<DispatchResult, HostError> {
+    {
+      let h = self.inner.lock().expect("extension host lock");
+      if h.config.modules.is_empty() {
+        return Err(HostError::Extension {
+          message: "no extensions configured".into(),
+          code: None,
+        });
+      }
     }
-    h.start()?;
-    h.request(method, params)
+    self.start_with_context(context)?;
+    let process = self
+      .inner
+      .lock()
+      .expect("extension host lock")
+      .child
+      .clone()
+      .ok_or_else(|| HostError::ProcessLost("host is not running".into()))?;
+    let result = process.request(method, params, context);
+    if matches!(result, Err(HostError::ProcessLost(_))) {
+      let mut h = self.inner.lock().expect("extension host lock");
+      h.status = HostStatus::Stopped;
+      h.child = None;
+    }
+    result
   }
 
   /// Build wrappers for all tools currently registered by the extension.
@@ -349,154 +510,172 @@ impl ExtensionHost {
   }
 }
 
-impl HostInner {
-  fn stop(&mut self) {
-    self.child = None;
-    self.status = HostStatus::Stopped;
+fn validate_modules(config: &ExtensionHostConfig) -> Result<(), HostError> {
+  for module in &config.modules {
+    if !matches!(
+      module.extension().and_then(|x| x.to_str()),
+      Some("ts" | "js" | "mjs" | "cjs")
+    ) {
+      return Err(HostError::InvalidModule(module.display().to_string()));
+    }
+    resolve_module_path(module, config.working_directory.as_deref())?;
   }
+  Ok(())
+}
 
-  fn start(&mut self) -> Result<(), HostError> {
-    if self.status == HostStatus::Ready {
-      return Ok(());
-    }
-    if self.config.modules.is_empty() {
-      self.status = HostStatus::Ready;
-      return Ok(());
-    }
-    for module in &self.config.modules {
-      if !matches!(
-        module.extension().and_then(|x| x.to_str()),
-        Some("ts" | "js" | "mjs" | "cjs")
-      ) {
-        self.status = HostStatus::Failed;
-        return Err(HostError::InvalidModule(module.display().to_string()));
-      }
-      if let Err(error) = resolve_module_path(module, self.config.working_directory.as_deref()) {
-        self.status = HostStatus::Failed;
-        return Err(error);
-      }
-    }
-    self.status = HostStatus::Starting;
-    let binary = if self.config.node_binary.as_os_str().is_empty() {
-      Path::new("node").to_path_buf()
-    } else {
-      self.config.node_binary.clone()
-    };
-    let mut command = Command::new(binary);
-    if self
-      .config
-      .modules
-      .iter()
-      .any(|p| p.extension().is_some_and(|e| e == "ts"))
-    {
-      command.arg("--experimental-strip-types");
-    }
-    let child = command
-      .arg("--input-type=module")
-      .arg("--eval")
-      .arg(BOOTSTRAP)
-      .stdin(Stdio::piped())
-      .stdout(Stdio::piped())
-      .stderr(Stdio::inherit());
-    if let Some(dir) = &self.config.working_directory {
-      child.current_dir(dir);
-    }
-    let mut child = child.spawn().map_err(|e| {
-      self.status = HostStatus::Failed;
-      HostError::Spawn(e.to_string())
-    })?;
-    let stdin = child
-      .stdin
-      .take()
-      .ok_or_else(|| HostError::Spawn("stdin unavailable".into()))?;
-    let stdout = child
-      .stdout
-      .take()
-      .ok_or_else(|| HostError::Spawn("stdout unavailable".into()))?;
-    self.child = Some(Process {
-      child,
-      stdin,
-      stdout: BufReader::new(stdout),
-      next_id: 1,
-    });
-    let modules: Vec<String> = self
-      .config
-      .modules
-      .iter()
-      .map(|path| path_to_file_url(path, self.config.working_directory.as_deref()))
-      .collect::<Result<_, _>>()
-      .inspect_err(|_| {
-        self.status = HostStatus::Failed;
-        self.child = None;
-      })?;
-    let response = self.request("load", json!({"modules": modules}));
-    match response {
-      Ok(result) => {
-        self.tools = result
-          .tools
-          .into_iter()
-          .map(|tool| (tool.name.clone(), tool))
-          .collect();
-        self.commands = result
-          .commands
-          .into_iter()
-          .map(|command| (command.name.clone(), command))
-          .collect();
-        self.status = HostStatus::Ready;
-        Ok(())
-      }
-      Err(error) => {
-        self.status = HostStatus::Failed;
-        self.child = None;
-        Err(error)
-      }
-    }
+fn spawn_process(config: &ExtensionHostConfig) -> Result<Process, HostError> {
+  let binary = if config.node_binary.as_os_str().is_empty() {
+    Path::new("node").to_path_buf()
+  } else {
+    config.node_binary.clone()
+  };
+  let mut command = Command::new(binary);
+  if config
+    .modules
+    .iter()
+    .any(|p| p.extension().is_some_and(|e| e == "ts"))
+  {
+    command.arg("--experimental-strip-types");
   }
+  let command = command
+    .arg("--input-type=module")
+    .arg("--eval")
+    .arg(BOOTSTRAP)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::inherit());
+  if let Some(dir) = &config.working_directory {
+    command.current_dir(dir);
+  }
+  #[cfg(not(target_os = "windows"))]
+  {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+  }
+  let mut child = command
+    .spawn()
+    .map_err(|error| HostError::Spawn(error.to_string()))?;
+  let stdin = child.stdin.take().ok_or_else(|| {
+    terminate_process_tree(&mut child);
+    HostError::Spawn("stdin unavailable".into())
+  })?;
+  let stdout = child.stdout.take().ok_or_else(|| {
+    terminate_process_tree(&mut child);
+    HostError::Spawn("stdout unavailable".into())
+  })?;
 
-  fn request(&mut self, method: &str, params: Value) -> Result<DispatchResult, HostError> {
-    let process = self
-      .child
-      .as_mut()
-      .ok_or_else(|| HostError::ProcessLost("host is not running".into()))?;
-    if let Some(status) = process
-      .child
-      .try_wait()
-      .map_err(|e| HostError::Io(e.to_string()))?
-    {
-      self.child = None;
-      self.status = HostStatus::Stopped;
+  let control = Arc::new(ProcessControl {
+    child: Mutex::new(child),
+  });
+  let (sender, receiver) = mpsc::sync_channel(8);
+  let reader_control = Arc::clone(&control);
+  let reader = thread::spawn(move || {
+    let mut stdout = BufReader::new(stdout);
+    let mut lines = BoundedLineReader::new();
+    loop {
+      match lines.read_line(&mut stdout, MAX_RESPONSE_LINE_BYTES, LineOverflow::Reject) {
+        Ok(Some(line)) => {
+          if sender.send(Ok(line.into_bytes())).is_err() {
+            break;
+          }
+        }
+        Ok(None) => break,
+        Err(error) => {
+          if let Ok(mut child) = reader_control.child.lock() {
+            terminate_process_tree(&mut child);
+          }
+          let _ = sender.send(Err(HostError::Protocol(format!(
+            "bounded response read failed: {error}"
+          ))));
+          break;
+        }
+      }
+    }
+  });
+
+  Ok(Process {
+    control,
+    io: Mutex::new(ProcessIo { stdin }),
+    responses: Mutex::new(receiver),
+    request_lock: Mutex::new(()),
+    next_id: AtomicU64::new(1),
+    reader: Mutex::new(Some(reader)),
+  })
+}
+
+impl Process {
+  fn request(
+    &self,
+    method: &str,
+    params: Value,
+    context: &ToolExecutionContext,
+  ) -> Result<DispatchResult, HostError> {
+    let _request_guard = self
+      .request_lock
+      .lock()
+      .map_err(|_| HostError::Io("extension request lock poisoned".into()))?;
+    if let Some(status) = self.is_exited()? {
       return Err(HostError::ProcessLost(format!("exited with {status}")));
     }
-    let id = process.next_id;
-    process.next_id += 1;
+    if context.is_cancelled_or_expired() {
+      self.terminate();
+      return Err(HostError::ProcessLost(
+        "extension request was interrupted".into(),
+      ));
+    }
+
+    let id = self.next_id.fetch_add(1, Ordering::Relaxed);
     let request = json!({"id": id, "method": method, "params": params});
-    serde_json::to_writer(&mut process.stdin, &request)
-      .map_err(|e| HostError::Io(e.to_string()))?;
-    let write_result = process
-      .stdin
-      .write_all(b"\n")
-      .and_then(|_| process.stdin.flush());
-    if let Err(error) = write_result {
-      self.child = None;
-      self.status = HostStatus::Stopped;
-      return Err(HostError::ProcessLost(error.to_string()));
+    let encoded = serde_json::to_vec(&request)
+      .map_err(|error| HostError::Io(format!("cannot encode request: {error}")))?;
+    if encoded.len() > MAX_REQUEST_BYTES {
+      return Err(HostError::Protocol(format!(
+        "extension request exceeds {MAX_REQUEST_BYTES} bytes"
+      )));
     }
-    let mut line = String::new();
-    let read_result = process.stdout.read_line(&mut line);
-    if let Err(error) = read_result {
-      self.child = None;
-      self.status = HostStatus::Stopped;
-      return Err(HostError::ProcessLost(error.to_string()));
+    {
+      let mut io = self
+        .io
+        .lock()
+        .map_err(|_| HostError::Io("extension stdin lock poisoned".into()))?;
+      if let Err(error) = io.stdin.write_all(&encoded).and_then(|_| {
+        io.stdin.write_all(b"\n")?;
+        io.stdin.flush()
+      }) {
+        self.terminate();
+        return Err(HostError::ProcessLost(error.to_string()));
+      }
     }
-    if line.is_empty() {
-      self.child = None;
-      self.status = HostStatus::Stopped;
-      return Err(HostError::ProcessLost("EOF from Node host".into()));
-    }
-    let response: RpcResponse = serde_json::from_str(&line).map_err(|e| {
-      self.status = HostStatus::Failed;
-      HostError::Protocol(format!("invalid response: {e}"))
-    })?;
+
+    let response = loop {
+      if context.is_cancelled_or_expired() {
+        self.terminate();
+        return Err(HostError::ProcessLost(
+          "extension request was interrupted".into(),
+        ));
+      }
+      let wait = context
+        .remaining()
+        .map(|remaining| remaining.min(RESPONSE_POLL_INTERVAL))
+        .unwrap_or(RESPONSE_POLL_INTERVAL);
+      let message = self
+        .responses
+        .lock()
+        .map_err(|_| HostError::Io("extension response lock poisoned".into()))?
+        .recv_timeout(wait);
+      match message {
+        Ok(Ok(bytes)) => break bytes,
+        Ok(Err(error)) => return Err(error),
+        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+          return Err(HostError::ProcessLost("EOF from Node host".into()));
+        }
+      }
+    };
+    let line = String::from_utf8(response)
+      .map_err(|error| HostError::Protocol(format!("response was not UTF-8: {error}")))?;
+    let response: RpcResponse = serde_json::from_str(&line)
+      .map_err(|error| HostError::Protocol(format!("invalid response: {error}")))?;
     if response.id != id {
       return Err(HostError::Protocol(format!(
         "response id {} does not match {id}",
@@ -514,8 +693,28 @@ impl HostInner {
       });
     }
     serde_json::from_value(response.result.unwrap_or_default())
-      .map_err(|e| HostError::Protocol(format!("invalid result: {e}")))
+      .map_err(|error| HostError::Protocol(format!("invalid result: {error}")))
   }
+}
+
+fn terminate_process_tree(child: &mut Child) {
+  #[cfg(unix)]
+  {
+    let pid = child.id().to_string();
+    let _ = Command::new("kill")
+      .args(["-KILL", &format!("-{pid}")])
+      .stderr(std::process::Stdio::null())
+      .status();
+  }
+  #[cfg(windows)]
+  {
+    let pid = child.id().to_string();
+    let _ = Command::new("taskkill")
+      .args(["/PID", pid.as_str(), "/T", "/F"])
+      .status();
+  }
+  let _ = child.kill();
+  let _ = child.wait();
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -571,10 +770,20 @@ impl Tool for ExtensionTool {
     request: &ToolRequest,
     progress: &mut dyn ToolProgress,
   ) -> Result<ToolOutcome, ToolError> {
-    let result = self.host.dispatch_tool_call(
+    self.execute_with_context(request, progress, &ToolExecutionContext::unbounded())
+  }
+
+  fn execute_with_context(
+    &self,
+    request: &ToolRequest,
+    progress: &mut dyn ToolProgress,
+    context: &ToolExecutionContext,
+  ) -> Result<ToolOutcome, ToolError> {
+    let result = self.host.dispatch_tool_call_with_context(
       &self.info.name,
       &request.call_id.to_string(),
       request.arguments.clone(),
+      context,
     );
     match result {
       Ok(result) => {
@@ -729,5 +938,39 @@ mod tests {
       context.value.unwrap()["messages"][0]["content"],
       "extension context"
     );
+  }
+
+  #[test]
+  fn cancellation_kills_a_hung_extension_without_waiting_for_node() {
+    if std::process::Command::new("node")
+      .arg("--version")
+      .output()
+      .is_err()
+    {
+      return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("hang.mjs");
+    std::fs::write(
+      &module,
+      "export default (pi) => pi.registerTool({name: 'hang', execute: async () => await new Promise(() => {})});\n",
+    )
+    .unwrap();
+    let host = ExtensionHost::new(ExtensionHostConfig::new([module]));
+    host.start().unwrap();
+    let cancel = pi_rs_core::CancelToken::new();
+    let trigger = cancel.clone();
+    let killer = std::thread::spawn(move || {
+      std::thread::sleep(Duration::from_millis(100));
+      trigger.cancel();
+    });
+    let context = ToolExecutionContext::new(cancel, Duration::from_secs(10));
+    let result = host.dispatch_tool_call_with_context("hang", "call-1", json!({}), &context);
+    killer.join().unwrap();
+    assert!(
+      matches!(result, Err(HostError::ProcessLost(_))),
+      "{result:?}"
+    );
+    assert_eq!(host.status(), HostStatus::Stopped);
   }
 }

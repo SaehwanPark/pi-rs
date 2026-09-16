@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use std::sync::RwLock;
 
 use pi_rs_core::{
-  CancelToken, ReplayDecision, Tool, ToolChunk, ToolError, ToolExecutionState, ToolMetadata,
-  ToolOutcome, ToolProgress, ToolRequest,
+  CancelToken, ReplayDecision, Tool, ToolChunk, ToolError, ToolExecutionContext,
+  ToolExecutionState, ToolMetadata, ToolOutcome, ToolProgress, ToolRequest,
 };
 use serde_json::Value;
 
@@ -228,6 +228,7 @@ impl ToolRegistry {
   pub fn with_builtins(mut self) -> Self {
     self.register(Box::new(crate::ReadTool::new(self.runtime.clone())));
     self.register(Box::new(crate::WriteTool::new(self.runtime.clone())));
+    self.register(Box::new(crate::AppendTool::new(self.runtime.clone())));
     self.register(Box::new(crate::GrepTool::new(self.runtime.clone())));
     self.register(Box::new(crate::EditTool::new(self.runtime.clone())));
     self.register(Box::new(crate::ExecTool::new(self.runtime.clone())));
@@ -453,10 +454,14 @@ impl ToolRegistry {
       inner: progress,
       forwarded: false,
     };
+    let context = ToolExecutionContext::new(
+      cancel.clone(),
+      std::time::Duration::from_millis(self.runtime.shell_timeout_ms),
+    );
     let result = {
       let tools = self.tools.read().unwrap();
       let tool = tools.get(&request.name).expect("tool exists");
-      tool.execute(request, &mut sink)
+      tool.execute_with_context(request, &mut sink, &context)
     };
 
     match result {
@@ -467,9 +472,14 @@ impl ToolRegistry {
           outcome.reduced = true;
           full_output = Some(reduction.full.into_bytes());
         }
-        let state = coerce_state(outcome.state, &metadata, cancel.is_cancelled());
+        let interrupted = context.is_cancelled_or_expired();
+        let state = coerce_state(outcome.state, &metadata, interrupted);
         if state != outcome.state {
           outcome.state = state;
+          outcome.is_error = true;
+          outcome
+            .text
+            .push_str(" [completion was not observed before cancellation or deadline]");
         }
         Ok(Executed {
           request: request.clone(),
@@ -485,7 +495,7 @@ impl ToolRegistry {
         // A harness-level error still has to land in a lifecycle state, because
         // the next model must be able to tell whether the world changed.
         let mut state = error.implied_state(&metadata);
-        if cancel.is_cancelled() && state == ToolExecutionState::Started {
+        if context.is_cancelled_or_expired() && state == ToolExecutionState::Started {
           state = ToolExecutionState::Unknown;
         }
         let outcome = ToolOutcome {

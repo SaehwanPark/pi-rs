@@ -182,7 +182,7 @@ fn a_cancel_during_a_mutating_tool_leaves_that_call_unknown() {
   // the side effect is genuinely in progress.
   let server = FakeServer::scripted(vec![Scripted::Whole(tool_call(
     "exec",
-    serde_json::json!({ "command": "sleep 0.7 && echo done" }),
+    serde_json::json!({ "command": "sleep 1.5 && echo done" }),
   ))]);
   let config = write_config_with(temp.path(), &server.base_url(), |config| {
     // A mutating call is refused unless the policy answers for the user, and this
@@ -199,7 +199,10 @@ fn a_cancel_during_a_mutating_tool_leaves_that_call_unknown() {
 
   open_session(&args.config, &args.cwd, &args.surface, None, |session| {
     let cancel = CancelToken::new();
-    interrupt_after(&cancel, Duration::from_millis(150));
+    // Leave enough time for the model response and tool dispatch on slower CI
+    // runners, while the command itself remains in progress when cancellation
+    // arrives.
+    interrupt_after(&cancel, Duration::from_millis(500));
     let canceled = session
       .turn_with("change something", &cancel)
       .map_err(|error| turn_error(&error))?;
@@ -229,10 +232,13 @@ fn a_cancel_during_a_mutating_tool_leaves_that_call_unknown() {
   assert_eq!(results.len(), 1, "the one call the model asked for");
   let (name, state, text) = &results[0];
   assert_eq!(name, "exec");
-  // The command ran out its whole and `done` is its output, and the state is still
-  // not `Succeeded`: a mutating call interrupted while it was running may be
+  // Cancellation stops the process tree promptly, but the state is still not
+  // `Succeeded`: a mutating call interrupted while it was running may be
   // half-applied, and the runtime does not upgrade its own ignorance.
-  assert!(text.contains("done"), "the command really ran: {text}");
+  assert!(
+    text.contains("cancelled") || text.contains("interrupted"),
+    "the completion boundary names the interruption: {text}"
+  );
   assert_eq!(
     *state,
     ToolExecutionState::Unknown,

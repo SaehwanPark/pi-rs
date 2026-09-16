@@ -11,12 +11,13 @@
 //!   was hit.
 
 use std::{
-  fs::{self, File},
+  fs::{self, OpenOptions},
   io::Write,
 };
 
 use pi_rs_core::{
-  ReconciliationStatus, Tool, ToolError, ToolMetadata, ToolOutcome, ToolProgress, ToolRequest,
+  ReconciliationStatus, Tool, ToolError, ToolExecutionContext, ToolMetadata, ToolOutcome,
+  ToolProgress, ToolRequest,
 };
 use serde_json::json;
 
@@ -48,14 +49,18 @@ impl Tool for WriteTool {
       "type": "object",
       "properties": {
         "path": { "type": "string", "description": "File to write, relative to the workspace." },
-        "contents": { "type": "string", "description": "Exact file contents." },
-        "append": { "type": "boolean", "description": "Append instead of replacing. Defaults to false." }
+        "contents": { "type": "string", "description": "Exact file contents." }
       },
       "required": ["path", "contents"]
     })
   }
 
   fn preflight(&self, request: &ToolRequest) -> Result<(), ToolError> {
+    if request.arguments.get("append").is_some() {
+      return Err(ToolError::new(
+        "write: append is a separate non-idempotent tool; call 'append' instead",
+      ));
+    }
     let path = arg_str(request, "path")?;
     self
       .runtime
@@ -68,18 +73,49 @@ impl Tool for WriteTool {
   fn execute(
     &self,
     request: &ToolRequest,
+    progress: &mut dyn ToolProgress,
+  ) -> Result<ToolOutcome, ToolError> {
+    self.execute_inner(request, progress, &ToolExecutionContext::unbounded())
+  }
+
+  fn execute_with_context(
+    &self,
+    request: &ToolRequest,
+    progress: &mut dyn ToolProgress,
+    context: &ToolExecutionContext,
+  ) -> Result<ToolOutcome, ToolError> {
+    self.execute_inner(request, progress, context)
+  }
+
+  fn reconcile(&self, request: &ToolRequest) -> Result<ReconciliationStatus, ToolError> {
+    self.reconcile_inner(request)
+  }
+}
+
+impl WriteTool {
+  fn execute_inner(
+    &self,
+    request: &ToolRequest,
     _progress: &mut dyn ToolProgress,
+    context: &ToolExecutionContext,
   ) -> Result<ToolOutcome, ToolError> {
     let runtime = self.runtime.clone();
     let path = arg_str(request, "path")?;
     let contents = arg_str(request, "contents")?;
-    let append = crate::arg_bool(request, "append", false);
+    if request.arguments.get("append").is_some() {
+      return Err(ToolError::new(
+        "write: append is a separate non-idempotent tool; call 'append' instead",
+      ));
+    }
     let deadline = Deadline::new(crate::WRITE_BUDGET);
 
     let resolved = runtime
       .workspace
       .write_path(path)
       .map_err(|error| ToolError::new(error.to_string()))?;
+    if context.is_cancelled_or_expired() {
+      return Ok(ToolOutcome::failed("write: cancelled before writing"));
+    }
     if let Some(parent) = resolved.parent() {
       fs::create_dir_all(parent)
         .map_err(|error| ToolError::new(format!("write: cannot create parent: {error}")))?;
@@ -88,37 +124,47 @@ impl Tool for WriteTool {
     let existing = fs::metadata(&resolved).map(|m| m.len()).ok();
     let bytes = contents.as_bytes();
 
-    if append {
-      let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&resolved)
-        .map_err(after_start)?;
+    // Sibling temp file, then rename: the target is either the old file or the
+    // new one, never a mixture. `create_new` prevents a pre-existing temp
+    // symlink from redirecting the first write.
+    let temp = temp_path_for(&resolved);
+    {
+      let mut options = OpenOptions::new();
+      options.write(true).create_new(true);
+      #[cfg(unix)]
+      {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+      }
+      let mut file = options.open(&temp).map_err(after_start)?;
       file
         .write_all(bytes)
-        .map_err(after_start)
+        .map_err(|error| {
+          let _ = fs::remove_file(&temp);
+          after_start(error)
+        })
         .and_then(|_| file.sync_all().map_err(after_start))?;
-    } else {
-      // Sibling temp file, then rename: the target is either the old file or the
-      // new one, never a mixture.
-      let temp = temp_path_for(&resolved);
-      {
-        let mut file = File::create(&temp).map_err(after_start)?;
-        file
-          .write_all(bytes)
-          .map_err(|error| {
-            let _ = fs::remove_file(&temp);
-            after_start(error)
-          })
-          .and_then(|_| file.sync_all().map_err(after_start))?;
-      }
-      fs::rename(&temp, &resolved).map_err(|error| {
-        let _ = fs::remove_file(&temp);
-        after_start(error)
-      })?;
+    }
+    if context.is_cancelled_or_expired() {
+      let _ = fs::remove_file(&temp);
+      return Ok(ToolOutcome::unknown(format!(
+        "write of '{}' was interrupted before replacement; inspect the target",
+        resolved.display()
+      )));
+    }
+    fs::rename(&temp, &resolved).map_err(|error| {
+      let _ = fs::remove_file(&temp);
+      after_start(error)
+    })?;
+
+    if context.is_cancelled_or_expired() {
+      return Ok(ToolOutcome::unknown(format!(
+        "write of '{}' completed at the filesystem boundary but the caller was interrupted; inspect before retrying",
+        resolved.display()
+      )));
     }
 
-    let verb = if append { "appended to" } else { "wrote" };
+    let verb = "wrote";
     let mut outcome = ToolOutcome::succeeded(format!(
       "{verb} {} bytes to '{}'{}",
       bytes.len(),
@@ -133,10 +179,9 @@ impl Tool for WriteTool {
     Ok(outcome)
   }
 
-  fn reconcile(&self, request: &ToolRequest) -> Result<ReconciliationStatus, ToolError> {
+  fn reconcile_inner(&self, request: &ToolRequest) -> Result<ReconciliationStatus, ToolError> {
     let path = arg_str(request, "path")?;
     let contents = arg_str(request, "contents")?;
-    let append = crate::arg_bool(request, "append", false);
     let resolved = self
       .runtime
       .workspace
@@ -150,32 +195,17 @@ impl Tool for WriteTool {
     }
 
     match fs::read(&resolved) {
-      Ok(bytes) => {
-        if !append {
-          if bytes == contents.as_bytes() {
-            Ok(ReconciliationStatus::Committed {
-              details: format!("target file '{}' contains exact requested contents", path),
-            })
-          } else {
-            Ok(ReconciliationStatus::Diverged {
-              details: format!(
-                "target file '{}' exists with differing contents ({} bytes vs expected {} bytes)",
-                path,
-                bytes.len(),
-                contents.len()
-              ),
-            })
-          }
-        } else if bytes.ends_with(contents.as_bytes()) {
-          Ok(ReconciliationStatus::Committed {
-            details: format!("target file '{}' ends with appended contents", path),
-          })
-        } else {
-          Ok(ReconciliationStatus::Diverged {
-            details: format!("target file '{}' does not end with appended contents", path),
-          })
-        }
-      }
+      Ok(bytes) if bytes == contents.as_bytes() => Ok(ReconciliationStatus::Committed {
+        details: format!("target file '{}' contains exact requested contents", path),
+      }),
+      Ok(bytes) => Ok(ReconciliationStatus::Diverged {
+        details: format!(
+          "target file '{}' exists with differing contents ({} bytes vs expected {} bytes)",
+          path,
+          bytes.len(),
+          contents.len()
+        ),
+      }),
       Err(error) => Ok(ReconciliationStatus::RequiresManualInspection {
         details: format!("cannot read target file '{}': {error}", path),
       }),
@@ -260,18 +290,19 @@ mod tests {
   }
 
   #[test]
-  fn appends_when_asked() {
+  fn append_argument_is_rejected_without_touching_the_target() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("log.txt"), "first\n").unwrap();
     let tool = WriteTool::new(runtime(&dir));
     let mut recorder = Recorder::default();
-    let outcome = tool
+    let error = tool
       .execute(&request("log.txt", "second\n", true), &mut recorder)
-      .unwrap();
-    assert!(!outcome.is_error);
+      .unwrap_err();
+    assert!(!error.started);
+    assert!(error.message.contains("separate"), "{}", error.message);
     assert_eq!(
       fs::read_to_string(dir.path().join("log.txt")).unwrap(),
-      "first\nsecond\n"
+      "first\n"
     );
   }
 
@@ -292,6 +323,24 @@ mod tests {
     );
     assert!(error.message.contains("outside"), "{}", error.message);
     assert!(!std::path::Path::new("/tmp/definitely-not-mine-pi-rs").exists());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn outward_final_symlink_is_refused_before_replace() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("important.txt");
+    fs::write(&target, "keep").unwrap();
+    std::os::unix::fs::symlink(&target, dir.path().join("link.txt")).unwrap();
+    let tool = WriteTool::new(runtime(&dir));
+    let mut recorder = Recorder::default();
+    let error = tool
+      .execute(&request("link.txt", "overwrite", false), &mut recorder)
+      .unwrap_err();
+    assert!(!error.started);
+    assert!(error.message.contains("outside"), "{}", error.message);
+    assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
   }
 
   #[test]

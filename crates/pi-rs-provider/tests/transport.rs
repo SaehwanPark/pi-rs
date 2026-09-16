@@ -501,6 +501,40 @@ fn an_injected_non_json_payload_after_output_does_not_destroy_the_answer() {
 }
 
 #[test]
+fn a_quiet_stream_retries_socket_polls_without_losing_a_partial_sse_line() {
+  let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+  let addr = listener.local_addr().expect("addr");
+  let server = thread::spawn(move || {
+    let (mut socket, _) = listener.accept().expect("accept");
+    let _ = drain_request(&mut socket);
+    socket
+      .write_all(
+        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"quiet",
+      )
+      .expect("write partial event");
+    socket.flush().expect("flush partial event");
+    thread::sleep(std::time::Duration::from_millis(400));
+    socket
+      .write_all(
+        b"\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+      )
+      .expect("write completion");
+    socket.flush().expect("flush completion");
+  });
+
+  let adapter = adapter(&format!("http://{addr}/v1"), None);
+  let (result, collector) = stream(&adapter, &request("quiet"));
+  result.expect("quiet stream completes");
+  assert!(
+    collector
+      .events()
+      .iter()
+      .any(|event| matches!(event, ProviderEvent::TextDelta(text) if text == "quiet"))
+  );
+  server.join().expect("server");
+}
+
+#[test]
 fn cancel_during_a_slow_stream_stops_promptly() {
   // The server sends one delta and then holds the connection open; the client
   // must abandon it on cancel rather than wait for a timeout.

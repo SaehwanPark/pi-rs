@@ -22,6 +22,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bounded;
 pub mod capability;
 pub mod config;
 pub mod context;
@@ -39,6 +40,7 @@ pub mod tool;
 pub mod trace;
 pub mod trust;
 
+pub use bounded::{BoundedLine, BoundedLineReader, LineOverflow, read_bounded_line};
 pub use capability::{
   CapabilityGap, EpochReason, ModelAttribution, ModelCapabilities, ModelEpoch, ModelRef,
   ReasoningExposure,
@@ -78,8 +80,8 @@ pub use session::{
 };
 pub use sink::{EventSink, FanOut, MemorySink, NullSink, SinkError};
 pub use tool::{
-  ReconciliationStatus, ReplayDecision, Tool, ToolChunk, ToolError, ToolExecutionState,
-  ToolMetadata, ToolOutcome, ToolProgress, ToolRequest,
+  ReconciliationStatus, ReplayDecision, Tool, ToolChunk, ToolError, ToolExecutionContext,
+  ToolExecutionState, ToolMetadata, ToolOutcome, ToolProgress, ToolRequest,
 };
 pub use trace::{
   BlobCompression, BlobRef, ExternalContextSource, ExternalizedField, RawPayloadCapture,

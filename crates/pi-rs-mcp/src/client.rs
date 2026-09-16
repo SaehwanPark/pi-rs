@@ -5,6 +5,8 @@ use std::{
   sync::{Arc, Mutex},
 };
 
+use pi_rs_core::ToolExecutionContext;
+
 use serde_json::{Value, json};
 
 const MAX_TOOL_LIST_PAGES: usize = 1_024;
@@ -118,6 +120,15 @@ impl McpClient {
     name: &str,
     arguments: Option<Value>,
   ) -> Result<CallToolResult, McpError> {
+    self.call_tool_with_context(name, arguments, &ToolExecutionContext::unbounded())
+  }
+
+  pub fn call_tool_with_context(
+    &self,
+    name: &str,
+    arguments: Option<Value>,
+    context: &ToolExecutionContext,
+  ) -> Result<CallToolResult, McpError> {
     let params = CallToolParams {
       name: name.to_string(),
       arguments,
@@ -126,7 +137,9 @@ impl McpClient {
     let params_val = serde_json::to_value(params)
       .map_err(|e| McpError::Protocol(format!("failed to serialize call params: {e}")))?;
 
-    let res_val = self.transport.call("tools/call", Some(params_val))?;
+    let res_val = self
+      .transport
+      .call_with_context("tools/call", Some(params_val), context)?;
     let call_res: CallToolResult = serde_json::from_value(res_val)
       .map_err(|e| McpError::Protocol(format!("invalid tools/call response: {e}")))?;
 

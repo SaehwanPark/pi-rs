@@ -40,7 +40,7 @@ Streamlined CLI execution with strict stdout/stderr separation and explicit prov
 - **One-Shot CLI Runner (`pi-rs run`)**: Scriptable headless turn execution; pure assistant prose to `stdout`, structured execution telemetry to `stderr`.
 - **Honest Provenance**: Distinct attribution for `[native reasoning]`, `[provider summary]`, `[declared]`, and `[reconstructed]` rationale. Hidden chain-of-thought is never falsely claimed.
 - **Append-Only Event Store & Replay**: Complete execution timeline stored in `trace.jsonl`; inspect sessions with `pi-rs trace` or replay deterministically with `pi-rs replay` without re-running tools.
-- **Workspace Confinement**: Realpath-enforced root sandbox (`--cwd`); mutating tools (`write`, `edit`, `exec`) require explicit configuration approval.
+- **Workspace Confinement**: File tools reject traversal and outward-pointing symlink components under `--cwd`; mutating tools (`write`, `edit`, `exec`) require explicit configuration approval.
 - **Pi Ecosystem Compatibility**: Drop-in discovery for Pi skills, prompt templates, packages, and bidirectional session migration (`import`/`export`).
 - **Resilient Model Failover**: Pre-validated backup provider failover with capability checks (tools, modalities, context limits).
 - **Lazy MCP Integration**: Stdio Model Context Protocol client initialized on-demand without startup penalties.
@@ -66,14 +66,24 @@ Works out of the box with local models (Ollama, vLLM) and OpenAI-compatible clou
 
 ```json
 {
-  "provider": {
-    "type": "openai",
-    "base_url": "http://localhost:11434/v1",
-    "api_key": "ollama",
-    "model": "qwen2.5-coder:latest",
-    "reasoning_kind": "native"
-  },
+  "version": 1,
+  "primary": "local/qwen2.5-coder:latest",
+  "thinking": "medium",
   "state_dir": ".pi-rs-state",
+  "endpoints": [
+    {
+      "provider": "local",
+      "model": "qwen2.5-coder:latest",
+      "base_url": "http://localhost:11434/v1",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "tools": true,
+        "exposed_reasoning": "native",
+        "context_window": 32768
+      }
+    }
+  ],
   "tools": {
     "auto_approve_mutating": true
   }
