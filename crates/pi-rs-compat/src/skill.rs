@@ -584,7 +584,7 @@ mod tests {
   /// A scenario with its own fake `$HOME`, its own project, and no shared state.
   struct Fixture {
     /// The scenario's root. Held so the directories outlive the scan.
-    root: tempfile::TempDir,
+    _root: tempfile::TempDir,
     home: PathBuf,
     project: PathBuf,
   }
@@ -597,7 +597,7 @@ mod tests {
       fs::create_dir_all(&home).unwrap();
       fs::create_dir_all(&project).unwrap();
       Self {
-        root: temp,
+        _root: temp,
         home,
         project,
       }

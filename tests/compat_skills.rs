@@ -25,6 +25,10 @@ fn home() -> PathBuf {
     .expect("fixture home")
 }
 
+fn slash_path(path: &Path) -> String {
+  path.display().to_string().replace('\\', "/")
+}
+
 fn scan(trust: Trust) -> skill::Scan {
   skill::discover(&Discovery {
     home: Some(home()),
@@ -78,11 +82,9 @@ fn every_rejection_is_reported_once_with_its_path() {
     .map(|warning| match warning {
       SkillWarning::MissingDescription { path }
       | SkillWarning::MalformedFrontmatter { path }
-      | SkillWarning::Duplicate { ignored: path, .. } => path
-        .strip_prefix(home())
-        .unwrap_or(path.as_path())
-        .display()
-        .to_string(),
+      | SkillWarning::Duplicate { ignored: path, .. } => {
+        slash_path(path.strip_prefix(home()).unwrap_or(path.as_path()))
+      }
       other => panic!("unexpected warning {other:?}"),
     })
     .collect();
@@ -125,6 +127,7 @@ fn project_locations_are_read_only_when_the_project_is_trusted() {
   // the only difference between the two scans is the one skill written below.
   let temp = tempfile::TempDir::new().expect("temp project");
   let project = temp.path();
+  fs::create_dir(project.join(".git")).expect("fixture git marker");
   let skill_dir = project.join(".agents/skills/repo-helper");
   fs::create_dir_all(&skill_dir).expect("fixture project skill");
   fs::write(
