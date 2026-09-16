@@ -387,11 +387,14 @@ provider-neutral and retains citation/provenance plus source metadata for resume
 on-demand rehydration; old session lines decode it as absent.
 
 `SessionEpochRecord` (`session.rs:87`): `epoch: u32`, `model: ModelRef`,
-`reason: crate::capability::EpochReason`.
+`reason: crate::capability::EpochReason`. Runtime epoch-start events are projected
+into this record so resume can restore the active epoch and continue numbering.
 
 `SessionCompactionRecord` (`session.rs:95`): `context_epoch: u32`,
-`level: crate::context::ContextLevel`, `removed_messages: u32`, `retained_from: u32`
-("Line index (0-based, header excluded) of the first retained message.", `session.rs:99`).
+`level: crate::context::ContextLevel`, `removed_messages: u32`, `retained_from: u32`,
+`retained_messages: u32`, and `summary_present: bool`. The latter two fields let
+resume reconstruct `[summary, retained tail]` without confusing session-line and
+canonical event-sequence coordinates; older records default them to zero/false.
 
 `SessionCheckpointRecord` (`session.rs:105`): `checkpoint_id: CheckpointId`,
 `capsule_version: u32`, `capsule_path: String`, `capsule: ContextCapsule`. The capsule is

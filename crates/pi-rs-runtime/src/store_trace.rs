@@ -4,7 +4,10 @@
 //! identity and semantic attribution; this adapter writes the event first, then
 //! writes any session message against the sequence the store assigned.
 
-use pi_rs_core::{AttributedMessage, EventEnvelope, SinkError};
+use pi_rs_core::{
+  AgentEvent, AttributedMessage, EventEnvelope, SessionCompactionRecord, SessionEpochRecord,
+  SessionRecord, SinkError,
+};
 use pi_rs_store::Session;
 
 use crate::turn::Trace;
@@ -13,11 +16,18 @@ use crate::turn::Trace;
 #[derive(Debug)]
 pub struct StoreTrace {
   session: Session,
+  /// A compaction marker is only allowed to claim a persisted summary when the
+  /// preceding runtime event opened one. This protects restoration from a
+  /// hand-authored completion event with no summary message beside it.
+  summary_pending: bool,
 }
 
 impl StoreTrace {
   pub fn new(session: Session) -> Self {
-    Self { session }
+    Self {
+      session,
+      summary_pending: false,
+    }
   }
 
   pub fn session(&self) -> &Session {
@@ -31,7 +41,47 @@ impl StoreTrace {
 
 impl Trace for StoreTrace {
   fn emit(&mut self, envelope: &mut EventEnvelope) -> Result<(), SinkError> {
-    self.session.emit(envelope).map(|_| ()).map_err(store_error)
+    self.session.emit(envelope).map_err(store_error)?;
+    // The trace is authoritative for high-resolution replay, while the session
+    // log carries the small projection needed to resume without hydrating it.
+    // Project transitions at the same boundary that assigns their canonical
+    // sequence; the runtime never has to remember to write a second record.
+    let record = match &envelope.event {
+      AgentEvent::ContextSummary => {
+        self.summary_pending = true;
+        None
+      }
+      AgentEvent::ModelEpochStarted(epoch) => Some(SessionRecord::Epoch(SessionEpochRecord {
+        epoch: epoch.epoch,
+        model: epoch.model.clone(),
+        reason: epoch.reason.clone(),
+      })),
+      AgentEvent::ContextCompactionCompleted(completed) => {
+        Some(SessionRecord::Compaction(SessionCompactionRecord {
+          context_epoch: completed.context_epoch,
+          level: completed.level,
+          removed_messages: completed.removed_messages,
+          // `retained_from` is a legacy session-line coordinate. The trace's
+          // sequence range is authoritative; `retained_messages` lets resume
+          // recover the model-visible tail without mixing coordinates.
+          retained_from: 0,
+          retained_messages: completed.retained_messages,
+          summary_present: self.summary_pending
+            && matches!(
+              completed.level,
+              pi_rs_core::ContextLevel::L1Ordinary | pi_rs_core::ContextLevel::L2Phase
+            ),
+        }))
+      }
+      _ => None,
+    };
+    if let Some(record) = record {
+      self.session.record(&record).map_err(store_error)?;
+    }
+    if matches!(&envelope.event, AgentEvent::ContextCompactionCompleted(_)) {
+      self.summary_pending = false;
+    }
+    Ok(())
   }
 
   fn record_message(&mut self, attributed: &AttributedMessage) -> Result<(), SinkError> {

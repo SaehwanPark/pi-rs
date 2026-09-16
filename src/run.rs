@@ -5,12 +5,14 @@ use std::{
 };
 
 use pi_rs_core::{
-  AttributedMessage, CancelToken, CheckpointId, ContextCapsule, EventEnvelope, Message,
-  ModelProvider, ModelRef, ReasoningProvenance, RuntimeConfig, SessionEndReason, SessionHeader,
-  SessionId, SinkError, TraceId, TurnId, TurnStatus, now_millis,
+  AttributedMessage, CancelToken, CheckpointId, ContextCapsule, EpochReason, EventEnvelope,
+  EventSeq, Message, ModelEpoch, ModelProvider, ModelRef, ReasoningProvenance, RuntimeConfig,
+  SessionEndReason, SessionHeader, SessionId, SinkError, TraceId, TurnId, TurnStatus, now_millis,
 };
 use pi_rs_provider::{Deferred, OpenAiCompat, ProviderConfig};
-use pi_rs_runtime::{StoreTrace, Trace, TurnError, TurnLoop, TurnProgress, TurnReport};
+use pi_rs_runtime::{
+  ResumeState, StoreTrace, Trace, TurnError, TurnLoop, TurnProgress, TurnReport,
+};
 use pi_rs_store::{Store, WritePolicy};
 use pi_rs_tools::{Executed, ToolRegistry, Workspace};
 use pi_rs_tui::{Palette, Surface, TranscriptOptions, is_streamed, render_event, term};
@@ -169,9 +171,14 @@ pub(crate) fn open_session(
       .apply_retention(&config.trace, now_millis(), 1)
       .map_err(|error| format!("cannot apply trace retention: {error}"))?;
   }
-  let context = match &continuing {
-    Some(session_id) => continue_context(&store, session_id)?,
-    None => Vec::new(),
+  let resume_state = match &continuing {
+    Some(session_id) => Some(continue_state(
+      &store,
+      session_id,
+      &provider,
+      backup.as_ref().map(|backup| backup as &dyn ModelProvider),
+    )?),
+    None => None,
   };
   let session_id = continuing.clone().unwrap_or_else(SessionId::new);
   let session = match &continuing {
@@ -202,11 +209,9 @@ pub(crate) fn open_session(
     &tools,
     policy.as_ref(),
     &mut trace,
-    session_id,
+    session_id.clone(),
     TraceId::new(),
   )
-  // Empty for a session that has just begun, so this only ever carries a resumed one.
-  .with_messages(context)
   .with_working_dir(canonical_cwd)
   .with_thinking(config.thinking)
   .with_compaction_strategy(pi_rs_runtime::CompactionStrategy::Summarize);
@@ -219,6 +224,14 @@ pub(crate) fn open_session(
     // Failover is off until a backup exists. Attaching one is the whole
     // configuration surface: the policy comes from the primary's own capabilities.
     runtime = runtime.with_backup(backup);
+  }
+  if let Some(state) = resume_state {
+    runtime = runtime.with_resume_state(state).map_err(|error| {
+      format!(
+        "cannot continue session {session_id}: {}",
+        turn_error(&error)
+      )
+    })?;
   }
   let mut mcp_manager = pi_rs_mcp::McpManager::new(mcp_servers);
   let mut session = SessionHandle {
@@ -470,31 +483,19 @@ pub(crate) fn session_error(error: SessionError) -> String {
   }
 }
 
-/// Resolve the surface from arguments and the environment.
+/// Reconstruct the complete durable state a resumed session needs before its next request.
 ///
-/// Colour and width answer two different questions, so a run with `2> log` gets a
-/// wide, colourless transcript and (if stdout is a terminal) a coloured answer. An
-/// explicit `--width` is respected even on a pipe, which is how a user narrows a
-/// log deliberately rather than by accident.
-/// The configured backup as a provider that does not exist yet.
-///
-/// The adapter is built the first time the runtime actually addresses a request to
-/// it, which is also when its credential is resolved from the environment. What the
-/// failover gate needs beforehand — the model reference and the capability
-/// declaration — is read from config, so a backup that is never needed costs
-/// nothing at startup and never touches a credential it does not use.
-/// The model-visible context a resumed session is asked to continue from.
-///
-/// This is the store's checkpoint path, not a full hydration: where a checkpoint barrier
-/// exists the records before it are already summarized inside the capsule, so the
-/// post-barrier window is both the cheaper and the honest reading of what a live session
-/// would have held.
-///
-/// A context that cannot be rebuilt is refused here rather than answered with a shorter
-/// conversation. Silently dropping the part that is missing is how a continuation becomes
-/// a fabrication: the user asked to continue a session, so the answer has to say which
-/// part of it could not be recovered.
-fn continue_context(store: &Store, session_id: &SessionId) -> Result<Vec<Message>, String> {
+/// The store's semantic projection is the cheap hydration boundary: checkpoint barriers and
+/// compaction markers have already reduced it to the live model-visible window. A context that
+/// cannot be rebuilt is refused here rather than answered with a shorter conversation. Silently
+/// dropping the part that is missing is how a continuation becomes a fabrication: the user
+/// asked to continue a session, so the answer has to say which part could not be recovered.
+fn continue_state(
+  store: &Store,
+  session_id: &SessionId,
+  primary: &dyn ModelProvider,
+  backup: Option<&dyn ModelProvider>,
+) -> Result<ResumeState, String> {
   let restored = store
     .restore(session_id)
     .map_err(|error| format!("cannot continue session {session_id}: {error}"))?;
@@ -506,14 +507,82 @@ fn continue_context(store: &Store, session_id: &SessionId) -> Result<Vec<Message
       restored.malformed_records
     ));
   }
-  let mut messages = Vec::new();
+  let header_model = restored.header.model.clone();
+  let mut epoch_records = restored.epochs;
+  if epoch_records.is_empty() {
+    epoch_records.push(pi_rs_core::SessionEpochRecord {
+      epoch: 0,
+      model: header_model.clone(),
+      reason: EpochReason::Initial,
+    });
+  } else if epoch_records[0].epoch != 0 {
+    // Older projections could contain only takeover records. Reconstruct the
+    // header's initial epoch before validating the durable sequence.
+    epoch_records.insert(
+      0,
+      pi_rs_core::SessionEpochRecord {
+        epoch: 0,
+        model: header_model.clone(),
+        reason: EpochReason::Initial,
+      },
+    );
+  }
+  let epochs = {
+    epoch_records
+      .into_iter()
+      .map(|record| {
+        let provider = if record.model == *primary.model() {
+          Some(primary)
+        } else if backup.is_some_and(|backup| record.model == *backup.model()) {
+          backup
+        } else {
+          None
+        };
+        let provider = provider.ok_or_else(|| {
+          format!(
+            "cannot continue session {}: persisted model {} (epoch {}) is not configured",
+            session_id.as_str(),
+            record.model,
+            record.epoch
+          )
+        })?;
+        Ok(ModelEpoch {
+          index: record.epoch,
+          model: record.model,
+          capabilities: provider.capabilities(),
+          reason: record.reason,
+          started_by_event: None,
+        })
+      })
+      .collect::<Result<Vec<_>, String>>()?
+  };
+
+  let checkpoint_floor = usize::from(restored.checkpoint.is_some());
+  // A compaction after a checkpoint must cite only the canonical range opened
+  // after that barrier; the capsule is retained and is not an ordinary prefix.
+  let cited_first = restored
+    .checkpoint_seq
+    .map_or(EventSeq(1), |seq| EventSeq(seq.0.saturating_add(1)));
+  let mut messages = Vec::with_capacity(checkpoint_floor + restored.messages.len());
   if let Some(capsule) = restored.checkpoint {
     messages.push(Message::user(capsule.format_for_model()));
   }
   messages.extend(restored.messages.into_iter().map(|message| message.message));
-  Ok(messages)
+
+  Ok(ResumeState {
+    messages,
+    epochs,
+    context_epoch: restored.context_epoch,
+    checkpoint_floor,
+    cited_history: restored.last_seq.map(|last| (cited_first, last)),
+  })
 }
 
+/// A configured backup provider that is constructed only on first takeover.
+///
+/// The adapter is built the first time the runtime addresses it, which is also when its
+/// credential is resolved. The model reference and declared capabilities are still available
+/// for resume and failover validation without paying the startup cost of a live adapter.
 fn backup_provider(config: &RuntimeConfig) -> Result<Option<Deferred>, String> {
   let Some(model) = config.backup.clone() else {
     return Ok(None);
@@ -537,6 +606,12 @@ fn backup_provider(config: &RuntimeConfig) -> Result<Option<Deferred>, String> {
   )
 }
 
+/// Resolve the surface from arguments and the environment.
+///
+/// Colour and width answer two different questions, so a run with `2> log` gets a
+/// wide, colourless transcript and (if stdout is a terminal) a coloured answer. An
+/// explicit `--width` is respected even on a pipe, which is how a user narrows a
+/// log deliberately rather than by accident.
 fn surface_options(args: &SurfaceArgs) -> TranscriptOptions {
   let stderr = term::Stream::Stderr;
   TranscriptOptions {

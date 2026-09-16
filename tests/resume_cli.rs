@@ -23,10 +23,11 @@ use std::{
   time::{Duration, Instant},
 };
 
+use pi_rs_core::AgentEvent;
 use pi_rs_core::{
   ModelCapabilities, ModelEndpoint, ModelRef, ReasoningExposure, RuntimeConfig, SessionId,
 };
-use pi_rs_store::StateLayout;
+use pi_rs_store::{StateLayout, TraceJournal};
 use tempfile::TempDir;
 
 /// A session id shape the store would list, used as the name of a session that exists.
@@ -329,6 +330,28 @@ fn a_recorded_session_gains_a_second_turn_under_the_same_id() {
     "resuming must not create a session"
   );
   assert_eq!(recorded_count(&state), 1);
+  let trace = TraceJournal::read(
+    &StateLayout::new(&state).trace_path(&SessionId::from_string(session_id.clone())),
+  )
+  .expect("read resumed trace");
+  let resumed = trace
+    .items
+    .iter()
+    .find_map(|entry| match &entry.envelope.event {
+      AgentEvent::SessionStarted(event) if event.resumed => Some(event),
+      _ => None,
+    })
+    .expect("resume emits a resumed lifecycle event");
+  assert!(resumed.resumed);
+  assert_eq!(
+    trace
+      .items
+      .iter()
+      .filter(|entry| matches!(&entry.envelope.event, AgentEvent::ModelEpochStarted(_)))
+      .count(),
+    1,
+    "the existing initial epoch is not emitted a second time"
+  );
   // Both turns are in the log that was appended to, in order.
   let log = fs::read_to_string(
     StateLayout::new(&state).session_path(&SessionId::from_string(session_id.clone())),

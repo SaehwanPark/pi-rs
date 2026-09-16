@@ -35,6 +35,6 @@ pub use failover::{FailoverPolicy, Recovery};
 pub use pi_rs_core::{ExternalContextItem, ReconciliationStatus};
 pub use store_trace::StoreTrace;
 pub use turn::{
-  CheckpointStrategy, Checkpointer, CompactionStrategy, MAX_MODEL_REQUESTS_PER_TURN,
+  CheckpointStrategy, Checkpointer, CompactionStrategy, MAX_MODEL_REQUESTS_PER_TURN, ResumeState,
   SilentProgress, Summarizer, Trace, TraceSink, TurnError, TurnLoop, TurnProgress, TurnReport,
 };
