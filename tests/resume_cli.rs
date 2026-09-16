@@ -23,9 +23,9 @@ use std::{
   time::{Duration, Instant},
 };
 
-use pi_rs_core::AgentEvent;
 use pi_rs_core::{
-  ModelCapabilities, ModelEndpoint, ModelRef, ReasoningExposure, RuntimeConfig, SessionId,
+  AgentEvent, EpochReason, ModelCapabilities, ModelEndpoint, ModelRef, ReasoningExposure,
+  RuntimeConfig, SessionHeader, SessionId, SessionRecord, session::SESSION_SCHEMA_VERSION,
 };
 use pi_rs_store::{StateLayout, TraceJournal};
 use tempfile::TempDir;
@@ -279,6 +279,53 @@ fn an_unknown_session_id_is_refused_without_creating_a_session() {
   // must not leave a store behind, and must not have reached the endpoint.
   assert!(!state.exists(), "a store was created for an unknown id");
   assert!(!message.contains("connection"), "{message}");
+}
+
+#[test]
+fn a_persisted_active_model_missing_from_config_is_refused_before_request() {
+  let temp = TempDir::new().expect("temp dir");
+  let config = write_config(temp.path());
+  let state = temp.path().join("state");
+  let layout = StateLayout::new(&state);
+  fs::create_dir_all(layout.sessions_dir()).expect("create sessions dir");
+  let id = SessionId::from_string(RECORDED);
+  let header = SessionRecord::Header(SessionHeader {
+    session_id: id.clone(),
+    version: SESSION_SCHEMA_VERSION,
+    started_at_ms: 1,
+    working_dir: temp.path().display().to_string(),
+    model: ModelRef::new("fake", "agent"),
+    parent_session: None,
+    branched_from_event: None,
+    imported_from: None,
+  });
+  let epoch = SessionRecord::Epoch(pi_rs_core::SessionEpochRecord {
+    epoch: 1,
+    model: ModelRef::new("fake", "removed-backup"),
+    reason: EpochReason::AutomaticFailover,
+  });
+  let path = layout.session_path(&id);
+  fs::write(
+    &path,
+    format!(
+      "{}\n{}\n",
+      serde_json::to_string(&header).expect("header serializes"),
+      serde_json::to_string(&epoch).expect("epoch serializes")
+    ),
+  )
+  .expect("write session");
+
+  let out = run(&config, temp.path(), &["--resume", RECORDED]);
+  assert!(!out.status.success(), "stderr: {}", stderr(&out));
+  assert!(
+    stderr(&out).contains("persisted model fake/removed-backup (epoch 1) is not configured"),
+    "{}",
+    stderr(&out)
+  );
+  assert!(
+    !stderr(&out).contains("connection"),
+    "resume validation must happen before a provider request"
+  );
 }
 
 #[test]
