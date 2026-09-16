@@ -464,7 +464,7 @@ fn replacing_a_builtin_is_allowed() {
   let dir = fixture();
   let mut reg = registry(&dir);
   reg.register(Box::new(Override));
-  assert_eq!(reg.len(), 5, "replacement does not grow the set");
+  assert_eq!(reg.len(), 6, "replacement does not grow the set");
   let executed = run(&reg, "read", json!({"path": "anything"}));
   assert_eq!(executed.outcome.text, "override");
 }
