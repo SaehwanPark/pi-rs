@@ -557,6 +557,10 @@ fn nonempty(value: Option<&str>) -> Option<String> {
 mod tests {
   use super::*;
 
+  fn slash_path(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+  }
+
   /// A skill file written where the caller says, named after its directory.
   fn skill_file(dir: &Path, file: &str, name: &str, description: &str) -> PathBuf {
     let path = dir.join(file);
@@ -950,8 +954,9 @@ mod tests {
     ] {
       assert!(prompt.contains(expected), "missing '{expected}':\n{prompt}");
     }
+    let normalized_prompt = prompt.replace('\\', "/");
     assert!(
-      prompt.contains(&format!("<location>{}</location>", path.display())),
+      normalized_prompt.contains(&format!("<location>{}</location>", slash_path(&path))),
       "the model is told to read a file, so it has to be given the one path that works:\n{prompt}"
     );
     assert!(!prompt.starts_with('\n'), "the caller joins:\n{prompt}");
