@@ -891,7 +891,7 @@ mod tests {
     // The normal way to share one skill between checkouts: keep it somewhere else and
     // link it into the location. Refusing links would silently lose it.
     let fixture = Fixture::new();
-    let elsewhere = fixture.root.path().join("shared/pdf-tools");
+    let elsewhere = fixture._root.path().join("shared/pdf-tools");
     skill_file(
       &elsewhere,
       "SKILL.md",
