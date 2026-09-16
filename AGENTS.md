@@ -63,11 +63,7 @@
 - Update `ROADMAP.md` only from verified evidence. Keep incomplete work active and do not mark stage gates complete until gate evidence exists.
 - Be aware of AI subscription usage limits and reset windows. The parent/current
   agent checks limits directly per `docs/codexbar.md`; never spawn a model-backed
-  subagent solely to monitor usage. Before starting a new substantive slice,
-  apply the default usage policy: below 85% may proceed; at 85-94% do not start
-  another slice and instead finish the current bounded action, verify/push, and
-  prepare a resumable handoff; at 95% or higher finish only the immediate safe
-  action and stop with a handoff.
+  subagent solely to monitor usage.
 
 ## Subagents
 

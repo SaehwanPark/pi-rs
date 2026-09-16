@@ -13,8 +13,8 @@ model-backed subagent solely to monitor usage.
 Use the highest relevant used percentage reported for the active provider.
 
 - **Below 85%:** normal bounded work may continue.
-- **85-94% (soft stop):** do not begin another substantive slice or spawn new model-backed workers. Finish the current bounded action, run necessary verification, push durable state, and prepare a concise resumable handoff.
-- **95% or higher (hard stop):** finish only the immediate safe action, stop ongoing delegated work gracefully, persist current state, and generate a handoff. Do not start additional implementation or review turns.
+- **98-99% (soft stop):** do not begin another substantive slice or spawn new model-backed workers. Finish the current bounded action, run necessary verification, push durable state, and prepare a concise resumable handoff.
+- **99% or higher (hard stop):** finish only the immediate safe action, stop ongoing delegated work gracefully, persist current state, and generate a handoff. Do not start additional implementation or review turns.
 - If usage rises by 20 or more percentage points between adjacent loop-boundary checks, treat the budget as rapidly draining: disable new delegation and finish the current slice even if usage remains below 85%.
 
 Check at these points rather than running a dedicated monitor:
