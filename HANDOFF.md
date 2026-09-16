@@ -3,6 +3,7 @@
 **Status:** blocked pending independent adviser access  
 **Goal:** `mu3dlu6u-udislc`  
 **Repository base:** `main` / `origin/main` at `ca2192e`  
+**Handoff branch:** `handoff/20260916-audit-resume` at `ec56772`  
 **Date:** 2026-09-16 UTC
 
 ## Resume gate
@@ -25,8 +26,10 @@ Do not fabricate adviser findings or a “no further auditing” conclusion.
 | `audits/20260915-001.md` | PR [#85](https://github.com/SaehwanPark/pi-rs/pull/85), merge `4d4d377` | Windows compatibility/portability fixes delivered; adviser access unavailable. |
 | `audits/20260916-002.md` | PR [#86](https://github.com/SaehwanPark/pi-rs/pull/86), merge `5b8aeb4` | Post-merge adviser audit attempt refused before inspection. |
 | `audits/20260916-003.md` | PR [#87](https://github.com/SaehwanPark/pi-rs/pull/87), merge `ca2192e` | Final-audit attempt blocked by the adviser login checkpoint. |
+| `audits/20260916-004.md` | Handoff commit `cfcb643` | Continuation audit refused by the same login checkpoint. |
+| `audits/20260916-005.md` | Handoff commit `ec56772` | Further continuation audit refused by the same login checkpoint. |
 
-All three PRs merged into `main` only after required Ubuntu and macOS CI checks passed.
+PRs #85, #86, and #87 merged into `main` only after the required Ubuntu and macOS CI checks passed. The later audit-attempt records are documentation-only handoff commits; no actionable independent finding was returned.
 
 ## Changes already delivered
 
@@ -80,7 +83,7 @@ PRs #85, #86, and #87 also passed the repository Ubuntu/macOS CI checks.
 ## Guardrails
 
 - The final-audit requirement is still open; `ca2192e` is a delivery checkpoint, not goal
-  completion.
+  completion. The latest durable handoff is `ec56772` on `handoff/20260916-audit-resume`.
 - Never claim hidden reasoning or adviser findings that were not returned.
 - Preserve the one-bounded-slice/one-PR loop and keep audit reports durable in GitHub.
 - Do not commit generated `.pi` goal artifacts or secrets.
