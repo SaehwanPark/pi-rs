@@ -204,6 +204,24 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
+  fn outward_final_symlink_is_refused_before_append() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("important.txt");
+    fs::write(&target, "keep").unwrap();
+    std::os::unix::fs::symlink(&target, dir.path().join("link.txt")).unwrap();
+    let tool = AppendTool::new(Runtime::new(Workspace::new(dir.path()).unwrap()));
+    let mut recorder = Recorder::default();
+    let error = tool
+      .execute(&request("link.txt", "x"), &mut recorder)
+      .unwrap_err();
+    assert!(!error.started);
+    assert!(error.message.contains("outside"), "{}", error.message);
+    assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+  }
+
+  #[cfg(unix)]
+  #[test]
   fn outward_parent_symlink_is_refused_before_append() {
     let dir = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
