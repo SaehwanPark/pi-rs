@@ -106,10 +106,16 @@ impl OpenAiCompat {
       Ok(response) => Ok(response),
       Err(ureq::Error::Status(status, response)) => Err(self::http_failure_from(status, response)),
       Err(_other) if cancel.is_cancelled() => Err(decode::cancelled(false)),
-      Err(other) => Err(decode::transport_failure(
-        &other.to_string(),
-        FailurePhase::WaitingForResponse,
-      )),
+      Err(other) => {
+        let mut failure =
+          decode::transport_failure(&other.to_string(), FailurePhase::WaitingForResponse);
+        // ureq's display text differs across platforms (Windows often says
+        // "operation timed out"), but its source retains the stable IO kind.
+        if is_ureq_timeout(&other) {
+          failure.kind = ModelFailureKind::Timeout;
+        }
+        Err(failure)
+      }
     }
   }
 
@@ -262,6 +268,21 @@ fn is_transient_read_timeout(error: &io::Error) -> bool {
     error.kind(),
     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
   )
+}
+
+fn is_ureq_timeout(error: &ureq::Error) -> bool {
+  let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+  while let Some(error) = current {
+    if let Some(io_error) = error.downcast_ref::<io::Error>()
+      && (io_error.kind() == io::ErrorKind::TimedOut
+        // Windows may preserve WSAETIMEDOUT as an "other" IO kind.
+        || matches!(io_error.raw_os_error(), Some(110 | 10060)))
+    {
+      return true;
+    }
+    current = error.source();
+  }
+  false
 }
 
 fn annotated(failure: &ModelFailure, emitted_output: bool) -> ModelFailure {
