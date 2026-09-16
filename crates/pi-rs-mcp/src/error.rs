@@ -21,6 +21,8 @@ pub enum McpError {
   ProcessExited(Option<i32>),
   /// Execution timed out.
   Timeout,
+  /// Execution was cancelled by the caller.
+  Cancelled,
   /// MCP tool call failed.
   ToolExecution(String),
   /// Protocol version negotiation failed.
@@ -49,6 +51,7 @@ impl fmt::Display for McpError {
         None => write!(f, "MCP process exited unexpectedly"),
       },
       Self::Timeout => write!(f, "MCP operation timed out"),
+      Self::Cancelled => write!(f, "MCP operation was cancelled"),
       Self::ToolExecution(msg) => write!(f, "MCP tool execution error: {msg}"),
       Self::NegotiationFailed(msg) => write!(f, "MCP negotiation failed: {msg}"),
     }

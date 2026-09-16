@@ -16,6 +16,9 @@ pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
 /// Largest error body read from a provider.
 pub(crate) const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+/// Bound a blocking socket read so provider cancellation is observed promptly.
+/// A quiet model stream is allowed to continue across these transient polls.
+const MAX_READ_POLL_MS: u64 = 250;
 
 /// Configuration for one OpenAI-compatible endpoint.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -262,7 +265,12 @@ pub(crate) fn agent_for(config: &ProviderConfig) -> ureq::Agent {
   }
   ureq::builder()
     .timeout_connect(Duration::from_millis(config.connect_timeout_ms.max(1)))
-    .timeout_read(Duration::from_millis(config.read_timeout_ms.max(1)))
+    // ureq exposes a socket timeout rather than a cancellable read handle. Keep
+    // it short and let the SSE reader retry across quiet intervals, so the
+    // caller's CancelToken is never held hostage by the configured idle budget.
+    .timeout_read(Duration::from_millis(
+      config.read_timeout_ms.clamp(1, MAX_READ_POLL_MS),
+    ))
     .try_proxy_from_env(true)
     .build()
 }

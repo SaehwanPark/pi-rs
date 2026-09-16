@@ -325,6 +325,24 @@ mod tests {
     assert!(!std::path::Path::new("/tmp/definitely-not-mine-pi-rs").exists());
   }
 
+  #[cfg(unix)]
+  #[test]
+  fn outward_final_symlink_is_refused_before_replace() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("important.txt");
+    fs::write(&target, "keep").unwrap();
+    std::os::unix::fs::symlink(&target, dir.path().join("link.txt")).unwrap();
+    let tool = WriteTool::new(runtime(&dir));
+    let mut recorder = Recorder::default();
+    let error = tool
+      .execute(&request("link.txt", "overwrite", false), &mut recorder)
+      .unwrap_err();
+    assert!(!error.started);
+    assert!(error.message.contains("outside"), "{}", error.message);
+    assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+  }
+
   #[test]
   fn leaves_no_temporary_files_behind() {
     let dir = tempfile::tempdir().unwrap();

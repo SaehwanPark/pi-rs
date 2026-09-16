@@ -128,6 +128,12 @@ impl OpenAiCompat {
       }
       let event = match stream.next_event() {
         Ok(event) => event,
+        Err(error) if is_transient_read_timeout(&error) => {
+          // The transport uses a short socket timeout as a cancellation poll.
+          // Preserve the partially framed event in SseStream and retry after
+          // checking the token instead of turning a quiet model into failure.
+          continue;
+        }
         Err(error) => {
           // A cancel that lands while blocked in `read` surfaces as an IO
           // error: the user's intent outranks the transport symptom.
@@ -231,6 +237,13 @@ fn decode_chunk(data: &str) -> Result<serde_json::Value, ModelFailure> {
     )
     .with_detail(decode::summarize(data))
   })
+}
+
+fn is_transient_read_timeout(error: &io::Error) -> bool {
+  matches!(
+    error.kind(),
+    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+  )
 }
 
 fn annotated(failure: &ModelFailure, emitted_output: bool) -> ModelFailure {

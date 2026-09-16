@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use pi_rs_core::{
-  Tool, ToolChunk, ToolError, ToolMetadata, ToolOutcome, ToolProgress, ToolRequest,
+  Tool, ToolChunk, ToolError, ToolExecutionContext, ToolMetadata, ToolOutcome, ToolProgress,
+  ToolRequest,
 };
 use serde_json::Value;
 
@@ -79,10 +80,20 @@ impl Tool for McpTool {
     request: &ToolRequest,
     progress: &mut dyn ToolProgress,
   ) -> Result<ToolOutcome, ToolError> {
-    match self
-      .client
-      .call_tool(&self.definition.name, Some(request.arguments.clone()))
-    {
+    self.execute_with_context(request, progress, &ToolExecutionContext::unbounded())
+  }
+
+  fn execute_with_context(
+    &self,
+    request: &ToolRequest,
+    progress: &mut dyn ToolProgress,
+    context: &ToolExecutionContext,
+  ) -> Result<ToolOutcome, ToolError> {
+    match self.client.call_tool_with_context(
+      &self.definition.name,
+      Some(request.arguments.clone()),
+      context,
+    ) {
       Ok(res) => {
         let text = res.text_content();
         if !text.is_empty() {

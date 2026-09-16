@@ -40,7 +40,7 @@ pub mod tool;
 pub mod trace;
 pub mod trust;
 
-pub use bounded::{BoundedLine, LineOverflow, read_bounded_line};
+pub use bounded::{BoundedLine, BoundedLineReader, LineOverflow, read_bounded_line};
 pub use capability::{
   CapabilityGap, EpochReason, ModelAttribution, ModelCapabilities, ModelEpoch, ModelRef,
   ReasoningExposure,
