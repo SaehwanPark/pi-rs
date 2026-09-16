@@ -1648,6 +1648,8 @@ mod tests {
         retained_from: 2,
         retained_messages: 0,
         summary_present: false,
+        replaces_from: None,
+        replaces_through: None,
       }),
       session_message(5, Role::User, Message::user("tail")),
     ];

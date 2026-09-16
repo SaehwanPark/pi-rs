@@ -20,6 +20,9 @@ pub struct StoreTrace {
   /// preceding runtime event opened one. This protects restoration from a
   /// hand-authored completion event with no summary message beside it.
   summary_pending: bool,
+  /// Range opened by the most recent compaction epoch, carried into the compact
+  /// session projection without introducing a second coordinate system.
+  pending_compaction_range: Option<(pi_rs_core::EventSeq, pi_rs_core::EventSeq)>,
 }
 
 impl StoreTrace {
@@ -27,6 +30,7 @@ impl StoreTrace {
     Self {
       session,
       summary_pending: false,
+      pending_compaction_range: None,
     }
   }
 
@@ -51,6 +55,10 @@ impl Trace for StoreTrace {
         self.summary_pending = true;
         None
       }
+      AgentEvent::ContextCompactionEpoch(epoch) => {
+        self.pending_compaction_range = Some((epoch.replaces_from, epoch.replaces_through));
+        None
+      }
       AgentEvent::ModelEpochStarted(epoch) => Some(SessionRecord::Epoch(SessionEpochRecord {
         epoch: epoch.epoch,
         model: epoch.model.clone(),
@@ -71,6 +79,8 @@ impl Trace for StoreTrace {
               completed.level,
               pi_rs_core::ContextLevel::L1Ordinary | pi_rs_core::ContextLevel::L2Phase
             ),
+          replaces_from: self.pending_compaction_range.map(|(from, _)| from),
+          replaces_through: self.pending_compaction_range.map(|(_, through)| through),
         }))
       }
       _ => None,
@@ -80,6 +90,7 @@ impl Trace for StoreTrace {
     }
     if matches!(&envelope.event, AgentEvent::ContextCompactionCompleted(_)) {
       self.summary_pending = false;
+      self.pending_compaction_range = None;
     }
     Ok(())
   }

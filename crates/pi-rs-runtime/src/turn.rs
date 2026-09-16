@@ -5481,6 +5481,8 @@ mod tests {
     assert_eq!(restored.epochs.len(), 1);
     assert_eq!(restored.epochs[0].epoch, 0);
     assert_eq!(restored.compactions.len(), 1);
+    assert_eq!(restored.compactions[0].replaces_from, Some(EventSeq(1)));
+    assert_eq!(restored.compactions[0].replaces_through, Some(EventSeq(7)));
     assert_eq!(restored.context_epoch, 1);
     assert_eq!(
       restored

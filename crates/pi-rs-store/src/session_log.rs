@@ -571,6 +571,8 @@ mod tests {
         retained_from: 0,
         retained_messages: 1,
         summary_present: true,
+        replaces_from: Some(EventSeq(1)),
+        replaces_through: Some(EventSeq(2)),
       }))
       .unwrap();
     log.append(&message("new", 4)).unwrap();

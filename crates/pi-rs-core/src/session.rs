@@ -114,6 +114,13 @@ pub struct SessionCompactionRecord {
   /// records and checkpoint resets leave this false for backward compatibility.
   #[serde(default)]
   pub summary_present: bool,
+  /// Canonical event range replaced by the compaction, when available. These
+  /// optional coordinates align the semantic projection with the trace journal;
+  /// older records only have the legacy session-line field above.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub replaces_from: Option<EventSeq>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub replaces_through: Option<EventSeq>,
 }
 
 /// A checkpoint barrier.
