@@ -65,6 +65,16 @@ impl Trace for StoreTrace {
         reason: epoch.reason.clone(),
       })),
       AgentEvent::ContextCompactionCompleted(completed) => {
+        let has_summary = self.summary_pending
+          && matches!(
+            completed.level,
+            pi_rs_core::ContextLevel::L1Ordinary | pi_rs_core::ContextLevel::L2Phase
+          );
+        let range = if has_summary {
+          self.pending_compaction_range
+        } else {
+          None
+        };
         Some(SessionRecord::Compaction(SessionCompactionRecord {
           context_epoch: completed.context_epoch,
           level: completed.level,
@@ -74,13 +84,9 @@ impl Trace for StoreTrace {
           // recover the model-visible tail without mixing coordinates.
           retained_from: 0,
           retained_messages: completed.retained_messages,
-          summary_present: self.summary_pending
-            && matches!(
-              completed.level,
-              pi_rs_core::ContextLevel::L1Ordinary | pi_rs_core::ContextLevel::L2Phase
-            ),
-          replaces_from: self.pending_compaction_range.map(|(from, _)| from),
-          replaces_through: self.pending_compaction_range.map(|(_, through)| through),
+          summary_present: has_summary,
+          replaces_from: range.map(|(from, _)| from),
+          replaces_through: range.map(|(_, through)| through),
         }))
       }
       _ => None,
