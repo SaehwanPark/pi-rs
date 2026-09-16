@@ -84,12 +84,9 @@ impl BoundedLineReader {
     }
 
     loop {
-      let buffer = match reader.fill_buf() {
-        Ok(buffer) => buffer,
-        // Preserve the partially accumulated line across transient socket
-        // errors. The caller may retry after checking cancellation.
-        Err(error) => return Err(error),
-      };
+      // Preserve the partially accumulated line across transient socket
+      // errors. The caller may retry after checking cancellation.
+      let buffer = reader.fill_buf()?;
       if buffer.is_empty() {
         return if self.line.is_empty() {
           Ok(None)

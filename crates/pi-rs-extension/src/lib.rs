@@ -29,6 +29,7 @@ use serde_json::{Value, json};
 
 const BOOTSTRAP: &str = include_str!("bootstrap.mjs");
 const MAX_RESPONSE_LINE_BYTES: usize = 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 const RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Configuration for the compatibility host. Paths are trusted inputs supplied
@@ -184,6 +185,7 @@ pub struct DispatchResult {
 #[derive(Clone)]
 pub struct ExtensionHost {
   inner: Arc<Mutex<HostInner>>,
+  start_lock: Arc<Mutex<()>>,
 }
 
 struct HostInner {
@@ -250,6 +252,7 @@ impl ExtensionHost {
         tools: BTreeMap::new(),
         commands: BTreeMap::new(),
       })),
+      start_lock: Arc::new(Mutex::new(())),
     }
   }
 
@@ -292,6 +295,10 @@ impl ExtensionHost {
   }
 
   fn start_with_context(&self, context: &ToolExecutionContext) -> Result<(), HostError> {
+    // Serialize startup races without reusing the lifecycle mutex as a protocol
+    // I/O lock. `stop` intentionally does not take this guard, so cancellation
+    // can still tear down a host while its load request is waiting.
+    let _start_guard = self.start_lock.lock().expect("extension start lock");
     let config = {
       let mut h = self.inner.lock().expect("extension host lock");
       if h.status == HostStatus::Ready {
@@ -314,16 +321,22 @@ impl ExtensionHost {
         "extension host start was interrupted".into(),
       ));
     }
-    let process = Arc::new(spawn_process(&config)?);
-    {
-      let mut h = self.inner.lock().expect("extension host lock");
-      h.child = Some(process.clone());
-    }
     let modules: Vec<String> = config
       .modules
       .iter()
       .map(|path| path_to_file_url(path, config.working_directory.as_deref()))
       .collect::<Result<_, _>>()?;
+    let process = match spawn_process(&config) {
+      Ok(process) => Arc::new(process),
+      Err(error) => {
+        self.inner.lock().expect("extension host lock").status = HostStatus::Failed;
+        return Err(error);
+      }
+    };
+    {
+      let mut h = self.inner.lock().expect("extension host lock");
+      h.child = Some(process.clone());
+    }
     let response = process.request("load", json!({"modules": modules}), context);
     let mut h = self.inner.lock().expect("extension host lock");
     match response {
@@ -555,6 +568,7 @@ fn spawn_process(config: &ExtensionHostConfig) -> Result<Process, HostError> {
     child: Mutex::new(child),
   });
   let (sender, receiver) = mpsc::sync_channel(8);
+  let reader_control = Arc::clone(&control);
   let reader = thread::spawn(move || {
     let mut stdout = BufReader::new(stdout);
     let mut lines = BoundedLineReader::new();
@@ -567,6 +581,9 @@ fn spawn_process(config: &ExtensionHostConfig) -> Result<Process, HostError> {
         }
         Ok(None) => break,
         Err(error) => {
+          if let Ok(mut child) = reader_control.child.lock() {
+            terminate_process_tree(&mut child);
+          }
           let _ = sender.send(Err(HostError::Protocol(format!(
             "bounded response read failed: {error}"
           ))));
@@ -611,6 +628,11 @@ impl Process {
     let request = json!({"id": id, "method": method, "params": params});
     let encoded = serde_json::to_vec(&request)
       .map_err(|error| HostError::Io(format!("cannot encode request: {error}")))?;
+    if encoded.len() > MAX_REQUEST_BYTES {
+      return Err(HostError::Protocol(format!(
+        "extension request exceeds {MAX_REQUEST_BYTES} bytes"
+      )));
+    }
     {
       let mut io = self
         .io

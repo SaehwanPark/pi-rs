@@ -89,6 +89,18 @@ impl Tool for McpTool {
     progress: &mut dyn ToolProgress,
     context: &ToolExecutionContext,
   ) -> Result<ToolOutcome, ToolError> {
+    if context.is_cancelled_or_expired() {
+      let message = if context.is_cancelled() {
+        "MCP tool call was cancelled before dispatch"
+      } else {
+        "MCP tool call exceeded its deadline before dispatch"
+      };
+      return Ok(if self.read_only {
+        ToolOutcome::failed(message)
+      } else {
+        ToolOutcome::unknown(message)
+      });
+    }
     match self.client.call_tool_with_context(
       &self.definition.name,
       Some(request.arguments.clone()),

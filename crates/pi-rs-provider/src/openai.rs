@@ -184,9 +184,22 @@ impl OpenAiCompat {
     &self,
     response: ureq::Response,
     sink: &mut dyn ProviderEventSink,
+    cancel: &CancelToken,
   ) -> Result<CompletionUsage, ModelFailure> {
-    let body = read_body(response, crate::config::MAX_ERROR_BODY_BYTES as u64 * 64)
-      .map_err(|error| decode::stream_failure(&error, false).with_model(self.model_ref()))?;
+    if cancel.is_cancelled() {
+      return Err(decode::cancelled(false).with_model(self.model_ref()));
+    }
+    let body =
+      read_body(response, crate::config::MAX_ERROR_BODY_BYTES as u64 * 64).map_err(|error| {
+        if cancel.is_cancelled() {
+          decode::cancelled(false).with_model(self.model_ref())
+        } else {
+          decode::stream_failure(&error, false).with_model(self.model_ref())
+        }
+      })?;
+    if cancel.is_cancelled() {
+      return Err(decode::cancelled(false).with_model(self.model_ref()));
+    }
     let value = decode_chunk(std::str::from_utf8(&body).unwrap_or(""))
       .map_err(|failure| failure.with_model(self.model_ref()))?;
     let mut decoder = Decoder::new(self.config.capabilities.exposed_reasoning);
@@ -300,7 +313,7 @@ impl ModelProvider for OpenAiCompat {
         .map_err(|failure| failure.with_model(model))
     } else {
       self
-        .read_one_shot(response, sink)
+        .read_one_shot(response, sink, cancel)
         .map_err(|failure| failure.with_model(model))
     }
   }
