@@ -86,25 +86,50 @@ impl OpenAiCompat {
   /// Cold path only: the typed failure carries phase and partial-output state, and
   /// boxing it would add indirection to every match without protecting a hot path.
   #[allow(clippy::result_large_err)]
-  fn send(&self, body: &str) -> Result<ureq::Response, ModelFailure> {
-    let mut call = self
-      .agent
-      .post(&self.config.chat_completions_url())
-      .set("content-type", "application/json")
-      .set("accept", "text/event-stream");
-    if let Some(key) = self.config.credential() {
-      call = call.set("authorization", &format!("Bearer {key}"));
-    }
-    for (name, value) in &self.config.headers {
-      call = call.set(name, value);
-    }
-    match call.send_string(body) {
-      Ok(response) => Ok(response),
-      Err(ureq::Error::Status(status, response)) => Err(self::http_failure_from(status, response)),
-      Err(other) => Err(decode::transport_failure(
-        &other.to_string(),
-        FailurePhase::WaitingForResponse,
-      )),
+  fn send(&self, body: &str, cancel: &CancelToken) -> Result<ureq::Response, ModelFailure> {
+    // A short socket poll is needed for cancellation, but a request may also be
+    // queued behind a busy local endpoint. Retry only transient status-line read
+    // timeouts, within the configured logical idle budget; never retry an HTTP
+    // response or another transport class that could represent a semantic error.
+    let deadline = std::time::Instant::now().checked_add(std::time::Duration::from_millis(
+      self.config.read_timeout_ms.max(1),
+    ));
+    loop {
+      let mut call = self
+        .agent
+        .post(&self.config.chat_completions_url())
+        .set("content-type", "application/json")
+        .set("accept", "text/event-stream");
+      if let Some(key) = self.config.credential() {
+        call = call.set("authorization", &format!("Bearer {key}"));
+      }
+      for (name, value) in &self.config.headers {
+        call = call.set(name, value);
+      }
+      match call.send_string(body) {
+        Ok(response) => return Ok(response),
+        Err(ureq::Error::Status(status, response)) => {
+          return Err(self::http_failure_from(status, response));
+        }
+        Err(other) if is_ureq_timeout(&other) => {
+          if cancel.is_cancelled() {
+            return Err(decode::cancelled(false));
+          }
+          if deadline.is_some_and(|deadline| std::time::Instant::now() < deadline) {
+            continue;
+          }
+          return Err(decode::transport_failure(
+            &other.to_string(),
+            FailurePhase::WaitingForResponse,
+          ));
+        }
+        Err(other) => {
+          return Err(decode::transport_failure(
+            &other.to_string(),
+            FailurePhase::WaitingForResponse,
+          ));
+        }
+      }
     }
   }
 
@@ -252,6 +277,17 @@ fn decode_chunk(data: &str) -> Result<serde_json::Value, ModelFailure> {
   })
 }
 
+fn is_ureq_timeout(error: &ureq::Error) -> bool {
+  let ureq::Error::Transport(transport) = error else {
+    return false;
+  };
+  transport.kind() == ureq::ErrorKind::Io
+    && transport
+      .to_string()
+      .to_ascii_lowercase()
+      .contains("timed out")
+}
+
 fn is_transient_read_timeout(error: &io::Error) -> bool {
   matches!(
     error.kind(),
@@ -304,7 +340,7 @@ impl ModelProvider for OpenAiCompat {
       );
     }
     let body = request_body(&self.config, request).to_string();
-    let response = match self.send(&body) {
+    let response = match self.send(&body, cancel) {
       Ok(response) => response,
       Err(_failure) if cancel.is_cancelled() => {
         return Err(decode::cancelled(false).with_model(model));
