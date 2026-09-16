@@ -193,6 +193,15 @@ mod tests {
 
   #[test]
   fn an_endpoint_that_never_blanks_the_line_cannot_grow_the_buffer() {
+    let line = format!("data: {}", "x".repeat(MAX_EVENT_BYTES + 2048));
+    let error = SseStream::new(line.as_bytes())
+      .next_event()
+      .expect_err("oversized line must fail, not allocate");
+    assert!(error.to_string().contains("exceeds"), "{error}");
+  }
+
+  #[test]
+  fn an_event_with_many_data_lines_is_bounded_as_a_whole() {
     let line = format!("data: {}\n", "x".repeat(2048));
     let flood = line.repeat(1_000);
     let error = SseStream::new(flood.as_bytes())

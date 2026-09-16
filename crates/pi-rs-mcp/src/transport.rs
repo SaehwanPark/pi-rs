@@ -197,7 +197,9 @@ impl StdioTransport {
             MAX_STDIO_DIAGNOSTIC_LINE_BYTES,
             LineOverflow::Truncate,
           ) {
-            let mut text = String::from_utf8_lossy(line.as_bytes()).into_owned();
+            let mut text = String::from_utf8_lossy(line.as_bytes())
+              .trim_end_matches(['\n', '\r'])
+              .to_owned();
             if line.is_truncated() {
               text.push_str(" [line truncated]");
             }
