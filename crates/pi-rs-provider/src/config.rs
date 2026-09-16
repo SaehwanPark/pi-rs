@@ -18,7 +18,7 @@ pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub(crate) const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 /// Bound a blocking socket read so provider cancellation is observed promptly.
 /// A quiet model stream is allowed to continue across these transient polls.
-const MAX_READ_POLL_MS: u64 = 250;
+const MAX_READ_POLL_MS: u64 = 2_000;
 
 /// Configuration for one OpenAI-compatible endpoint.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

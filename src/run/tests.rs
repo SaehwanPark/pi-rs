@@ -229,10 +229,13 @@ fn a_cancel_during_a_mutating_tool_leaves_that_call_unknown() {
   assert_eq!(results.len(), 1, "the one call the model asked for");
   let (name, state, text) = &results[0];
   assert_eq!(name, "exec");
-  // The command ran out its whole and `done` is its output, and the state is still
-  // not `Succeeded`: a mutating call interrupted while it was running may be
+  // Cancellation stops the process tree promptly, but the state is still not
+  // `Succeeded`: a mutating call interrupted while it was running may be
   // half-applied, and the runtime does not upgrade its own ignorance.
-  assert!(text.contains("done"), "the command really ran: {text}");
+  assert!(
+    text.contains("cancelled") || text.contains("interrupted"),
+    "the completion boundary names the interruption: {text}"
+  );
   assert_eq!(
     *state,
     ToolExecutionState::Unknown,
