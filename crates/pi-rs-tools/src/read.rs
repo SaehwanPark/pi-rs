@@ -363,7 +363,8 @@ mod tests {
   #[test]
   fn read_only_metadata_allows_replay() {
     use pi_rs_core::{ReplayDecision, ToolExecutionState};
-    let tool = ReadTool::new(Runtime::new(crate::Workspace::new("/tmp").unwrap()));
+    let dir = tempfile::tempdir().unwrap();
+    let tool = ReadTool::new(Runtime::new(crate::Workspace::new(dir.path()).unwrap()));
     let meta = tool.metadata();
     assert!(meta.read_only);
     assert_eq!(
