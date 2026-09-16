@@ -7,7 +7,7 @@ use std::{
 use pi_rs_core::{
   AttributedMessage, CancelToken, CheckpointId, ContextCapsule, EventEnvelope, Message,
   ModelProvider, ModelRef, ReasoningProvenance, RuntimeConfig, SessionEndReason, SessionHeader,
-  SessionId, SinkError, TraceId, TurnId, now_millis,
+  SessionId, SinkError, TraceId, TurnId, TurnStatus, now_millis,
 };
 use pi_rs_provider::{Deferred, OpenAiCompat, ProviderConfig};
 use pi_rs_runtime::{StoreTrace, Trace, TurnError, TurnLoop, TurnProgress, TurnReport};
@@ -266,7 +266,11 @@ impl SessionHandle<'_> {
 
   /// Run one user turn that nothing outside this call can cancel.
   pub fn turn(&mut self, prompt: &str) -> Result<(), TurnError> {
-    self.turn_with(prompt, &CancelToken::new()).map(|_| ())
+    let report = self.turn_with(prompt, &CancelToken::new())?;
+    if report.budget_exhausted {
+      return Err(TurnError::Aborted(TurnStatus::BudgetExhausted));
+    }
+    Ok(())
   }
 
   /// Run one user turn under a cancellation token the caller holds.
@@ -551,6 +555,9 @@ fn surface_options(args: &SurfaceArgs) -> TranscriptOptions {
 fn turn_error(error: &TurnError) -> String {
   match error {
     TurnError::Unavailable(failure) => format!("provider failure: {}", failure.message),
+    TurnError::Aborted(TurnStatus::BudgetExhausted) => {
+      "turn aborted: model request budget exhausted".to_string()
+    }
     TurnError::Aborted(status) => format!("turn aborted: {status:?}"),
     TurnError::Sink(message) => format!("durable sink failure: {message}"),
   }

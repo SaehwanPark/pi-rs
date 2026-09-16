@@ -207,7 +207,7 @@ impl TurnError {
       Self::Unavailable(failure) => Some(failure.kind),
       Self::Aborted(status) => match status {
         TurnStatus::Failed { kind } => Some(*kind),
-        TurnStatus::Completed | TurnStatus::Cancelled => None,
+        TurnStatus::Completed | TurnStatus::Cancelled | TurnStatus::BudgetExhausted => None,
       },
       Self::Sink(_) => None,
     }
@@ -764,7 +764,12 @@ impl<'a> TurnLoop<'a> {
         self.max_requests
       ),
     )?;
-    self.finish(report, TurnStatus::Completed, clock, Some(turn_id.clone()))
+    self.finish(
+      report,
+      TurnStatus::BudgetExhausted,
+      clock,
+      Some(turn_id.clone()),
+    )
   }
 
   /// Close the session explicitly.
@@ -4766,6 +4771,7 @@ mod tests {
       report.budget_exhausted,
       "the loop stopped on budget, not on an answer"
     );
+    assert_eq!(report.status, TurnStatus::BudgetExhausted);
     assert_eq!(report.requests, 3);
     assert!(trace.kinds().iter().any(|kind| kind == "diagnostic"));
     let diagnostics = trace.0.lock().unwrap();

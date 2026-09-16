@@ -502,6 +502,7 @@ pub fn render_event(event: &AgentEvent, options: &TranscriptOptions) -> Vec<Rend
       let (status, role) = match &e.status {
         TurnStatus::Completed => ("completed", Role::StateOk),
         TurnStatus::Cancelled => ("cancelled", Role::Muted),
+        TurnStatus::BudgetExhausted => ("budget exhausted", Role::StateFailed),
         TurnStatus::Failed { kind } => (kind.as_str(), Role::StateFailed),
       };
       line.push(status, role);

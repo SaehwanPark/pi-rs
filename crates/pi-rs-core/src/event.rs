@@ -144,7 +144,11 @@ pub enum SessionEndReason {
 pub enum TurnStatus {
   Completed,
   Cancelled,
-  Failed { kind: ModelFailureKind },
+  /// The turn consumed its request budget without a final model answer.
+  BudgetExhausted,
+  Failed {
+    kind: ModelFailureKind,
+  },
 }
 
 /// Diagnostic severity for [`AgentEvent::Diagnostic`].
