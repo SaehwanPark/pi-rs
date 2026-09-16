@@ -6,6 +6,26 @@
 - **Handoff PR:** [#88](https://github.com/SaehwanPark/pi-rs/pull/88)
 - **Date:** 2026-09-16 UTC
 
+## Current loop 006 — delivery record
+
+This is the current bounded security slice; the older resume gate and history below remain
+for the preceding adviser-blocked goal.
+
+- **Goal:** `mu3hka9c-231p7n`
+- **Branch:** `loop/20260915-improvement-006`
+- **Audit:** [`audits/20260916-006.md`](audits/20260916-006.md)
+- **PR:** [#89](https://github.com/SaehwanPark/pi-rs/pull/89)
+- **Scope:** close durable redaction gaps in raw capture, recovery blobs, and standalone
+  checkpoint capsules.
+- **Disposition:** R-1/R-2/R-3 accepted and fixed in `e671a1f`; audit evidence was updated in
+  `51773c9`.
+- **Verification:** required Rust formatting, check, clippy, workspace tests (52 suites /
+  1,062 tests), docs, targeted store/runtime tests, and the restore benchmark passed locally;
+  required Ubuntu and macOS CI checks are passing on PR #89.
+- **Branch snapshot:** local and `origin/loop/20260915-improvement-006` both point to
+  `51773c9` before merge. After merge, fast-forward local `main` from `origin/main` and
+  retain the PR URL/status as the authoritative merge record.
+
 ## Resume gate
 
 The audit-and-delivery goal is intentionally **not complete**. The required independent
