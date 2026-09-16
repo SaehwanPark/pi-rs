@@ -407,8 +407,10 @@ Open in this area, in order:
 
 ### Session resume optimization
 
-- [x] Resume from latest checkpoint + post-checkpoint events (`continue_context` in `src/run.rs` prepends checkpoint capsule to restored messages).
-- [x] Avoid full historical trace hydration (checkpoint acts as barrier for model context reconstruction).
+- [x] Resume from latest checkpoint + post-checkpoint events (`continue_state` in `src/run.rs` restores the checkpoint capsule and reduced message window).
+- [x] Restore active model epochs, context epochs, cited sequence bounds, and resumed lifecycle state without duplicating epoch 0 (`StoreTrace`, `ResumeState`, and `tests/resume_cli.rs`).
+- [x] Apply durable compaction projections, retain post-checkpoint capsules as impermeable floors, and preserve canonical replacement ranges across resume (`SessionLog::restore` and runtime regression tests).
+- [x] Avoid full historical trace hydration (checkpoint and compaction projections act as barriers for model context reconstruction).
 - [x] Benchmark large-session restore (`bench/large_session.sh` and `crates/pi-rs-store/benches/restore.rs` measure 10, 100, 500, and 1,000 turns with and without checkpoint barriers).
 
 ### Stage gate
@@ -467,6 +469,7 @@ Open in this area, in order:
 - [x] Detect smaller context window.
 - [x] Rebudget/compact before takeover when possible.
 - [x] Refuse impossible failover explicitly.
+- [x] Preserve required capability gates when retry policy tuning replaces a failover policy (`with_required_capabilities` and runtime regression coverage).
 
 ### Side-effect continuity
 
