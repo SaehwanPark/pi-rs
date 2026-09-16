@@ -9,11 +9,14 @@
 //! never coerced into success or failure, and a mutating call in `Unknown` is
 //! never blindly replayed.
 
+use std::time::{Duration, Instant};
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
   ids::ToolCallId,
   message::{ContentBlock, ToolResultBlock},
+  provider::CancelToken,
   trace::BlobRef,
 };
 
@@ -336,6 +339,61 @@ where
   }
 }
 
+/// Execution context shared with one running tool.
+///
+/// The context is deliberately owned by the registry and borrowed by the tool:
+/// cancellation and deadlines therefore travel through every invocation without
+/// making individual tools discover global runtime state. A tool that blocks in
+/// an external boundary must use the token to interrupt that boundary rather
+/// than merely report a different terminal state afterward.
+#[derive(Debug, Clone)]
+pub struct ToolExecutionContext {
+  cancel: CancelToken,
+  deadline: Option<Instant>,
+}
+
+impl ToolExecutionContext {
+  /// Create a context with a cancellation token and wall-clock budget.
+  pub fn new(cancel: CancelToken, timeout: Duration) -> Self {
+    Self {
+      cancel,
+      deadline: Instant::now().checked_add(timeout),
+    }
+  }
+
+  /// Context for direct tool callers that do not impose a runtime budget.
+  pub fn unbounded() -> Self {
+    Self {
+      cancel: CancelToken::new(),
+      deadline: None,
+    }
+  }
+
+  pub fn cancel_token(&self) -> &CancelToken {
+    &self.cancel
+  }
+
+  pub fn is_cancelled(&self) -> bool {
+    self.cancel.is_cancelled()
+  }
+
+  pub fn deadline_expired(&self) -> bool {
+    self
+      .deadline
+      .is_some_and(|deadline| Instant::now() >= deadline)
+  }
+
+  pub fn is_cancelled_or_expired(&self) -> bool {
+    self.is_cancelled() || self.deadline_expired()
+  }
+
+  pub fn remaining(&self) -> Option<Duration> {
+    self
+      .deadline
+      .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+  }
+}
+
 /// One executable tool.
 pub trait Tool: Send + Sync {
   fn metadata(&self) -> ToolMetadata;
@@ -361,6 +419,22 @@ pub trait Tool: Send + Sync {
     request: &ToolRequest,
     progress: &mut dyn ToolProgress,
   ) -> Result<ToolOutcome, ToolError>;
+
+  /// Execute with cancellation and deadline context.
+  ///
+  /// The default delegates to [`Self::execute`] for source compatibility with
+  /// externally supplied tools. Built-in and boundary-backed tools override it
+  /// when they can interrupt their blocking work. The registry always invokes
+  /// this method, so new tools have an explicit upgrade path instead of an
+  /// implicit promise that cancellation stopped their effects.
+  fn execute_with_context(
+    &self,
+    request: &ToolRequest,
+    progress: &mut dyn ToolProgress,
+    _context: &ToolExecutionContext,
+  ) -> Result<ToolOutcome, ToolError> {
+    self.execute(request, progress)
+  }
 
   /// Reconcile an uncertain or interrupted call by inspecting current environment state.
   ///
