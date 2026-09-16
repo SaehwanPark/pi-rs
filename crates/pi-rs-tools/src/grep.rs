@@ -310,6 +310,7 @@ impl Scan {
   }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_dir(
   dir: &Path,
   base: &Path,

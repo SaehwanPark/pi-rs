@@ -192,15 +192,11 @@ impl StdioTransport {
         .spawn(move || {
           let mut reader = BufReader::new(stderr);
           let mut lines = BoundedLineReader::new();
-          loop {
-            let line = match lines.read_line(
-              &mut reader,
-              MAX_STDIO_DIAGNOSTIC_LINE_BYTES,
-              LineOverflow::Truncate,
-            ) {
-              Ok(Some(line)) => line,
-              Ok(None) | Err(_) => break,
-            };
+          while let Ok(Some(line)) = lines.read_line(
+            &mut reader,
+            MAX_STDIO_DIAGNOSTIC_LINE_BYTES,
+            LineOverflow::Truncate,
+          ) {
             let mut text = String::from_utf8_lossy(line.as_bytes()).into_owned();
             if line.is_truncated() {
               text.push_str(" [line truncated]");
