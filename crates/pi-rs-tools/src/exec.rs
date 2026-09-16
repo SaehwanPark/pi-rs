@@ -311,8 +311,6 @@ fn shell_command(command: &str) -> Command {
 
 #[cfg(test)]
 mod tests {
-  use std::path::Path;
-
   use pi_rs_core::{ToolCallId, ToolExecutionState};
 
   use super::*;
@@ -322,6 +320,11 @@ mod tests {
     let mut runtime = Runtime::new(Workspace::new(dir.path()).unwrap());
     runtime.shell_timeout_ms = 2_000;
     runtime
+  }
+
+  fn normalize_path(path: &str) -> String {
+    let path = path.trim().replace('\\', "/");
+    path.strip_prefix("//?/").unwrap_or(&path).to_string()
   }
 
   fn request(arguments: serde_json::Value) -> ToolRequest {
@@ -350,7 +353,11 @@ mod tests {
   #[test]
   fn reports_a_nonzero_exit_as_a_failure_with_the_code() {
     let dir = tempfile::tempdir().unwrap();
-    let outcome = exec(&dir, json!({"command": "echo boom; exit 7"}));
+    #[cfg(windows)]
+    let command = "echo boom & exit /b 7";
+    #[cfg(not(windows))]
+    let command = "echo boom; exit 7";
+    let outcome = exec(&dir, json!({"command": command}));
     assert!(outcome.is_error);
     assert!(outcome.text.contains("boom"), "{}", outcome.text);
     assert_eq!(outcome.status, Some(7));
@@ -367,19 +374,14 @@ mod tests {
   #[test]
   fn runs_in_the_workspace_by_default() {
     let dir = tempfile::tempdir().unwrap();
-    let outcome = exec(&dir, json!({"command": "pwd"}));
-    let expected = dir.path().canonicalize().unwrap();
-    let actual = Path::new(outcome.text.trim().lines().next().unwrap_or(""));
-    let _ = actual.canonicalize(); // /var -> /private/var on macOS
-    assert!(
-      actual.starts_with(&expected)
-        || outcome
-          .text
-          .contains(&expected.to_string_lossy().to_string()),
-      "{} vs {}",
-      outcome.text,
-      expected.display()
-    );
+    #[cfg(windows)]
+    let command = "cd";
+    #[cfg(not(windows))]
+    let command = "pwd";
+    let outcome = exec(&dir, json!({"command": command}));
+    let expected = normalize_path(&dir.path().canonicalize().unwrap().to_string_lossy());
+    let actual = normalize_path(outcome.text.trim().lines().next().unwrap_or(""));
+    assert_eq!(actual, expected, "{} vs {}", outcome.text, expected);
   }
 
   #[test]

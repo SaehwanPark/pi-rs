@@ -561,6 +561,10 @@ mod tests {
     tool.execute(&request(arguments), &mut recorder).unwrap()
   }
 
+  fn slash_text(text: &str) -> String {
+    text.replace('\\', "/")
+  }
+
   fn fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -592,7 +596,8 @@ mod tests {
   fn finds_matches_with_paths_and_line_numbers() {
     let dir = fixture();
     let outcome = grep(&dir, json!({"pattern": "needle_value"}));
-    assert!(outcome.text.contains("src/main.rs:2:"), "{}", outcome.text);
+    let text = slash_text(&outcome.text);
+    assert!(text.contains("src/main.rs:2:"), "{}", outcome.text);
     assert!(!outcome.is_error);
   }
 
@@ -600,13 +605,11 @@ mod tests {
   fn skips_build_and_dependency_directories() {
     let dir = fixture();
     let outcome = grep(&dir, json!({"pattern": "needle"}));
-    assert!(outcome.text.contains("src/lib.rs"), "workspace match");
-    assert!(outcome.text.contains("README.md"), "workspace match");
-    assert!(
-      !outcome.text.contains("node_modules"),
-      "dependency dirs skipped"
-    );
-    assert!(!outcome.text.contains("target/"), "build dirs skipped");
+    let text = slash_text(&outcome.text);
+    assert!(text.contains("src/lib.rs"), "workspace match");
+    assert!(text.contains("README.md"), "workspace match");
+    assert!(!text.contains("node_modules"), "dependency dirs skipped");
+    assert!(!text.contains("target/"), "build dirs skipped");
   }
 
   #[test]
@@ -705,7 +708,11 @@ mod tests {
 
     // A relative walk inside the root is still allowed.
     let inside = grep(&dir, json!({"pattern": "needle", "path": "src"}));
-    assert!(inside.text.contains("src/lib.rs"), "{}", inside.text);
+    assert!(
+      slash_text(&inside.text).contains("src/lib.rs"),
+      "{}",
+      inside.text
+    );
   }
 
   #[test]

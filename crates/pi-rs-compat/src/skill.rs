@@ -557,6 +557,10 @@ fn nonempty(value: Option<&str>) -> Option<String> {
 mod tests {
   use super::*;
 
+  fn slash_path(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+  }
+
   /// A skill file written where the caller says, named after its directory.
   fn skill_file(dir: &Path, file: &str, name: &str, description: &str) -> PathBuf {
     let path = dir.join(file);
@@ -584,7 +588,7 @@ mod tests {
   /// A scenario with its own fake `$HOME`, its own project, and no shared state.
   struct Fixture {
     /// The scenario's root. Held so the directories outlive the scan.
-    root: tempfile::TempDir,
+    _root: tempfile::TempDir,
     home: PathBuf,
     project: PathBuf,
   }
@@ -597,7 +601,7 @@ mod tests {
       fs::create_dir_all(&home).unwrap();
       fs::create_dir_all(&project).unwrap();
       Self {
-        root: temp,
+        _root: temp,
         home,
         project,
       }
@@ -887,7 +891,7 @@ mod tests {
     // The normal way to share one skill between checkouts: keep it somewhere else and
     // link it into the location. Refusing links would silently lose it.
     let fixture = Fixture::new();
-    let elsewhere = fixture.root.path().join("shared/pdf-tools");
+    let elsewhere = fixture._root.path().join("shared/pdf-tools");
     skill_file(
       &elsewhere,
       "SKILL.md",
@@ -950,8 +954,9 @@ mod tests {
     ] {
       assert!(prompt.contains(expected), "missing '{expected}':\n{prompt}");
     }
+    let normalized_prompt = prompt.replace('\\', "/");
     assert!(
-      prompt.contains(&format!("<location>{}</location>", path.display())),
+      normalized_prompt.contains(&format!("<location>{}</location>", slash_path(&path))),
       "the model is told to read a file, so it has to be given the one path that works:\n{prompt}"
     );
     assert!(!prompt.starts_with('\n'), "the caller joins:\n{prompt}");

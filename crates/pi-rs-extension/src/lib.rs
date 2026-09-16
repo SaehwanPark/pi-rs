@@ -634,6 +634,26 @@ fn path_to_file_url(path: &Path, working_directory: Option<&Path>) -> Result<Str
   let text = canonical
     .to_str()
     .ok_or_else(|| HostError::InvalidModule("module path is not UTF-8".into()))?;
+  // Windows canonical paths may use backslashes or the extended-length `\\?\\` prefix.
+  // Normalize those forms before escaping so Node receives an absolute file URL rather
+  // than a URL with an invalid drive/host component.
+  #[cfg(windows)]
+  let (prefix, text) = {
+    let mut text = text.replace('\\', "/");
+    if let Some(rest) = text.strip_prefix("//?/UNC/") {
+      text = format!("//{rest}");
+    } else if let Some(rest) = text.strip_prefix("//?/") {
+      text = rest.to_string();
+    }
+    if text.starts_with("//") {
+      ("file:", text)
+    } else {
+      ("file://", format!("/{text}"))
+    }
+  };
+  #[cfg(not(windows))]
+  let (prefix, text) = ("file://", text.to_owned());
+
   // Encode every byte that is not safe in a file URL. In particular, '?' must
   // not become a query separator and '#' must not become a fragment.
   let mut escaped = String::with_capacity(text.len());
@@ -646,7 +666,7 @@ fn path_to_file_url(path: &Path, working_directory: Option<&Path>) -> Result<Str
       escaped.push(char::from(b"0123456789ABCDEF"[(byte & 0x0F) as usize]));
     }
   }
-  Ok(format!("file://{escaped}"))
+  Ok(format!("{prefix}{escaped}"))
 }
 
 #[cfg(test)]
@@ -664,6 +684,15 @@ mod tests {
     let host = ExtensionHost::new(ExtensionHostConfig::new(["missing.txt"]));
     assert!(matches!(host.start(), Err(HostError::InvalidModule(_))));
     assert_eq!(host.status(), HostStatus::Failed);
+  }
+
+  #[test]
+  fn file_urls_are_absolute_on_all_platforms() {
+    let module = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+      .join("../../tests/compat/extensions/phase8-fixture.ts");
+    let url = path_to_file_url(&module, None).unwrap();
+    assert!(url.starts_with("file:///"), "{url}");
+    assert!(!url.contains('\\'), "{url}");
   }
 
   #[test]

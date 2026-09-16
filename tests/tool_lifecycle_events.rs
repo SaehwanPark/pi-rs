@@ -263,7 +263,7 @@ fn tool_turn_records() -> Vec<Record> {
   let workspace = temp.path().join("workspace");
   fs::create_dir(&workspace).expect("create workspace");
   #[cfg(windows)]
-  let exec_cmd = r#"{"command":"<nul set /p=executed>exec.txt"}"#;
+  let exec_cmd = r#"{"command":"set /p=executed<nul>exec.txt&exit /b 0"}"#;
   #[cfg(not(windows))]
   let exec_cmd = r#"{"command":"printf executed > exec.txt"}"#;
 
