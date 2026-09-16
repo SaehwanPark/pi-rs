@@ -87,49 +87,29 @@ impl OpenAiCompat {
   /// boxing it would add indirection to every match without protecting a hot path.
   #[allow(clippy::result_large_err)]
   fn send(&self, body: &str, cancel: &CancelToken) -> Result<ureq::Response, ModelFailure> {
-    // A short socket poll is needed for cancellation, but a request may also be
-    // queued behind a busy local endpoint. Retry only transient status-line read
-    // timeouts, within the configured logical idle budget; never retry an HTTP
-    // response or another transport class that could represent a semantic error.
-    let deadline = std::time::Instant::now().checked_add(std::time::Duration::from_millis(
-      self.config.read_timeout_ms.max(1),
-    ));
-    loop {
-      let mut call = self
-        .agent
-        .post(&self.config.chat_completions_url())
-        .set("content-type", "application/json")
-        .set("accept", "text/event-stream");
-      if let Some(key) = self.config.credential() {
-        call = call.set("authorization", &format!("Bearer {key}"));
-      }
-      for (name, value) in &self.config.headers {
-        call = call.set(name, value);
-      }
-      match call.send_string(body) {
-        Ok(response) => return Ok(response),
-        Err(ureq::Error::Status(status, response)) => {
-          return Err(self::http_failure_from(status, response));
-        }
-        Err(other) if is_ureq_timeout(&other) => {
-          if cancel.is_cancelled() {
-            return Err(decode::cancelled(false));
-          }
-          if deadline.is_some_and(|deadline| std::time::Instant::now() < deadline) {
-            continue;
-          }
-          return Err(decode::transport_failure(
-            &other.to_string(),
-            FailurePhase::WaitingForResponse,
-          ));
-        }
-        Err(other) => {
-          return Err(decode::transport_failure(
-            &other.to_string(),
-            FailurePhase::WaitingForResponse,
-          ));
-        }
-      }
+    // A bounded socket read is only a cancellation poll. Once request bytes may
+    // have reached the endpoint, this adapter must not issue the same POST again:
+    // the runtime owns retries, records them as ModelRetry, and can make the
+    // ambiguous request boundary visible to callers.
+    let mut call = self
+      .agent
+      .post(&self.config.chat_completions_url())
+      .set("content-type", "application/json")
+      .set("accept", "text/event-stream");
+    if let Some(key) = self.config.credential() {
+      call = call.set("authorization", &format!("Bearer {key}"));
+    }
+    for (name, value) in &self.config.headers {
+      call = call.set(name, value);
+    }
+    match call.send_string(body) {
+      Ok(response) => Ok(response),
+      Err(ureq::Error::Status(status, response)) => Err(self::http_failure_from(status, response)),
+      Err(_other) if cancel.is_cancelled() => Err(decode::cancelled(false)),
+      Err(other) => Err(decode::transport_failure(
+        &other.to_string(),
+        FailurePhase::WaitingForResponse,
+      )),
     }
   }
 
@@ -275,17 +255,6 @@ fn decode_chunk(data: &str) -> Result<serde_json::Value, ModelFailure> {
     )
     .with_detail(decode::summarize(data))
   })
-}
-
-fn is_ureq_timeout(error: &ureq::Error) -> bool {
-  let ureq::Error::Transport(transport) = error else {
-    return false;
-  };
-  transport.kind() == ureq::ErrorKind::Io
-    && transport
-      .to_string()
-      .to_ascii_lowercase()
-      .contains("timed out")
 }
 
 fn is_transient_read_timeout(error: &io::Error) -> bool {
