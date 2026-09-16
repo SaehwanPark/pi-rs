@@ -9,7 +9,12 @@
 use std::{
   io::{Read, Write},
   net::{SocketAddr, TcpListener, TcpStream},
+  sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+  },
   thread,
+  time::{Duration, Instant},
 };
 
 use pi_rs_core::{
@@ -532,6 +537,72 @@ fn a_quiet_stream_retries_socket_polls_without_losing_a_partial_sse_line() {
       .any(|event| matches!(event, ProviderEvent::TextDelta(text) if text == "quiet"))
   );
   server.join().expect("server");
+}
+
+#[test]
+fn a_pre_header_timeout_does_not_resubmit_the_same_post() {
+  // The response headers are deliberately later than the adapter's bounded
+  // socket poll. The original request may already be queued or generating, so
+  // the provider must return one ambiguous transport failure rather than hiding
+  // duplicate POSTs inside its own polling loop.
+  let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+  let addr = listener.local_addr().expect("addr");
+  listener
+    .set_nonblocking(true)
+    .expect("nonblocking listener");
+  let accepted = Arc::new(AtomicUsize::new(0));
+  let accepted_by_server = Arc::clone(&accepted);
+  let server = thread::spawn(move || {
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let (mut first, _) = loop {
+      match listener.accept() {
+        Ok(connection) => break connection,
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+          assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the first request"
+          );
+          thread::sleep(Duration::from_millis(5));
+        }
+        Err(error) => panic!("accept first request: {error}"),
+      }
+    };
+    accepted_by_server.fetch_add(1, Ordering::SeqCst);
+    let _ = drain_request(&mut first);
+    let delayed = thread::spawn(move || {
+      thread::sleep(Duration::from_millis(2_500));
+      let _ = first.write_all(complete_sse("").as_bytes());
+      let _ = first.flush();
+    });
+
+    // An implementation that silently retries will connect again during the
+    // delay. Keep accepting long enough to count those connections, but do not
+    // answer them: one provider attempt must remain one HTTP POST.
+    while Instant::now() < deadline {
+      match listener.accept() {
+        Ok((mut socket, _)) => {
+          accepted_by_server.fetch_add(1, Ordering::SeqCst);
+          let _ = drain_request(&mut socket);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+          thread::sleep(Duration::from_millis(5));
+        }
+        Err(error) => panic!("accept follow-up request: {error}"),
+      }
+    }
+    delayed.join().expect("delayed response");
+    accepted.load(Ordering::SeqCst)
+  });
+
+  let adapter = adapter(&format!("http://{addr}/v1"), None);
+  let (result, _) = stream(&adapter, &request("delayed headers"));
+  let failure = result.expect_err("a response that missed the poll is not a completion");
+  assert_eq!(failure.kind, ModelFailureKind::Timeout);
+  assert_eq!(
+    server.join().expect("server"),
+    1,
+    "only one POST is accepted"
+  );
 }
 
 #[test]

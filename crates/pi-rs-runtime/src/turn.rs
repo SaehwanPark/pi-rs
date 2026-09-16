@@ -27,7 +27,7 @@ use pi_rs_core::{
   CapabilityGap, CapsuleArtifact, CapsuleDecision, CheckpointCreated, CheckpointId, ContentBlock,
   ContextAction, ContextCapsule, ContextCompactionCompleted, ContextCompactionEpoch,
   ContextCompactionStarted, ContextLevel, ContextPolicy, ContextReduced, ContextState, Diagnostic,
-  DiagnosticLevel, EpochReason, EventEnvelope, EventMeta, EventSink, ExternalContextItem,
+  DiagnosticLevel, EpochReason, EventEnvelope, EventMeta, EventSeq, EventSink, ExternalContextItem,
   ExternalContextRetrieved, FailurePhase, Message, ModelCapabilities, ModelEpoch,
   ModelEpochStarted, ModelFailover, ModelFailure, ModelFailureKind, ModelProvider, ModelRef,
   ModelRequest, ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta,
@@ -65,6 +65,25 @@ pub enum CheckpointStrategy {
 
 /// Custom checkpointer function alias.
 pub type Checkpointer = Arc<dyn Fn(&[Message], &ContextState) -> ContextCapsule + Send + Sync>;
+
+/// Durable state required to reopen a loop without resetting its model or context
+/// timeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeState {
+  /// The model-visible window, already reduced past the latest checkpoint and
+  /// compaction boundaries.
+  pub messages: Vec<Message>,
+  /// All model epochs in durable order, including the active epoch.
+  pub epochs: Vec<ModelEpoch>,
+  /// Next context-compaction epoch to continue from.
+  pub context_epoch: u32,
+  /// Leading messages that belong to the latest checkpoint capsule and may not
+  /// be crossed by ordinary compaction.
+  pub checkpoint_floor: usize,
+  /// Canonical event range inherited from the prior process, used by the next
+  /// compaction to cite the history it replaces.
+  pub cited_history: Option<(EventSeq, EventSeq)>,
+}
 
 /// How many model round-trips one user input may take.
 ///
@@ -207,7 +226,7 @@ impl TurnError {
       Self::Unavailable(failure) => Some(failure.kind),
       Self::Aborted(status) => match status {
         TurnStatus::Failed { kind } => Some(*kind),
-        TurnStatus::Completed | TurnStatus::Cancelled => None,
+        TurnStatus::Completed | TurnStatus::Cancelled | TurnStatus::BudgetExhausted => None,
       },
       Self::Sink(_) => None,
     }
@@ -310,7 +329,15 @@ pub struct TurnLoop<'a> {
   /// recovery loop cannot outlive the budget it is supposed to respect.
   requests: AtomicUsize,
   session_started: bool,
+  /// Whether the first lifecycle event belongs to a continuation of an existing
+  /// durable journal rather than a newly created session.
+  resumed: bool,
   context_epoch: u32,
+  /// Leading checkpoint capsule messages protected from ordinary compaction.
+  checkpoint_floor: usize,
+  /// First canonical sequence after the latest checkpoint barrier. This keeps
+  /// later compactions from claiming that an impermeable capsule was replaced.
+  checkpoint_cited_from: Option<EventSeq>,
   /// When this loop last shed model-visible history, for the policy's compaction
   /// cooldown. `None` until the first eviction; a loop that has never compacted
   /// has waited longer than any cooldown.
@@ -366,7 +393,10 @@ impl<'a> TurnLoop<'a> {
       max_requests: MAX_MODEL_REQUESTS_PER_TURN,
       requests: AtomicUsize::new(0),
       session_started: false,
+      resumed: false,
       context_epoch: 0,
+      checkpoint_floor: 0,
+      checkpoint_cited_from: None,
       last_compaction: None,
       measured_input_tokens: None,
       envelopes: Vec::new(),
@@ -404,7 +434,20 @@ impl<'a> TurnLoop<'a> {
         .backup_capabilities
         .clone_from(&self.failover.backup_capabilities);
     }
+    // `required` describes the session, not the retry tuning. Replacing a policy
+    // with `FailoverPolicy::default()` must not silently lower the capability gate
+    // from the primary's actual requirements to the text-only baseline.
+    policy.required.clone_from(&self.failover.required);
     self.failover = policy;
+    self
+  }
+
+  /// Override the capability snapshot a failover policy must preserve.
+  ///
+  /// This is intentionally separate from [`Self::with_failover`], whose purpose
+  /// is to tune retry/takeover behavior without changing what the session needs.
+  pub fn with_required_capabilities(mut self, required: ModelCapabilities) -> Self {
+    self.failover.required = required;
     self
   }
 
@@ -448,6 +491,59 @@ impl<'a> TurnLoop<'a> {
   pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
     self.messages = messages;
     self
+  }
+
+  /// Restore the model and context state projected by a durable session.
+  ///
+  /// The active epoch must name either the configured primary or attached backup;
+  /// silently falling back to the primary would change both provenance and the
+  /// model-visible continuation. Epoch indices are checked before any request can
+  /// be sent.
+  pub fn with_resume_state(mut self, state: ResumeState) -> Result<Self, TurnError> {
+    if state.epochs.is_empty() {
+      return Err(TurnError::Sink(
+        "cannot resume a session without a model epoch".to_string(),
+      ));
+    }
+    if state.epochs[0].index != 0
+      || state
+        .epochs
+        .windows(2)
+        .any(|epochs| epochs[1].index <= epochs[0].index)
+    {
+      return Err(TurnError::Sink(
+        "cannot resume a session with non-monotonic model epochs".to_string(),
+      ));
+    }
+    let active = state.epochs.last().expect("non-empty epochs");
+    let active_is_primary = active.model == *self.primary.model();
+    let active_is_backup = self
+      .backup
+      .is_some_and(|backup| active.model == *backup.model());
+    if !active_is_primary && !active_is_backup {
+      return Err(TurnError::Sink(format!(
+        "cannot resume session: active model {} is not configured",
+        active.model
+      )));
+    }
+    self.epochs = state
+      .epochs
+      .into_iter()
+      .map(|epoch| Epoch {
+        index: epoch.index,
+        model: epoch.model,
+        capabilities: epoch.capabilities,
+        reason: epoch.reason,
+      })
+      .collect();
+    self.messages = state.messages;
+    self.context_epoch = state.context_epoch;
+    self.checkpoint_floor = state.checkpoint_floor.min(self.messages.len());
+    self.history = state.cited_history;
+    self.checkpoint_cited_from = (self.checkpoint_floor > 0)
+      .then(|| self.history.map(|(first, _)| first).unwrap_or(EventSeq(1)));
+    self.resumed = true;
+    Ok(self)
   }
 
   /// Set the compaction strategy when context policy recommends compaction.
@@ -515,6 +611,7 @@ impl<'a> TurnLoop<'a> {
 
   /// Manually switch active generation to the configured backup model.
   pub fn failover_manual(&mut self) -> Result<ModelEpoch, TurnError> {
+    self.ensure_session_started()?;
     let Some(backup) = self.backup else {
       return Err(TurnError::Sink("no backup model configured".to_string()));
     };
@@ -566,6 +663,7 @@ impl<'a> TurnLoop<'a> {
 
   /// Manually switch active generation back to the primary model.
   pub fn switch_back_manual(&mut self) -> Result<ModelEpoch, TurnError> {
+    self.ensure_session_started()?;
     if self.active_model() == *self.primary.model() {
       return Err(TurnError::Sink(format!(
         "primary model {} is already active",
@@ -764,7 +862,12 @@ impl<'a> TurnLoop<'a> {
         self.max_requests
       ),
     )?;
-    self.finish(report, TurnStatus::Completed, clock, Some(turn_id.clone()))
+    self.finish(
+      report,
+      TurnStatus::BudgetExhausted,
+      clock,
+      Some(turn_id.clone()),
+    )
   }
 
   /// Close the session explicitly.
@@ -796,16 +899,26 @@ impl<'a> TurnLoop<'a> {
       return Ok(());
     }
     self.session_started = true;
-    let epoch = self.epochs[0].clone();
+    let epoch = if self.resumed {
+      self.epochs[self.epochs.len() - 1].clone()
+    } else {
+      self.epochs[0].clone()
+    };
     self.emit(
       None,
       AgentEvent::SessionStarted(SessionStarted {
         working_dir: self.working_dir.clone(),
         model: epoch.model.clone(),
         capabilities: epoch.capabilities.clone(),
-        resumed: false,
+        resumed: self.resumed,
       }),
     )?;
+    if self.resumed {
+      // Prior epochs already exist in the durable journal. Re-emitting epoch 0
+      // would create a duplicate identity and make the resumed timeline appear
+      // to move backwards.
+      return Ok(());
+    }
     self
       .emit(
         None,
@@ -841,14 +954,14 @@ impl<'a> TurnLoop<'a> {
 
   /// The oldest journal position this loop can cite.
   ///
-  /// A compaction replaces the whole model-visible window: everything from the
-  /// start of the journal, whether the records were written by this process or
-  /// restored before it started. That is always position one of a durable
-  /// session, and `EventSeq(0)` for a purely in-memory loop with no journal.
+  /// A compaction replaces the ordinary model-visible prefix, whether those
+  /// records were written by this process or restored before it started. After
+  /// a checkpoint, the protected capsule establishes a newer citation floor;
+  /// `EventSeq(0)` remains the marker for a purely in-memory loop.
   fn first_cited_seq(&self) -> pi_rs_core::EventSeq {
     self
-      .history
-      .map(|(first, _)| first)
+      .checkpoint_cited_from
+      .or_else(|| self.history.map(|(first, _)| first))
       .or_else(|| {
         self
           .envelopes
@@ -968,7 +1081,8 @@ impl<'a> TurnLoop<'a> {
     turn_history_start: &mut usize,
   ) -> Result<bool, TurnError> {
     let prefix_end = (*turn_history_start).min(self.messages.len());
-    if prefix_end == 0 {
+    let protected = self.checkpoint_floor.min(prefix_end);
+    if prefix_end <= protected {
       self.diagnostic(
         Some(turn_id.clone()),
         DiagnosticLevel::Warn,
@@ -1001,7 +1115,8 @@ impl<'a> TurnLoop<'a> {
       }
     }
 
-    let prefix = self.messages[..prefix_end].to_vec();
+    let prefix = self.messages[protected..prefix_end].to_vec();
+    let protected_messages = self.messages[..protected].to_vec();
     let suffix = self.messages[prefix_end..].to_vec();
     let source = match &self.summarizer {
       Some(summarizer) => summarizer(&prefix),
@@ -1015,7 +1130,8 @@ impl<'a> TurnLoop<'a> {
     let mut accepted = None;
     for _ in 0..=64 {
       let summary = truncate_utf8_to_bytes(&source, summary_bytes).to_string();
-      let mut candidate_messages = Vec::with_capacity(suffix.len() + 1);
+      let mut candidate_messages = Vec::with_capacity(protected_messages.len() + suffix.len() + 1);
+      candidate_messages.extend(protected_messages.iter().cloned());
       candidate_messages.push(Message::user(summary.clone()));
       candidate_messages.extend(suffix.iter().cloned());
       let request = self.assemble_request(candidate_messages);
@@ -1053,10 +1169,13 @@ impl<'a> TurnLoop<'a> {
     if replaced == 0 {
       return Ok(false);
     }
-    // The prefix was replaced by exactly one summary message. The suffix captured
-    // above is therefore now the complete current-turn tail.
-    *turn_history_start = 1;
-    debug_assert_eq!(self.messages.get(1..), Some(suffix.as_slice()));
+    // The ordinary prefix was replaced by exactly one summary message. The
+    // checkpoint floor and the captured current-turn tail remain verbatim.
+    *turn_history_start = self.checkpoint_floor.saturating_add(1);
+    debug_assert_eq!(
+      self.messages.get(self.checkpoint_floor.saturating_add(1)..),
+      Some(suffix.as_slice())
+    );
     Ok(true)
   }
 
@@ -1460,14 +1579,14 @@ impl<'a> TurnLoop<'a> {
     turn_history_start: &mut usize,
   ) -> Result<u32, TurnError> {
     let before = estimate_messages(&self.messages);
-    let protected = (*turn_history_start).min(self.messages.len());
-    // `protected` is the number of messages before the current-turn suffix;
-    // the suffix itself is the portion that must remain resident.
-    let minimum_len = if protected == 0 {
-      self.messages.len()
-    } else {
-      self.messages.len() - protected
-    };
+    let turn_start = (*turn_history_start).min(self.messages.len());
+    // The current-turn suffix and a restored checkpoint capsule are both
+    // non-evictable. The latter is a durable barrier, not ordinary history.
+    let current_turn = self.messages.len() - turn_start;
+    let checkpoint = self.checkpoint_floor.min(self.messages.len());
+    let minimum_len = current_turn
+      .saturating_add(checkpoint)
+      .min(self.messages.len());
     let mut dropped = 0usize;
     while estimate_messages(&self.messages[dropped..]) > target
       && self.messages.len().saturating_sub(dropped) > minimum_len
@@ -1496,9 +1615,13 @@ impl<'a> TurnLoop<'a> {
       )?;
       self.messages.drain(..dropped);
       if *turn_history_start > 0 {
-        *turn_history_start = (*turn_history_start).saturating_sub(dropped);
+        *turn_history_start = (*turn_history_start)
+          .saturating_sub(dropped)
+          .max(self.checkpoint_floor.min(self.messages.len()));
       }
-      self.context_epoch = self.context_epoch.saturating_add(1);
+      // L0 eviction is payload/history reduction, not a compaction epoch. The
+      // durable context epoch advances only when an L1/L2 summary or L3
+      // checkpoint establishes a new semantic window.
       self.last_compaction = Some(Instant::now());
       return Ok(dropped_count);
     }
@@ -1520,11 +1643,11 @@ impl<'a> TurnLoop<'a> {
   /// - a `ContextCompactionEpoch` opens in the journal, naming the summary
   ///   payload and the inclusive range of journal positions it replaces, so
   ///   "the model saw a summary" is auditable and reversible in principle;
-  /// - the live context becomes the retained tail plus the summary.
+  /// - the live context becomes the retained tail plus the summary (while a
+  ///   restored checkpoint capsule remains at the protected front).
   ///
-  /// Restoration does not yet consume epoch records: a resumed session replays
-  /// the full log, which is correct but not compact. That consumption belongs
-  /// with the reduction policy that will call this at window pressure.
+  /// The session projection records the same transition so resume can restore
+  /// the reduced window without replaying or silently re-expanding history.
   pub fn compact(
     &mut self,
     turn_id: &TurnId,
@@ -1582,9 +1705,11 @@ impl<'a> TurnLoop<'a> {
     reason: String,
   ) -> Result<u32, TurnError> {
     let prefix_end = prefix_end.min(self.messages.len());
-    if prefix_end == 0 {
+    let protected = self.checkpoint_floor.min(self.messages.len());
+    if prefix_end <= protected {
       return Ok(0);
     }
+    let replaced = prefix_end - protected;
     let retained = self.messages.len() - prefix_end;
     let replaces_from = self.first_cited_seq();
     let replaces_through = self.last_cited_seq();
@@ -1596,7 +1721,9 @@ impl<'a> TurnLoop<'a> {
     )?;
 
     // Persist the summary before deleting replaced live context. It is a user
-    // message because providers accept that role mid-conversation.
+    // message because providers accept that role mid-conversation. A checkpoint
+    // capsule at the front is an impermeable floor: only messages after it may
+    // be replaced by this ordinary compaction.
     let summary_message = Message::user(summary);
     self.emit_message(
       Some(turn_id.clone()),
@@ -1617,16 +1744,18 @@ impl<'a> TurnLoop<'a> {
       Some(turn_id.clone()),
       AgentEvent::ContextCompactionCompleted(ContextCompactionCompleted {
         level,
-        removed_messages: prefix_end as u32,
+        removed_messages: replaced as u32,
         retained_messages: retained as u32,
         context_epoch: next_epoch,
       }),
     )?;
 
-    self.messages.splice(0..prefix_end, [summary_message]);
+    self
+      .messages
+      .splice(protected..prefix_end, [summary_message]);
     self.context_epoch = next_epoch;
     self.last_compaction = Some(Instant::now());
-    Ok(prefix_end as u32)
+    Ok(replaced as u32)
   }
 
   /// Compact oldest messages using either an explicit summary or a synthesized one.
@@ -1656,7 +1785,9 @@ impl<'a> TurnLoop<'a> {
     let summary_text = match explicit_summary {
       Some(text) => text.to_string(),
       None => {
-        let slice = &self.messages[..removed];
+        let protected = self.checkpoint_floor.min(self.messages.len());
+        let prefix_end = self.messages.len().saturating_sub(kept);
+        let slice = &self.messages[protected..prefix_end];
         match &self.summarizer {
           Some(custom) => custom(slice),
           None => structured_summary(slice),
@@ -1715,7 +1846,8 @@ impl<'a> TurnLoop<'a> {
     let base_summary = match explicit_summary {
       Some(text) => text.to_string(),
       None => {
-        let slice = &self.messages[..removed];
+        let protected = self.checkpoint_floor.min(self.messages.len());
+        let slice = &self.messages[protected..removed];
         match &self.summarizer {
           Some(custom) => custom(slice),
           None => structured_summary(slice),
@@ -1839,16 +1971,21 @@ impl<'a> TurnLoop<'a> {
       path,
     };
 
-    self.emit(
+    let checkpoint_envelope = self.emit(
       Some(turn_id.clone()),
       AgentEvent::CheckpointCreated(event.clone()),
     )?;
+    self.checkpoint_cited_from = checkpoint_envelope
+      .meta
+      .seq
+      .map(|seq| EventSeq(seq.0.saturating_add(1)));
 
     // Reset visible messages: replace summarized history with the capsule's model representation
     let capsule_msg = Message::user(capsule.format_for_model());
     let removed = self.messages.len();
     self.messages.clear();
     self.messages.push(capsule_msg);
+    self.checkpoint_floor = 1;
 
     self.context_epoch += 1;
     self.last_compaction = Some(Instant::now());
@@ -1894,10 +2031,14 @@ impl<'a> TurnLoop<'a> {
       summarized_events,
       path,
     };
-    self.emit(
+    let checkpoint_envelope = self.emit(
       Some(turn_id.clone()),
       AgentEvent::CheckpointCreated(event.clone()),
     )?;
+    self.checkpoint_cited_from = checkpoint_envelope
+      .meta
+      .seq
+      .map(|seq| EventSeq(seq.0.saturating_add(1)));
 
     let capsule_message = Message::user(capsule.format_for_model());
     let retained = self.messages.len() - prefix_end;
@@ -1913,6 +2054,7 @@ impl<'a> TurnLoop<'a> {
     )?;
 
     self.messages.splice(0..prefix_end, [capsule_message]);
+    self.checkpoint_floor = 1;
     *turn_history_start = 1;
     self.context_epoch = next_epoch;
     self.last_compaction = Some(Instant::now());
@@ -1929,17 +2071,18 @@ impl<'a> TurnLoop<'a> {
     reason: String,
   ) -> Result<u32, TurnError> {
     let prefix_end = (*turn_history_start).min(self.messages.len());
-    if prefix_end == 0 {
+    let protected = self.checkpoint_floor.min(prefix_end);
+    if prefix_end <= protected {
       return Ok(0);
     }
-    let prefix = self.messages[..prefix_end].to_vec();
+    let prefix = self.messages[protected..prefix_end].to_vec();
     let summary = match &self.summarizer {
       Some(summarizer) => summarizer(&prefix),
       None => structured_summary(&prefix),
     };
     let removed = self.compact_range(turn_id, prefix_end, &summary, level, reason)?;
     if removed > 0 {
-      *turn_history_start = 1;
+      *turn_history_start = self.checkpoint_floor.saturating_add(1);
     }
     Ok(removed)
   }
@@ -4266,6 +4409,46 @@ mod tests {
   }
 
   #[test]
+  fn a_policy_override_preserves_the_primary_capability_gate() {
+    // Changing retry tuning must not replace the session's required capabilities
+    // with FailoverPolicy's text-only default. The backup lacks tools and must be
+    // refused even though the replacement policy is otherwise valid.
+    let primary =
+      Scripted::new("primary", Vec::new()).always_fails(ModelFailureKind::ProviderUnavailable);
+    let mut backup = Scripted::new("backup", vec![text("must not run")]);
+    backup.capabilities.tools = false;
+    let tools = registry_with(Vec::new());
+    let mut trace = Recorder::default();
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      primary.capabilities().context_window,
+    );
+    let error = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_backup(&backup)
+    .with_failover(FailoverPolicy::default().with_max_attempts(1))
+    .run_turn("hi", &CancelToken::new(), &mut SilentProgress)
+    .expect_err("the text-only backup cannot serve a tool-capable session");
+
+    assert!(matches!(error, TurnError::Unavailable(_)), "{error:?}");
+    assert_eq!(backup.levels().len(), 0, "the capability gate refuses it");
+    assert!(
+      trace
+        .diagnostics()
+        .iter()
+        .any(|message| message.contains("tool calling")),
+      "the refusal names the preserved requirement: {:?}",
+      trace.diagnostics()
+    );
+  }
+
+  #[test]
   fn a_detached_backup_is_never_asked() {
     let primary = Scripted::new("primary", Vec::new()).always_fails(ModelFailureKind::Transport);
     let backup = Scripted::new("backup", vec![text("unused")]);
@@ -4766,6 +4949,7 @@ mod tests {
       report.budget_exhausted,
       "the loop stopped on budget, not on an answer"
     );
+    assert_eq!(report.status, TurnStatus::BudgetExhausted);
     assert_eq!(report.requests, 3);
     assert!(trace.kinds().iter().any(|kind| kind == "diagnostic"));
     let diagnostics = trace.0.lock().unwrap();
@@ -4949,6 +5133,141 @@ mod tests {
         && at("context_compaction_epoch") < at("context_compaction_completed")
     );
     assert_eq!(trace.count("context_compaction_epoch"), 1);
+  }
+
+  #[test]
+  fn durable_compaction_resume_reuses_the_reduced_window() {
+    let temp = pi_rs_store::TempDir::new("runtime-resume-compaction");
+    let store = pi_rs_store::Store::open(temp.path(), pi_rs_store::WritePolicy::default())
+      .expect("store opens");
+    let session_id = SessionId::new();
+    let model = ModelRef::new("test", "resume");
+    let session = store
+      .begin(SessionHeader {
+        session_id: session_id.clone(),
+        version: pi_rs_core::session::SESSION_SCHEMA_VERSION,
+        started_at_ms: 1,
+        working_dir: "/workspace".into(),
+        model: model.clone(),
+        parent_session: None,
+        branched_from_event: None,
+        imported_from: None,
+      })
+      .expect("session begins");
+    let provider = Scripted::new(
+      "resume",
+      vec![text("first"), text("second"), text("continued")],
+    );
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, 32_768);
+    let mut trace = StoreTrace::new(session);
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      session_id.clone(),
+      TraceId::new(),
+    );
+    runtime
+      .run_turn("first question", &CancelToken::new(), &mut SilentProgress)
+      .expect("first turn");
+    runtime
+      .run_turn("second question", &CancelToken::new(), &mut SilentProgress)
+      .expect("second turn");
+    runtime
+      .compact(&TurnId::new(), "summary of the first turn", 1)
+      .expect("compaction");
+    drop(runtime);
+    trace.flush().expect("flush durable state");
+
+    let restored = store.restore(&session_id).expect("restore state");
+    assert_eq!(restored.context_epoch, 1);
+    assert_eq!(restored.epochs.len(), 1);
+    assert_eq!(
+      restored
+        .messages
+        .iter()
+        .map(|message| message.message.text())
+        .collect::<Vec<_>>(),
+      ["summary of the first turn", "second"]
+    );
+
+    let session = store.resume(&session_id).expect("reopen session");
+    let mut resumed_trace = StoreTrace::new(session);
+    let resume_provider = Scripted::new("resume", vec![text("continued")]);
+    let resume_epoch = ModelEpoch {
+      index: restored.epochs[0].epoch,
+      model: restored.epochs[0].model.clone(),
+      capabilities: resume_provider.capabilities(),
+      reason: restored.epochs[0].reason.clone(),
+      started_by_event: None,
+    };
+    let state = ResumeState {
+      messages: restored
+        .messages
+        .iter()
+        .map(|message| message.message.clone())
+        .collect(),
+      epochs: vec![resume_epoch],
+      context_epoch: restored.context_epoch,
+      checkpoint_floor: 0,
+      cited_history: restored.last_seq.map(|last| (EventSeq(1), last)),
+    };
+    let mut resumed = TurnLoop::new(
+      &resume_provider,
+      &tools,
+      &policy,
+      &mut resumed_trace,
+      session_id,
+      TraceId::new(),
+    )
+    .with_resume_state(state)
+    .expect("resume state validates");
+    resumed
+      .run_turn("continue", &CancelToken::new(), &mut SilentProgress)
+      .expect("resumed turn");
+    assert_eq!(
+      resume_provider.requests()[0].messages[0].text(),
+      "summary of the first turn"
+    );
+    assert_eq!(resume_provider.requests()[0].messages[1].text(), "second");
+  }
+
+  #[test]
+  fn ordinary_compaction_never_crosses_a_checkpoint_floor() {
+    let provider = Scripted::new("checkpoint-floor", vec![text("ok")]);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, 32_768);
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    );
+    runtime
+      .checkpoint(&TurnId::new(), ContextCapsule::new("checkpoint objective"))
+      .expect("checkpoint succeeds");
+    runtime.messages_mut().extend([
+      Message::user("after checkpoint"),
+      Message::assistant("tail"),
+    ]);
+
+    let removed = runtime
+      .compact(&TurnId::new(), "post-checkpoint summary", 1)
+      .expect("ordinary compaction succeeds");
+    assert_eq!(removed, 1);
+    assert!(
+      runtime.messages()[0]
+        .text()
+        .contains("objective: checkpoint objective")
+    );
+    assert_eq!(runtime.messages()[1].text(), "post-checkpoint summary");
+    assert_eq!(runtime.messages()[2].text(), "tail");
+    assert_eq!(runtime.checkpoint_floor, 1);
   }
 
   #[test]
@@ -5156,6 +5475,22 @@ mod tests {
         .as_str()
         .is_some_and(|hash| hash.len() == 64),
       "the reference names stored bytes by digest: {summary:?}"
+    );
+
+    let restored = store.restore(&session_id).expect("resume projection reads");
+    assert_eq!(restored.epochs.len(), 1);
+    assert_eq!(restored.epochs[0].epoch, 0);
+    assert_eq!(restored.compactions.len(), 1);
+    assert_eq!(restored.compactions[0].replaces_from, Some(EventSeq(1)));
+    assert_eq!(restored.compactions[0].replaces_through, Some(EventSeq(7)));
+    assert_eq!(restored.context_epoch, 1);
+    assert_eq!(
+      restored
+        .messages
+        .iter()
+        .map(|message| message.message.text())
+        .collect::<Vec<_>>(),
+      ["the question, unanswered"]
     );
   }
 
@@ -5473,6 +5808,70 @@ mod tests {
       .expect("turn succeeds");
     assert_eq!(primary.requests().len(), 1);
     assert_eq!(backup.requests().len(), 1);
+  }
+
+  #[test]
+  fn resuming_restores_the_active_epoch_and_lifecycle_identity() {
+    let primary = Scripted::new("primary", Vec::new());
+    let backup = Scripted::new("backup", vec![text("continued")]);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, 32_768);
+    let mut trace = Recorder::default();
+    let primary_epoch = ModelEpoch {
+      index: 0,
+      model: primary.model().clone(),
+      capabilities: primary.capabilities(),
+      reason: EpochReason::Initial,
+      started_by_event: None,
+    };
+    let backup_epoch = ModelEpoch {
+      index: 1,
+      model: backup.model().clone(),
+      capabilities: backup.capabilities(),
+      reason: EpochReason::AutomaticFailover,
+      started_by_event: None,
+    };
+    let state = ResumeState {
+      messages: vec![Message::user("durable history")],
+      epochs: vec![primary_epoch, backup_epoch],
+      context_epoch: 3,
+      checkpoint_floor: 0,
+      cited_history: Some((pi_rs_core::EventSeq(1), pi_rs_core::EventSeq(17))),
+    };
+
+    let mut turn_loop = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_backup(&backup)
+    .with_resume_state(state)
+    .expect("the configured backup can resume the active epoch");
+
+    assert_eq!(turn_loop.active_model(), *backup.model());
+    turn_loop
+      .run_turn("continue", &CancelToken::new(), &mut SilentProgress)
+      .expect("resumed turn succeeds");
+    assert!(primary.requests().is_empty());
+    assert_eq!(backup.requests().len(), 1);
+    assert!(
+      backup.requests()[0]
+        .messages
+        .iter()
+        .any(|message| message.text() == "durable history")
+    );
+
+    let started = trace.all("session_started");
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0]["resumed"], true);
+    assert_eq!(
+      started[0]["model"],
+      serde_json::to_value(backup.model()).expect("model serializes")
+    );
+    assert_eq!(trace.count("model_epoch_started"), 0);
   }
 
   #[test]

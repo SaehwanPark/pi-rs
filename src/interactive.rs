@@ -221,6 +221,9 @@ enum AfterTurn {
   Done,
   /// What the loop prints about the user's own cancellation.
   Cancelled(&'static str),
+  /// The model request budget ended the turn without a final answer. The
+  /// interactive session remains usable for another user turn.
+  BudgetExhausted(&'static str),
   /// The failure that ends the session.
   Failed(run::SessionError),
 }
@@ -235,8 +238,14 @@ fn after_turn(result: Result<TurnReport, TurnError>) -> AfterTurn {
     // A stopped turn is a report, not a fault: the status is the only place that
     // distinguishes it, and the loop owns the one line that says so.
     Ok(report) if report.status == TurnStatus::Cancelled => AfterTurn::Cancelled("turn cancelled"),
+    Ok(report) if report.status == TurnStatus::BudgetExhausted => {
+      AfterTurn::BudgetExhausted("model request budget exhausted")
+    }
     Ok(_) => AfterTurn::Done,
     Err(TurnError::Aborted(TurnStatus::Cancelled)) => AfterTurn::Cancelled("turn cancelled"),
+    Err(TurnError::Aborted(TurnStatus::BudgetExhausted)) => {
+      AfterTurn::BudgetExhausted("model request budget exhausted")
+    }
     Err(error) => AfterTurn::Failed(run::SessionError::Turn(error)),
   }
 }
@@ -806,7 +815,7 @@ impl Loop {
     take_line().map_err(terminal_failure)?;
     // The loop's own line about a cancellation, written while the terminal still
     // translates it into a row of its own.
-    if let AfterTurn::Cancelled(note) = &outcome {
+    if let AfterTurn::Cancelled(note) | AfterTurn::BudgetExhausted(note) = &outcome {
       write_line(&mut io::stdout(), note).map_err(terminal_failure)?;
     }
     terminal::enable_raw_mode().map_err(terminal_failure)?;
@@ -814,7 +823,7 @@ impl Loop {
       AfterTurn::Done => self.turns += 1,
       // The note above is the report; the frame below it goes back to saying
       // `waiting`, which is all the projection is allowed to claim.
-      AfterTurn::Cancelled(_) => {}
+      AfterTurn::Cancelled(_) | AfterTurn::BudgetExhausted(_) => {}
       AfterTurn::Failed(error) => return Err(run::session_error(error)),
     }
     self.state = TurnState::Idle;

@@ -13,6 +13,9 @@
 //! - [`SessionRecord::Message`] always carries model attribution, because a
 //!   session may span several model epochs and "which model wrote this" must be
 //!   answerable from session state alone.
+//! - [`SessionRecord::Epoch`] and [`SessionRecord::Compaction`] are projected at
+//!   the trace boundary, so resume restores the active model and reduced context
+//!   without replaying the high-resolution journal.
 
 use serde::{Deserialize, Serialize};
 
@@ -103,6 +106,21 @@ pub struct SessionCompactionRecord {
   pub removed_messages: u32,
   /// Line index (0-based, header excluded) of the first retained message.
   pub retained_from: u32,
+  /// Number of model-visible messages retained after the summary (or reset).
+  /// Added for resume reconstruction; older records default to zero.
+  #[serde(default)]
+  pub retained_messages: u32,
+  /// Whether this marker follows a persisted `ContextSummary` message. Older
+  /// records and checkpoint resets leave this false for backward compatibility.
+  #[serde(default)]
+  pub summary_present: bool,
+  /// Canonical event range replaced by the compaction, when available. These
+  /// optional coordinates align the semantic projection with the trace journal;
+  /// older records only have the legacy session-line field above.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub replaces_from: Option<EventSeq>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub replaces_through: Option<EventSeq>,
 }
 
 /// A checkpoint barrier.

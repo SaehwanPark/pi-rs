@@ -274,6 +274,8 @@ pub struct RestoredSession {
   pub checkpoint_seq: Option<EventSeq>,
   pub epochs: Vec<pi_rs_core::session::SessionEpochRecord>,
   pub compactions: Vec<pi_rs_core::session::SessionCompactionRecord>,
+  /// Highest model-visible compaction epoch persisted in the session log.
+  pub context_epoch: u32,
   /// Messages summarized by the checkpoint, for honest UI reporting.
   pub summarized_messages: usize,
   /// Sequence of the last record this session log knows about.
@@ -282,7 +284,9 @@ pub struct RestoredSession {
   pub total_records: usize,
 }
 
-/// Restore session state as `latest checkpoint + records after it`.
+/// Restore session state as `latest checkpoint + records after it`, applying
+/// projected compaction markers to recover the exact model-visible window while
+/// leaving canonical session history untouched on disk.
 pub fn restore(path: &Path) -> Result<RestoredSession, StoreError> {
   let header = SessionLog::read_header(path)?;
   let report = SessionLog::read(path)?;
@@ -291,6 +295,7 @@ pub fn restore(path: &Path) -> Result<RestoredSession, StoreError> {
   let mut compactions = Vec::new();
   let mut checkpoint = None;
   let mut checkpoint_seq = None;
+  let mut context_epoch = 0u32;
   let mut summarized_messages = 0usize;
   let mut last_seq: Option<EventSeq> = None;
   for record in report.items.iter().skip(1) {
@@ -302,7 +307,23 @@ pub fn restore(path: &Path) -> Result<RestoredSession, StoreError> {
         messages.push(message.clone());
       }
       SessionRecord::Epoch(epoch) => epochs.push(epoch.clone()),
-      SessionRecord::Compaction(compaction) => compactions.push(compaction.clone()),
+      SessionRecord::Compaction(compaction) => {
+        context_epoch = context_epoch.max(compaction.context_epoch);
+        compactions.push(compaction.clone());
+        if compaction.summary_present {
+          // Runtime compaction appends its summary after the existing semantic
+          // messages, then records this marker. Rebuild the exact live window as
+          // [summary, retained tail] without mutating canonical history on disk.
+          if let Some(summary) = messages.pop() {
+            let retained = compaction.retained_messages as usize;
+            let split = messages.len().saturating_sub(retained);
+            let tail = messages.split_off(split);
+            messages.clear();
+            messages.push(summary);
+            messages.extend(tail);
+          }
+        }
+      }
       SessionRecord::CheckpointBarrier(barrier) => {
         // A later barrier supersedes an earlier one: everything before it is
         // already inside the newer capsule's scope.
@@ -321,6 +342,7 @@ pub fn restore(path: &Path) -> Result<RestoredSession, StoreError> {
     checkpoint_seq,
     epochs,
     compactions,
+    context_epoch,
     summarized_messages,
     last_seq,
     malformed_records: report.malformed,
@@ -332,11 +354,13 @@ pub fn restore(path: &Path) -> Result<RestoredSession, StoreError> {
 mod tests {
   use pi_rs_core::{
     capability::EpochReason,
-    context::{CAPSULE_SCHEMA_VERSION, ContextCapsule},
+    context::{CAPSULE_SCHEMA_VERSION, ContextCapsule, ContextLevel},
     ids::uuidv7,
     ids::{CheckpointId, EventId, TurnId},
     message::Message,
-    session::{SessionCheckpointRecord, SessionEpochRecord, SessionMessage},
+    session::{
+      SessionCheckpointRecord, SessionCompactionRecord, SessionEpochRecord, SessionMessage,
+    },
   };
 
   use crate::{StateLayout, tmp::TempDir};
@@ -528,6 +552,43 @@ mod tests {
     assert_eq!(restored.checkpoint_seq, Some(EventSeq(5)));
     assert_eq!(restored.last_seq, Some(EventSeq(6)));
     assert_eq!(restored.epochs.len(), 1);
+  }
+
+  #[test]
+  fn a_projected_compaction_restores_summary_and_retained_tail() {
+    let tmp = TempDir::new("sessionlog-compaction");
+    let (layout, id) = session(&tmp);
+    let target = path(&layout, &id);
+    let mut log = SessionLog::create(&target, header(&id)).unwrap();
+    log.append(&message("old", 1)).unwrap();
+    log.append(&message("tail", 2)).unwrap();
+    log.append(&message("summary", 3)).unwrap();
+    log
+      .append(&SessionRecord::Compaction(SessionCompactionRecord {
+        context_epoch: 1,
+        level: ContextLevel::L1Ordinary,
+        removed_messages: 1,
+        retained_from: 0,
+        retained_messages: 1,
+        summary_present: true,
+        replaces_from: Some(EventSeq(1)),
+        replaces_through: Some(EventSeq(2)),
+      }))
+      .unwrap();
+    log.append(&message("new", 4)).unwrap();
+    drop(log);
+
+    let restored = restore(&target).unwrap();
+    assert_eq!(restored.context_epoch, 1);
+    assert_eq!(restored.messages.len(), 3);
+    assert_eq!(
+      restored
+        .messages
+        .iter()
+        .map(|message| message.message.text())
+        .collect::<Vec<_>>(),
+      ["summary", "tail", "new"]
+    );
   }
 
   #[test]

@@ -15,6 +15,7 @@ use std::{
 
 use pi_rs_core::{
   AgentEvent, ModelCapabilities, ModelEndpoint, ModelRef, ReasoningExposure, Role, RuntimeConfig,
+  TurnStatus,
 };
 use pi_rs_store::{StateLayout, Store, TraceJournal, WritePolicy};
 use tempfile::TempDir;
@@ -251,6 +252,42 @@ fn one_turn_streams_and_persists_tools_messages_and_trace() {
       entry.envelope.event
     );
   }
+}
+
+#[test]
+fn one_shot_budget_exhaustion_exits_unsuccessfully() {
+  let temp = TempDir::new().unwrap();
+  let workspace = temp.path().join("workspace");
+  fs::create_dir(&workspace).unwrap();
+  let responses = (0..32)
+    .map(|index| tool_response(&format!("budget_{index}"), "unknown_tool", "{}", None))
+    .collect();
+  let server = FakeServer::answer(responses);
+  let config = write_config(temp.path(), &server.base_url(), true);
+
+  let output = run(&config, &workspace, "keep working");
+  let requests = server.requests();
+  assert_eq!(
+    requests.len(),
+    32,
+    "the configured request budget is finite"
+  );
+  assert!(
+    !output.status.success(),
+    "no final answer must not look successful"
+  );
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(stderr.contains("budget exhausted"), "{stderr}");
+
+  let layout = StateLayout::new(temp.path().join("state"));
+  let session_id = layout.list_session_ids().unwrap().pop().expect("session");
+  let trace = TraceJournal::read(&layout.trace_path(&session_id))
+    .unwrap()
+    .items;
+  assert!(trace.iter().any(|entry| matches!(
+    &entry.envelope.event,
+    AgentEvent::TurnCompleted(done) if done.status == TurnStatus::BudgetExhausted
+  )));
 }
 
 #[test]

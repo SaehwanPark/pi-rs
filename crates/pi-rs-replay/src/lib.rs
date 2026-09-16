@@ -316,7 +316,15 @@ pub fn reconstruct_context(
   }
 
   let epoch_records = context_epoch_records(trace_entries);
-  if epoch_records.is_empty() {
+  if compaction_records
+    .iter()
+    .any(|(_, compaction)| compaction.summary_present)
+  {
+    // New session projections carry the exact retained-tail count. Prefer them
+    // over the trace range here: an epoch range intentionally names canonical
+    // history, while a runtime compaction may retain messages inside that range.
+    working = projected_working_context(session_records, &canonical);
+  } else if epoch_records.is_empty() {
     if let Some((_, compaction)) = compaction_records.last() {
       working.retain(|item| match item {
         WorkingContextItem::Message(message) => {
@@ -347,6 +355,65 @@ pub fn reconstruct_context(
     },
     compaction_epochs: epoch_records,
   }
+}
+
+/// Rebuild the model-visible projection from semantic session records.
+///
+/// This path is used when a current writer projected `summary_present`: the marker's
+/// retained count is authoritative for the live window, and the canonical trace is
+/// intentionally not asked to infer which retained messages shared an event range.
+fn projected_working_context(
+  records: &[SessionRecord],
+  canonical: &[HistoricalMessage],
+) -> Vec<WorkingContextItem> {
+  let mut working = Vec::new();
+  let mut canonical_index = 0usize;
+  for record in records {
+    match record {
+      SessionRecord::Message(_) => {
+        if let Some(message) = canonical.get(canonical_index) {
+          working.push(WorkingContextItem::Message(message.clone()));
+        }
+        canonical_index = canonical_index.saturating_add(1);
+      }
+      SessionRecord::CheckpointBarrier(checkpoint) => {
+        working.clear();
+        working.push(WorkingContextItem::CheckpointCapsule {
+          checkpoint_id: checkpoint.checkpoint_id.clone(),
+          capsule_version: checkpoint.capsule_version,
+          capsule_text: checkpoint.capsule.format_for_model(),
+          capsule: checkpoint.capsule.clone(),
+        });
+      }
+      SessionRecord::Compaction(compaction)
+        if compaction.summary_present
+          && matches!(
+            compaction.level,
+            pi_rs_core::ContextLevel::L1Ordinary | pi_rs_core::ContextLevel::L2Phase
+          ) =>
+      {
+        let Some(summary_index) = working
+          .iter()
+          .rposition(|item| matches!(item, WorkingContextItem::Message(_)))
+        else {
+          continue;
+        };
+        let summary = working.remove(summary_index);
+        let floor = working
+          .iter()
+          .take_while(|item| matches!(item, WorkingContextItem::CheckpointCapsule { .. }))
+          .count();
+        let retained = compaction.retained_messages as usize;
+        let tail_start = working.len().saturating_sub(retained);
+        let tail = working.split_off(tail_start);
+        working.truncate(floor);
+        working.push(summary);
+        working.extend(tail);
+      }
+      _ => {}
+    }
+  }
+  working
 }
 
 /// Construct a dry, pure plan for branching from a historical event.
@@ -1579,6 +1646,10 @@ mod tests {
         level: ContextLevel::L1Ordinary,
         removed_messages: 2,
         retained_from: 2,
+        retained_messages: 0,
+        summary_present: false,
+        replaces_from: None,
+        replaces_through: None,
       }),
       session_message(5, Role::User, Message::user("tail")),
     ];
