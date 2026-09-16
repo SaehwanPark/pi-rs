@@ -392,12 +392,11 @@ impl Session {
     Ok(seq)
   }
 
-  /// Append a trace event together with the raw bytes that produced it.
+  /// Append a trace event together with the redacted bytes that produced it.
   ///
   /// When raw capture is disabled the bytes are dropped without an error, and no
-  /// recovery pointer is recorded. The caller's intent is expressed by policy,
-  /// so a caller that stored a payload anyway cannot make it reachable through a
-  /// quiet line.
+  /// recovery pointer is recorded. When it is enabled, the provider wire payload
+  /// still crosses the store's redaction boundary before it reaches the blob store.
   pub fn emit_with_payload(
     &mut self,
     envelope: &mut EventEnvelope,
@@ -406,7 +405,8 @@ impl Session {
     if !self.policy.raw_payload.is_enabled() {
       return self.emit(envelope);
     }
-    let blob = self.blobs.put(raw, None)?;
+    let redacted = redact_payload(&self.policy.redaction, raw)?;
+    let blob = self.blobs.put(&redacted, None)?;
     let relative = self.layout.blob_relative_path(&blob);
     // The captured body is already in a blob; the line that points at it is still
     // held to the same inline budget as every other line.
@@ -490,8 +490,10 @@ impl Session {
     if let Some(dir) = path.parent() {
       std::fs::create_dir_all(dir)?;
     }
+    let mut durable_capsule = serde_json::to_value(capsule)?;
+    self.policy.redaction.apply_json(&mut durable_capsule);
     let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, serde_json::to_vec_pretty(capsule)?)?;
+    std::fs::write(&temporary, serde_json::to_vec_pretty(&durable_capsule)?)?;
     std::fs::rename(&temporary, &path)?;
 
     let record = SessionCheckpointRecord {
@@ -533,12 +535,13 @@ impl Session {
   /// Store a payload, redacting it at this boundary before choosing inline or
   /// blob storage by the configured threshold.
   pub fn put_payload(&mut self, bytes: &[u8]) -> Result<Payload, StoreError> {
-    let redacted = self.policy.redaction.apply(&String::from_utf8_lossy(bytes));
-    let bytes = redacted.text.as_bytes();
-    if (bytes.len() as u64) < self.policy.inline_threshold_bytes {
-      return Ok(Payload::Inline(redacted.text));
+    let redacted = redact_payload(&self.policy.redaction, bytes)?;
+    if (redacted.len() as u64) < self.policy.inline_threshold_bytes {
+      return Ok(Payload::Inline(
+        String::from_utf8_lossy(&redacted).into_owned(),
+      ));
     }
-    Ok(Payload::Blob(self.blobs.put(bytes, None)?))
+    Ok(Payload::Blob(self.blobs.put(&redacted, None)?))
   }
 
   /// Store recovery bytes after applying the configured durable redaction policy.
@@ -546,8 +549,8 @@ impl Session {
   /// Unlike [`Self::put_payload`], this always returns a blob because runtime
   /// reduction events need a stable recovery reference even for a small payload.
   pub fn put_recovery_blob(&self, bytes: &[u8]) -> Result<BlobRef, StoreError> {
-    let redacted = self.policy.redaction.apply(&String::from_utf8_lossy(bytes));
-    self.blobs.put(redacted.text.as_bytes(), None)
+    let redacted = redact_payload(&self.policy.redaction, bytes)?;
+    self.blobs.put(&redacted, None)
   }
 
   /// Flush both logs.
@@ -562,6 +565,28 @@ impl Session {
   /// Finish with the session: flush and release appenders.
   pub fn finish(mut self) -> Result<(), StoreError> {
     self.flush()
+  }
+}
+
+/// Redact one durable payload while preserving its original bytes when no change is needed.
+///
+/// Provider and tool payloads are commonly JSON, so structured values must use
+/// `apply_json` rather than only scanning the serialized text: a credential under
+/// `api_key` or `token` is sensitive even when it has no recognizable prefix.
+/// Non-JSON text uses the existing UTF-8-lossy fallback; unchanged binary bytes
+/// remain byte-for-byte recoverable.
+fn redact_payload(policy: &RedactionPolicy, bytes: &[u8]) -> Result<Vec<u8>, StoreError> {
+  if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(bytes) {
+    if policy.apply_json(&mut value) == 0 {
+      return Ok(bytes.to_vec());
+    }
+    return Ok(serde_json::to_vec(&value)?);
+  }
+  let redacted = policy.apply(&String::from_utf8_lossy(bytes));
+  if redacted.replacements == 0 {
+    Ok(bytes.to_vec())
+  } else {
+    Ok(redacted.text.into_bytes())
   }
 }
 
@@ -1038,8 +1063,90 @@ mod tests {
     let captured = objects_under(&enabled.layout().blobs_dir(&other));
     assert_eq!(
       captured,
-      vec![b"{\"api_key\":\"secret-value\"}".to_vec()],
-      "captured bytes are stored out of line under the session blob directory"
+      vec![b"{\"api_key\":\"[redacted:field]\"}".to_vec()],
+      "captured bytes are redacted before storage under the session blob directory"
+    );
+  }
+
+  #[test]
+  fn structured_credentials_are_redacted_in_session_payloads() {
+    let tmp = TempDir::new("store-structured-redaction");
+    let opened = Store::open(
+      tmp.path(),
+      WritePolicy {
+        redaction: RedactionPolicy {
+          scan_environment: false,
+          ..RedactionPolicy::default()
+        },
+        ..WritePolicy::default()
+      },
+    )
+    .unwrap();
+    let id = SessionId::from_string(uuidv7());
+    let mut session = opened.begin(header(&id)).unwrap();
+
+    let inline = session
+      .put_payload(br#"{"api_key":"plain-secret"}"#)
+      .unwrap();
+    assert_eq!(
+      inline,
+      Payload::Inline(r#"{"api_key":"[redacted:field]"}"#.into())
+    );
+
+    let large_json = format!(
+      r#"{{"token":"plain-secret","padding":"{}"}}"#,
+      "x".repeat(9_000)
+    );
+    let stored = session.put_payload(large_json.as_bytes()).unwrap();
+    let blob = stored.blob().expect("large payload is filed as a blob");
+    let value: serde_json::Value = serde_json::from_slice(&session.blobs().get(blob).unwrap())
+      .expect("redacted blob remains valid JSON");
+    assert_eq!(value["token"], "[redacted:field]");
+    assert!(!value.to_string().contains("plain-secret"));
+
+    let recovery = session
+      .put_recovery_blob(br#"{"password":"plain-secret"}"#)
+      .unwrap();
+    let recovered: serde_json::Value =
+      serde_json::from_slice(&session.blobs().get(&recovery).unwrap()).unwrap();
+    assert_eq!(recovered["password"], "[redacted:field]");
+    assert!(!recovered.to_string().contains("plain-secret"));
+
+    let binary = [0xff, b'x', 0x80];
+    let binary_blob = session.put_recovery_blob(&binary).unwrap();
+    assert_eq!(session.blobs().get(&binary_blob).unwrap(), binary);
+  }
+
+  #[test]
+  fn checkpoint_archive_is_redacted_before_standalone_write() {
+    let tmp = TempDir::new("store-checkpoint-redaction");
+    let secret = "checkpoint-secret-123";
+    let opened = Store::open(
+      tmp.path(),
+      WritePolicy {
+        redaction: RedactionPolicy {
+          literals: vec![secret.into()],
+          scan_environment: false,
+          ..RedactionPolicy::default()
+        },
+        ..WritePolicy::default()
+      },
+    )
+    .unwrap();
+    let id = SessionId::from_string(uuidv7());
+    let mut session = opened.begin(header(&id)).unwrap();
+    let barrier = session.checkpoint(&capsule(secret)).unwrap();
+    let path = opened.layout().checkpoint_path(&id, &barrier.checkpoint_id);
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains(secret));
+    let standalone: ContextCapsule = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(standalone.objective, "[redacted:field]");
+
+    let restored = opened.restore(&id).unwrap();
+    assert_eq!(
+      restored.checkpoint.unwrap().objective,
+      "[redacted:field]",
+      "the duplicated barrier uses the same durable redaction boundary"
     );
   }
 
