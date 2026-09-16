@@ -403,7 +403,7 @@ fn terminate_child_tree(child: &mut Child) {
     // retained as a fallback when taskkill is unavailable.
     let pid = child.id().to_string();
     let _ = Command::new("taskkill")
-      .args(["/PID", &pid, "/T", "/F"])
+      .args(["/PID", pid.as_str(), "/T", "/F"])
       .status();
   }
   let _ = child.kill();

@@ -710,7 +710,7 @@ fn terminate_process_tree(child: &mut Child) {
   {
     let pid = child.id().to_string();
     let _ = Command::new("taskkill")
-      .args(["/PID", &pid, "/T", "/F"])
+      .args(["/PID", pid.as_str(), "/T", "/F"])
       .status();
   }
   let _ = child.kill();
