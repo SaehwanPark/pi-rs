@@ -52,6 +52,8 @@ pub struct ProviderConfig {
   /// gateways that corrupt SSE, not the default.
   pub stream: bool,
   pub connect_timeout_ms: u64,
+  /// Requested idle budget. Streaming adapters poll at a short bounded interval
+  /// so cancellation can be observed even when the provider is quiet.
   pub read_timeout_ms: u64,
 }
 
@@ -78,8 +80,9 @@ impl Default for ProviderConfig {
       thinking_input: ThinkingInput::default(),
       stream: true,
       connect_timeout_ms: 10_000,
-      // Reasoning generations can be silent for minutes. A shorter read
-      // timeout turns slow thinking into a spurious availability failure.
+      // The adapter retries bounded socket polls across quiet reasoning
+      // intervals, so this remains a generous logical idle budget for callers
+      // while cancellation is still observed promptly.
       read_timeout_ms: 300_000,
     }
   }
