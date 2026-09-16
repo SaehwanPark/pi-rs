@@ -103,7 +103,7 @@ fn one_turn_streams_and_persists_tools_messages_and_trace() {
   let workspace = temp.path().join("workspace");
   fs::create_dir(&workspace).unwrap();
   #[cfg(windows)]
-  let exec_cmd = r#"{"command":"<nul set /p=executed>exec.txt"}"#;
+  let exec_cmd = r#"{"command":"set /p=executed<nul>exec.txt&exit /b 0"}"#;
   #[cfg(not(windows))]
   let exec_cmd = r#"{"command":"printf executed > exec.txt"}"#;
 
