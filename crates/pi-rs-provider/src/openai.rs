@@ -304,9 +304,13 @@ impl ModelProvider for OpenAiCompat {
       );
     }
     let body = request_body(&self.config, request).to_string();
-    let response = self
-      .send(&body)
-      .map_err(|failure| failure.with_model(model.clone()))?;
+    let response = match self.send(&body) {
+      Ok(response) => response,
+      Err(_failure) if cancel.is_cancelled() => {
+        return Err(decode::cancelled(false).with_model(model));
+      }
+      Err(failure) => return Err(failure.with_model(model)),
+    };
     if self.config.stream {
       self
         .read_stream(response, sink, cancel)

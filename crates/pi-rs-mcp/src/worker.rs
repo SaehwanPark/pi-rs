@@ -13,14 +13,14 @@
 use std::{
   collections::BTreeMap,
   fmt,
-  io::{BufRead, BufReader, Read, Write},
+  io::{BufReader, Read, Write},
   sync::atomic::{AtomicBool, Ordering},
   sync::{Arc, Mutex},
   thread,
   time::{Duration, Instant},
 };
 
-use pi_rs_core::{ModelRef, SessionId, now_millis, uuidv7};
+use pi_rs_core::{LineOverflow, ModelRef, SessionId, now_millis, read_bounded_line, uuidv7};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -1325,10 +1325,18 @@ pub fn serve_stdio<E: WorkerEngine, R: Read, W: Write>(
 ) -> Result<(), WorkerServerError> {
   let mut reader = BufReader::new(reader);
   loop {
-    let Some(line) = read_bounded_line(&mut reader)? else {
+    let Some(line) = read_bounded_line(&mut reader, MAX_REQUEST_BYTES, LineOverflow::Reject)
+      .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidData {
+          WorkerServerError::RequestTooLarge
+        } else {
+          WorkerServerError::Io(error)
+        }
+      })?
+    else {
       return Ok(());
     };
-    let line = String::from_utf8_lossy(&line);
+    let line = String::from_utf8_lossy(line.as_bytes());
     let raw: Value = match serde_json::from_str(&line) {
       Ok(raw) => raw,
       Err(error) => {
@@ -1372,30 +1380,6 @@ pub fn serve_stdio<E: WorkerEngine, R: Read, W: Write>(
     };
     let response = server.handle(request);
     write_server_response(&mut writer, &response)?;
-  }
-}
-
-fn read_bounded_line<R: BufRead>(reader: &mut R) -> Result<Option<Vec<u8>>, WorkerServerError> {
-  let mut line = Vec::new();
-  loop {
-    let buffer = reader.fill_buf()?;
-    if buffer.is_empty() {
-      return if line.is_empty() {
-        Ok(None)
-      } else {
-        Ok(Some(line))
-      };
-    }
-    let newline = buffer.iter().position(|byte| *byte == b'\n');
-    let take = newline.map_or(buffer.len(), |index| index + 1);
-    if line.len() + take > MAX_REQUEST_BYTES {
-      return Err(WorkerServerError::RequestTooLarge);
-    }
-    line.extend_from_slice(&buffer[..take]);
-    reader.consume(take);
-    if newline.is_some() {
-      return Ok(Some(line));
-    }
   }
 }
 
@@ -1717,7 +1701,10 @@ mod tests {
   #[test]
   fn bounded_reader_returns_at_a_newline_at_the_buffer_boundary() {
     let mut reader = BufReader::with_capacity(8, Cursor::new(b"1234567\n"));
-    let line = read_bounded_line(&mut reader).unwrap().unwrap();
+    let line = read_bounded_line(&mut reader, MAX_REQUEST_BYTES, LineOverflow::Reject)
+      .unwrap()
+      .unwrap()
+      .into_bytes();
     assert_eq!(line, b"1234567\n");
   }
 
