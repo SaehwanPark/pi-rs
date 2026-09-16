@@ -214,6 +214,7 @@ fn drain(
   let mut timed_out = false;
   let mut cancelled = false;
   let mut context_deadline = false;
+  let mut capture_full = false;
   let mut sink = crate::BoundedProgress::new(progress, limit, deadline.clone());
 
   loop {
@@ -232,14 +233,25 @@ fn drain(
           break;
         }
         let slice = String::from_utf8_lossy(&bytes);
-        if !sink.send(&slice) {
+        if !capture_full {
+          let before = sink.streamed;
+          let forwarded = sink.send(&slice);
+          let accepted = sink.streamed.saturating_sub(before);
+          if accepted > 0 {
+            // Keep the returned text bounded too. `sink.send` may accept only
+            // the UTF-8 prefix that fits, while the reader continues draining.
+            text.push_str(crate::floor(&slice, accepted));
+          }
           truncated = sink.truncated;
           timed_out = sink.timed_out;
-          if truncated || timed_out {
+          capture_full = truncated;
+          if !forwarded && timed_out {
             break;
           }
         }
-        text.push_str(&slice);
+        // Once capture is full, keep draining into the discard path. Closing
+        // the pipes or killing the process here can interrupt a mutating
+        // command and would make its eventual exit status meaningless.
       }
       Err(mpsc::RecvTimeoutError::Timeout) => {
         if context.is_cancelled() {
@@ -259,9 +271,10 @@ fn drain(
     }
   }
 
-  if truncated || timed_out || cancelled || context_deadline {
-    // Stop the child as soon as the budget/cancel is spent; otherwise we keep
-    // paying for a command whose output we have already abandoned.
+  if timed_out || cancelled || context_deadline {
+    // Stop the child as soon as the execution budget/cancel is spent. Output
+    // truncation alone is not a reason to interrupt a potentially mutating
+    // command; its real exit status still determines success or failure.
     terminate_child_tree(child);
   }
   // Closing the receiver releases any reader worker blocked on the bounded
@@ -345,26 +358,18 @@ fn finish(
     ));
   };
 
-  let code = status.code().unwrap_or(-1);
-  let code = code as i64;
-  if drained.truncated {
-    let mut outcome = ToolOutcome::succeeded(text);
-    outcome.reduced = true;
-    return Ok(with_elapsed(outcome.with_status(code), elapsed));
-  }
+  let code = status.code().unwrap_or(-1) as i64;
   if status.success() {
     if text.trim().is_empty() {
       text.push_str("(no output)");
     }
-    return Ok(with_elapsed(
-      ToolOutcome::succeeded(text).with_status(code),
-      elapsed,
-    ));
+    let mut outcome = ToolOutcome::succeeded(text).with_status(code);
+    outcome.reduced = drained.truncated;
+    return Ok(with_elapsed(outcome, elapsed));
   }
-  Ok(with_elapsed(
-    ToolOutcome::failed(text).with_status(code),
-    elapsed,
-  ))
+  let mut outcome = ToolOutcome::failed(text).with_status(code);
+  outcome.reduced = drained.truncated;
+  Ok(with_elapsed(outcome, elapsed))
 }
 
 fn wait_for_exit(child: &mut Child, context: &ToolExecutionContext) -> Option<ExitStatus> {
@@ -605,6 +610,63 @@ mod tests {
       "{}",
       &outcome.text[..outcome.text.len().min(200)]
     );
+  }
+
+  #[test]
+  fn output_truncation_does_not_kill_a_command_before_its_side_effect() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("after-output");
+    let mut runtime = runtime(&dir);
+    runtime.max_output_bytes = 64;
+    let tool = ExecTool::new(runtime);
+    let mut recorder = Recorder::default();
+    #[cfg(windows)]
+    let command = format!(
+      "for /L %i in (1,1,1000) do @echo verbose & echo done > {}",
+      marker.display()
+    );
+    #[cfg(not(windows))]
+    let command = format!(
+      "yes verbose | head -c 4096; printf done > '{}'",
+      marker.display()
+    );
+    let outcome = tool
+      .execute(&request(json!({"command": command})), &mut recorder)
+      .unwrap();
+    assert_eq!(
+      outcome.state,
+      ToolExecutionState::Succeeded,
+      "{}",
+      outcome.text
+    );
+    assert_eq!(outcome.status, Some(0));
+    assert!(marker.exists(), "the command reached its final side effect");
+    assert!(outcome.reduced, "output was over the capture limit");
+  }
+
+  #[test]
+  fn output_truncation_does_not_hide_a_nonzero_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut runtime = runtime(&dir);
+    runtime.max_output_bytes = 64;
+    let tool = ExecTool::new(runtime);
+    let mut recorder = Recorder::default();
+    #[cfg(windows)]
+    let command = "for /L %i in (1,1,1000) do @echo verbose & exit /b 7".to_string();
+    #[cfg(not(windows))]
+    let command = "yes verbose | head -c 4096; exit 7".to_string();
+    let outcome = tool
+      .execute(&request(json!({"command": command})), &mut recorder)
+      .unwrap();
+    assert_eq!(
+      outcome.state,
+      ToolExecutionState::Failed,
+      "{}",
+      outcome.text
+    );
+    assert_eq!(outcome.status, Some(7));
+    assert!(outcome.is_error);
+    assert!(outcome.reduced, "output was over the capture limit");
   }
 
   #[test]
