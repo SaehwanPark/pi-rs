@@ -1,83 +1,80 @@
 # pi-rs Audit Loop Handoff
 
-- **Status:** blocked pending independent adviser access
-- **Goal:** `mu3dlu6u-udislc`
+- **Status:** Loop 006 delivered; completion is paused pending the user's explicit disposition of
+  the pre-fix historical-checkpoint residual risk.
+- **Current goal:** `mu3hka9c-231p7n`
 - **Repository base:** `main` / `origin/main`
-- **Handoff PR:** [#88](https://github.com/SaehwanPark/pi-rs/pull/88)
+- **Delivery PR:** [#89](https://github.com/SaehwanPark/pi-rs/pull/89)
 - **Date:** 2026-09-16 UTC
 
-## Current loop 006 — delivery record
+## Current loop 006 — final delivery record
 
-This is the current bounded security slice; the older resume gate and history below remain
-for the preceding adviser-blocked goal.
+This is the authoritative status for the current bounded security loop. The implementation and
+its focused PR are complete; only the explicit residual-risk disposition below remains open.
 
-- **Goal:** `mu3hka9c-231p7n`
-- **Branch:** `loop/20260915-improvement-006`
 - **Audit:** [`audits/20260916-006.md`](audits/20260916-006.md)
-- **PR:** [#89](https://github.com/SaehwanPark/pi-rs/pull/89)
-- **Scope:** close durable redaction gaps in raw capture, recovery blobs, and standalone
-  checkpoint capsules.
-- **Disposition:** R-1/R-2/R-3 accepted and fixed in `e671a1f`; audit evidence was updated in
-  `51773c9`.
-- **Verification:** required Rust formatting, check, clippy, workspace tests (52 suites /
-  1,062 tests), docs, targeted store/runtime tests, and the restore benchmark passed locally;
-  required Ubuntu and macOS CI checks are passing on PR #89.
-- **Branch snapshot:** local and `origin/loop/20260915-improvement-006` both point to
-  `51773c9` before merge. After merge, fast-forward local `main` from `origin/main` and
-  retain the PR URL/status as the authoritative merge record.
+- **Working branch:** `loop/20260915-improvement-006`
+- **Findings:** R-1, R-2, and R-3 were P1 durable-redaction gaps. All were accepted, fixed in
+  `e671a1f`, and covered by regression tests; no critical or high-severity code finding remains
+  unresolved.
+- **Audit evidence update:** `51773c9`
+- **PR result:** PR #89 merged at
+  `c86640d8d64efeebc61bebfae12854eeb613842b` on 2026-09-16T02:58:06Z.
+- **Required CI:** Ubuntu and macOS checks passed before merge.
+- **Local verification:** formatting, core all-features check, workspace clippy, workspace tests
+  (52 suites / 1,062 tests), workspace docs, targeted store/runtime tests, and the store restore
+  benchmark all passed. The generic `verify_code` wrapper selected an inapplicable Go profile;
+  the explicit Rust commands are the authoritative checks.
+- **Ref alignment after merge:** local `main` and `origin/main` both point to
+  `c86640d8d64efeebc61bebfae12854eeb613842b`. Local and `origin/loop/20260915-improvement-006`
+  both point to `45e3982`; that temporary branch is retained for traceability.
+- **Residual requiring user decision:** checkpoint capsules written before this fix may contain
+  values that the new write-time boundary would redact. This loop intentionally does not scan,
+  rewrite, or delete historical state because doing so could add startup cost or cause data loss.
+  The user must explicitly choose one of:
+  1. **Defer** historical checkpoint scrubbing to a separately scoped migration/maintenance
+     loop, accepting that old artifacts remain as-is; or
+  2. **Remediate now** with a separately reviewed migration design.
 
-## Resume gate
+Until that decision is recorded, do not claim this goal complete or begin another improvement
+slice. PR #89 and its merge comment are the durable implementation/merge record.
 
-The audit-and-delivery goal is intentionally **not complete**. The required independent
-ChatGPT audit could not run because the isolated adviser account is not authenticated. The
-last attempt was refused with:
+## Historical prior handoff (closed record)
+
+The following section describes the preceding adviser-blocked goal `mu3dlu6u-udislc`; it is
+historical context only and is not the status or gate for current goal `mu3hka9c-231p7n`.
+
+The preceding goal could not use its isolated independent adviser because the adviser account
+was not authenticated. Its last attempt was refused with:
 
 > ChatGPT presented a login-checkpoint challenge. Automating it is not allowed; it must be
 > solved in the adviser window.
 
-Authenticate the adviser in its adviser window, then run `/goal-resume`. Do not treat local
-review, CI, or the successful delivery PR as a substitute for the independent final audit.
-Do not fabricate adviser findings or a “no further auditing” conclusion.
+That historical limitation must not be represented as a blocker for loop 006, which used the
+local adversarial audit documented above. No adviser findings are claimed for either loop.
 
 ## Delivered history
 
 | Audit/report | Delivery | Result |
 |---|---|---|
-| `audits/20260915-001.md` | PR [#85](https://github.com/SaehwanPark/pi-rs/pull/85), merge `4d4d377` | Windows compatibility/portability fixes delivered; adviser access unavailable. |
-| `audits/20260916-002.md` | PR [#86](https://github.com/SaehwanPark/pi-rs/pull/86), merge `5b8aeb4` | Post-merge adviser audit attempt refused before inspection. |
-| `audits/20260916-003.md` | PR [#87](https://github.com/SaehwanPark/pi-rs/pull/87), merge `ca2192e` | Final-audit attempt blocked by the adviser login checkpoint. |
-| `audits/20260916-004.md` | PR [#88](https://github.com/SaehwanPark/pi-rs/pull/88) | Continuation audit refused by the same login checkpoint. |
-| `audits/20260916-005.md` | PR [#88](https://github.com/SaehwanPark/pi-rs/pull/88) | Further continuation audit refused by the same login checkpoint. |
+| `audits/20260915-001.md` | PR [#85](https://github.com/SaehwanPark/pi-rs/pull/85), merge `4d4d377` | Windows compatibility/portability fixes delivered. |
+| `audits/20260916-002.md` | PR [#86](https://github.com/SaehwanPark/pi-rs/pull/86), merge `5b8aeb4` | Portability slice delivered. |
+| `audits/20260916-003.md` | PR [#87](https://github.com/SaehwanPark/pi-rs/pull/87), merge `ca2192e` | Portability slice delivered. |
+| `audits/20260916-004.md` | PR [#88](https://github.com/SaehwanPark/pi-rs/pull/88) | Continuation audit/handoff delivered. |
+| `audits/20260916-005.md` | PR [#88](https://github.com/SaehwanPark/pi-rs/pull/88) | Further continuation record delivered. |
+| `audits/20260916-006.md` | PR [#89](https://github.com/SaehwanPark/pi-rs/pull/89), merge `c86640d` | Durable redaction gaps fixed; residual historical-state disposition is pending user decision. |
 
-PRs #85, #86, #87, and #88 merged into `main` only after the required Ubuntu and macOS CI checks passed. PR #88 records blocked audit attempts 004 and 005 and delivers the durable handoff; no actionable independent finding was returned.
-
-## Changes already delivered
+## Changes delivered in earlier loops
 
 The bounded portability slice is complete and should not be reimplemented:
 
 - Windows-safe extension-host `file:` URL construction and regression coverage.
-- Windows-stable compatibility fixture path handling, git-ceiling isolation, and shell
-  fixtures.
-- Portable built-in-tool test assertions for separators, working-directory output, and
-  nonzero shell exits.
-- Strict-clippy cleanup for cross-platform trust-helper arguments and test-only fixture
-  lifetimes.
+- Windows-stable compatibility fixture path handling, git-ceiling isolation, and shell fixtures.
+- Portable built-in-tool test assertions for separators, working-directory output, and nonzero
+  shell exits.
+- Strict-clippy cleanup for cross-platform trust-helper arguments and test-only fixture lifetimes.
 
-## Verification evidence
-
-The delivered branch passed locally on Windows:
-
-- `cargo fmt --all --check`
-- `cargo check -p pi-rs-core --all-features`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace`
-- `cargo doc --workspace --no-deps`
-- startup benchmark: cold `112.74 ms`, warm median `6.85 ms` (a local `python3` shim was
-  needed because the Windows Apps alias exits 49)
-
-PRs #85, #86, and #87 also passed the repository Ubuntu/macOS CI checks.
-
-## Exact resume procedure
+## Resume procedure for the current residual decision
 
 1. Keep the base at `main` and update it fast-forward only:
 
@@ -87,23 +84,20 @@ PRs #85, #86, and #87 also passed the repository Ubuntu/macOS CI checks.
    git status --short --branch
    ```
 
-2. Leave generated goal state uncommitted. The current worktree may contain
+2. Leave generated goal state uncommitted. The worktree may contain
    `.pi/.goals-pool-snapshot.json` and `.pi/goals/`; these are local runtime artifacts.
-3. Confirm adviser authentication in the adviser window and run `/goal-resume`.
-4. Call `advisor_consult(kind="audit")` against current `main` and retain the complete
-   response and action items.
-5. Write a new dated report under `audits/` containing scope, evidence, findings,
-   dispositions, and iteration status.
-6. For actionable findings, implement one bounded slice, run the required checks, push one
-   branch, open one PR, wait for required checks, and merge only when it is mergeable and
-   clean. For rejected/deferred findings, record the reason explicitly.
-7. Repeat until an actual independent audit explicitly says that no further auditing or
-   actionable improvement is necessary; only then complete the termination review.
+3. Record the user's choice about historical checkpoint scrubbing in the goal/handoff record.
+4. If **defer** is chosen, preserve that decision and the residual-risk wording in a dated
+   status commit. If **remediate now** is chosen, create a new bounded migration plan; do not
+   silently broaden loop 006.
+5. Re-run the applicable checks for any new code or documentation, then update the durable PR/
+   handoff record. Only claim the current goal complete after the decision and evidence are
+   recorded.
 
 ## Guardrails
 
-- The final-audit requirement is still open; merges on `main` record audit progress and durable
-  handoffs, not goal completion.
+- Loop 006's write-time redaction fixes are merged; do not weaken provenance, state, failover,
+  startup, or raw-capture invariants.
 - Never claim hidden reasoning or adviser findings that were not returned.
-- Preserve the one-bounded-slice/one-PR loop and keep audit reports durable in GitHub.
+- Preserve one bounded slice per improvement loop and keep audit reports durable in GitHub.
 - Do not commit generated `.pi` goal artifacts or secrets.
