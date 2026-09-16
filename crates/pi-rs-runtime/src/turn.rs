@@ -404,7 +404,20 @@ impl<'a> TurnLoop<'a> {
         .backup_capabilities
         .clone_from(&self.failover.backup_capabilities);
     }
+    // `required` describes the session, not the retry tuning. Replacing a policy
+    // with `FailoverPolicy::default()` must not silently lower the capability gate
+    // from the primary's actual requirements to the text-only baseline.
+    policy.required.clone_from(&self.failover.required);
     self.failover = policy;
+    self
+  }
+
+  /// Override the capability snapshot a failover policy must preserve.
+  ///
+  /// This is intentionally separate from [`Self::with_failover`], whose purpose
+  /// is to tune retry/takeover behavior without changing what the session needs.
+  pub fn with_required_capabilities(mut self, required: ModelCapabilities) -> Self {
+    self.failover.required = required;
     self
   }
 
@@ -4268,6 +4281,46 @@ mod tests {
     assert_eq!(report.epoch, 1);
     // The override took effect: three attempts against the primary before yielding.
     assert_eq!(primary.levels().len(), 3);
+  }
+
+  #[test]
+  fn a_policy_override_preserves_the_primary_capability_gate() {
+    // Changing retry tuning must not replace the session's required capabilities
+    // with FailoverPolicy's text-only default. The backup lacks tools and must be
+    // refused even though the replacement policy is otherwise valid.
+    let primary =
+      Scripted::new("primary", Vec::new()).always_fails(ModelFailureKind::ProviderUnavailable);
+    let mut backup = Scripted::new("backup", vec![text("must not run")]);
+    backup.capabilities.tools = false;
+    let tools = registry_with(Vec::new());
+    let mut trace = Recorder::default();
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      primary.capabilities().context_window,
+    );
+    let error = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_backup(&backup)
+    .with_failover(FailoverPolicy::default().with_max_attempts(1))
+    .run_turn("hi", &CancelToken::new(), &mut SilentProgress)
+    .expect_err("the text-only backup cannot serve a tool-capable session");
+
+    assert!(matches!(error, TurnError::Unavailable(_)), "{error:?}");
+    assert_eq!(backup.levels().len(), 0, "the capability gate refuses it");
+    assert!(
+      trace
+        .diagnostics()
+        .iter()
+        .any(|message| message.contains("tool calling")),
+      "the refusal names the preserved requirement: {:?}",
+      trace.diagnostics()
+    );
   }
 
   #[test]
