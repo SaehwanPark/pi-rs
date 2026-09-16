@@ -223,12 +223,16 @@ mod tests {
     (dir, workspace)
   }
 
+  fn slash_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+  }
+
   #[test]
   fn relative_paths_resolve_under_the_root() {
     let (_dir, workspace) = root();
     let resolved = workspace.read_path("src/main.rs").unwrap();
     assert!(resolved.starts_with(workspace.root()));
-    assert!(resolved.to_string_lossy().ends_with("src/main.rs"));
+    assert!(slash_path(&resolved).ends_with("src/main.rs"));
   }
 
   #[test]
@@ -262,7 +266,7 @@ mod tests {
   fn a_writable_path_may_not_exist_yet() {
     let (_dir, workspace) = root();
     let resolved = workspace.write_path("new/created.txt").unwrap();
-    assert!(resolved.to_string_lossy().ends_with("new/created.txt"));
+    assert!(slash_path(&resolved).ends_with("new/created.txt"));
   }
 
   #[test]
