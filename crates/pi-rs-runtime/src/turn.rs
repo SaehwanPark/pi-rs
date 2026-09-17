@@ -6103,6 +6103,12 @@ mod tests {
     assert_eq!(runtime.messages()[1].text(), "post-checkpoint summary");
     assert_eq!(runtime.messages()[2].text(), "tail");
     assert_eq!(runtime.checkpoint_floor, 1);
+    let completions = trace.all("context_compaction_completed");
+    let completed = completions
+      .last()
+      .expect("ordinary completion recorded after the checkpoint");
+    assert_eq!(completed["retained_messages"], 1);
+    assert_eq!(completed["removed_messages"], 1);
   }
 
   #[test]

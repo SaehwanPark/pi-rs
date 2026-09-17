@@ -525,7 +525,12 @@ pub struct ContextCompactionStarted {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextCompactionCompleted {
   pub level: ContextLevel,
+  /// Number of model-visible messages replaced by this boundary. For an L3
+  /// checkpoint, protected pre-boundary messages are excluded.
   pub removed_messages: u32,
+  /// Number of semantic tail messages retained after an L1/L2 summary. For an
+  /// L3 checkpoint this is the complete post-boundary working set and includes
+  /// the protected capsule. The inserted summary is not counted.
   pub retained_messages: u32,
   pub context_epoch: u32,
 }

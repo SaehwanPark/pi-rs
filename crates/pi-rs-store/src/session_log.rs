@@ -1087,6 +1087,45 @@ mod tests {
   }
 
   #[test]
+  fn compaction_retained_count_excludes_a_protected_checkpoint_capsule() {
+    let tmp = TempDir::new("sessionlog-compaction-checkpoint-floor");
+    let (layout, id) = session(&tmp);
+    let target = path(&layout, &id);
+    let mut log = SessionLog::create(&target, header(&id)).unwrap();
+    log
+      .append(&SessionRecord::CheckpointBarrier(SessionCheckpointRecord {
+        checkpoint_id: CheckpointId::new(),
+        capsule_version: CAPSULE_SCHEMA_VERSION,
+        context_epoch: 1,
+        capsule_path: "checkpoints/cp.json".into(),
+        capsule: ContextCapsule::new("floor"),
+      }))
+      .unwrap();
+    log.append(&message("old tail", 1)).unwrap();
+    log.append(&message("new tail", 2)).unwrap();
+    log.append(&message("summary", 3)).unwrap();
+    log
+      .append(&SessionRecord::Compaction(SessionCompactionRecord {
+        context_epoch: 2,
+        level: ContextLevel::L1Ordinary,
+        removed_messages: 1,
+        retained_from: 0,
+        retained_messages: 1,
+        summary_present: true,
+        replaces_from: None,
+        replaces_through: None,
+      }))
+      .unwrap();
+    drop(log);
+
+    let restored = restore(&target).unwrap();
+    assert_eq!(restored.messages.len(), 2);
+    assert_eq!(restored.messages[0].message.text(), "summary");
+    assert_eq!(restored.messages[1].message.text(), "new tail");
+    assert_eq!(restored.checkpoint.unwrap().objective, "floor");
+  }
+
+  #[test]
   fn a_reduction_preserves_the_checkpoint_capsule() {
     let tmp = TempDir::new("sessionlog-reduction-checkpoint");
     let (layout, id) = session(&tmp);

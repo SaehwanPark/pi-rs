@@ -229,14 +229,17 @@ Producers: yes (`crates/pi-rs-runtime/src/turn.rs:921`)
 
 Purpose: compaction began at a safe boundary.
 Fields: `level: ContextLevel`, `reason: String`.
-Producers: **none found**. Consumed at `crates/pi-rs-tui/src/transcript.rs:419`. See §1.4.
+Producer: `TurnLoop::compact_range`/phase paths. Consumed at
+`crates/pi-rs-tui/src/transcript.rs:419`. See §1.4.
 
 #### `context_compaction_completed` — `AgentEvent::ContextCompactionCompleted` (`event.rs:258`), payload `event.rs:464`
 
 Purpose: compaction finished and what it retained.
 Fields: `level: ContextLevel`, `removed_messages: u32`, `retained_messages: u32`,
-`context_epoch: u32`.
-Producers: **none found**. Consumed at `crates/pi-rs-tui/src/transcript.rs:426`. See §1.4.
+`context_epoch: u32`. L1/L2 retained counts exclude a protected checkpoint
+capsule; L3 checkpoint counts include that capsule.
+Producer: `TurnLoop::compact_range`/checkpoint paths; consumed at
+`crates/pi-rs-tui/src/transcript.rs:426`. See §1.4.
 
 #### `checkpoint_created` — `AgentEvent::CheckpointCreated` (`event.rs:263`), payload `event.rs:472`
 
@@ -244,7 +247,8 @@ Purpose: an episode checkpoint capsule was written.
 Fields: `checkpoint_id: CheckpointId`, `capsule_version: u32`,
 `summarized_events: u64`, `path: String`, `context_epoch: u32` (optional for
 legacy traces).
-Producers: **none found**. Consumed at `crates/pi-rs-tui/src/transcript.rs:445`; the store
+Producer: `TurnLoop::checkpoint`/`checkpoint_turn_prefix`. Consumed at
+`crates/pi-rs-tui/src/transcript.rs:445`; the store
 documents that the caller still owes the event
 (`crates/pi-rs-store/src/store.rs:409`). See §1.4.
 
@@ -396,8 +400,11 @@ into this record so resume can restore the active epoch and continue numbering.
 `SessionCompactionRecord` (`session.rs:95`): `context_epoch: u32`,
 `level: crate::context::ContextLevel`, `removed_messages: u32`, `retained_from: u32`,
 `retained_messages: u32`, `summary_present: bool`, and optional canonical
-`replaces_from`/`replaces_through` sequence bounds. The latter fields let resume
-reconstruct `[summary, retained tail]` without confusing session-line and
+`replaces_from`/`replaces_through` sequence bounds. For L1/L2 records,
+`retained_messages` counts the semantic tail after the summary; the protected
+checkpoint capsule is stored separately. L3 checkpoint records instead count the
+capsule plus its retained tail. The latter fields let resume reconstruct
+`[capsule?, summary, retained tail]` without confusing session-line and
 canonical event-sequence coordinates; older records default them to zero/false.
 
 `SessionReductionRecord` (`session.rs:128`) is the durable L0 history-eviction
