@@ -1793,7 +1793,20 @@ impl<'a> TurnLoop<'a> {
       .as_ref()
       .map(|caps| caps.context_window.saturating_sub(1_024))
       .unwrap_or(4_096);
-    self.evict_oldest(target, &turn_id, turn_history_start)
+    let checkpoint = self.checkpoint_floor.min(self.messages.len());
+    let turn_start = (*turn_history_start).min(self.messages.len());
+    let had_evictable_history = turn_start.max(checkpoint) > checkpoint;
+    let dropped = self.evict_oldest(target, &turn_id, turn_history_start)?;
+    // `safe_eviction_boundary` may refuse every candidate when the oldest
+    // retained unit is an incomplete tool lifecycle. Do not switch epochs and
+    // send a request that is known to exceed the backup budget in that case;
+    // a smaller model cannot repair an invalid history by receiving it.
+    if had_evictable_history && estimate_messages(&self.messages) > target {
+      return Err(TurnError::Sink(format!(
+        "cannot safely rebudget history below the backup context target of {target} tokens"
+      )));
+    }
+    Ok(dropped)
   }
 
   /// Drop the oldest model-visible turns until the estimate reaches `target`, and
@@ -5013,6 +5026,55 @@ mod tests {
       0,
       "{kinds:?}",
       kinds = trace.kinds()
+    );
+  }
+
+  #[test]
+  fn a_narrower_backup_refuses_an_unrecoverable_tool_boundary() {
+    let primary =
+      Scripted::new("primary", Vec::new()).always_fails(ModelFailureKind::ProviderUnavailable);
+    let mut backup = Scripted::new("backup", vec![text("must not run")]);
+    backup.capabilities.context_window = 1_100;
+    let mut assistant_with_open_call = Message::assistant("planning");
+    assistant_with_open_call
+      .content
+      .push(ContentBlock::ToolCall(ToolCallBlock {
+        id: pi_rs_core::ToolCallId::new(),
+        name: "write".into(),
+        arguments: serde_json::json!({"path":"state"}),
+      }));
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      primary.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_backup(&backup)
+    .with_messages(vec![
+      Message::user("a".repeat(20_000)),
+      assistant_with_open_call,
+      Message::user("current turn"),
+    ]);
+    let mut turn_start = 2;
+    let error = runtime
+      .rebudget(TurnId::new(), &mut turn_start)
+      .expect_err("an incomplete tool unit cannot be crossed to fit the backup");
+
+    assert!(
+      matches!(error, TurnError::Sink(ref message) if message.contains("cannot safely rebudget")),
+      "unexpected error: {error:?}"
+    );
+    assert!(
+      backup.requests().is_empty(),
+      "rebudget must not contact the backup"
     );
   }
 
