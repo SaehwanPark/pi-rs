@@ -220,7 +220,9 @@ resource, citation, source metadata, byte count, and inline/reference state.
 
 Purpose: model-visible payload was reduced to a bounded representation.
 Fields: `reason: ReductionReason`, `original_bytes: u64`, `visible_bytes: u64`,
-`blob: BlobRef`, `recovery_ref: String`, `tool_call_id: Option<ToolCallId>`.
+optional `removed_messages`/`retained_messages` history counts, optional `blob: BlobRef`,
+optional `recovery_ref: String`, and optional `tool_call_id: ToolCallId`. Nonzero
+`removed_messages` is also projected as a session `reduction` record.
 Producers: yes (`crates/pi-rs-runtime/src/turn.rs:921`)
 
 #### `context_compaction_started` — `AgentEvent::ContextCompactionStarted` (`event.rs:253`), payload `event.rs:458`
@@ -240,7 +242,8 @@ Producers: **none found**. Consumed at `crates/pi-rs-tui/src/transcript.rs:426`.
 
 Purpose: an episode checkpoint capsule was written.
 Fields: `checkpoint_id: CheckpointId`, `capsule_version: u32`,
-`summarized_events: u64`, `path: String`.
+`summarized_events: u64`, `path: String`, `context_epoch: u32` (optional for
+legacy traces).
 Producers: **none found**. Consumed at `crates/pi-rs-tui/src/transcript.rs:445`; the store
 documents that the caller still owes the event
 (`crates/pi-rs-store/src/store.rs:409`). See §1.4.
@@ -276,20 +279,16 @@ All three are `#[serde(rename_all = "snake_case")]` and carry no tag.
 `AttributedMessage` (`event.rs:499`) is a struct, not an event variant:
 `envelope: EventEnvelope`, `message: Message`, used by session reconstruction.
 
-### 1.4 Variants with zero production producers
+### 1.4 Compaction/checkpoint production and recovery
 
-Three of the 22 variants are never constructed by production code:
-
-| Variant | `AgentEvent::…` mentions outside `#[cfg(test)]` |
-| --- | --- |
-| `context_compaction_started` | none |
-| `context_compaction_completed` | none |
-| `checkpoint_created` | none |
-
-`external_context_retrieved` now has a production producer in
-`TurnLoop::run_turn_with_external_context`; its metadata is retained in the event and
-session projection. The remaining three zero-producer compaction/checkpoint variants are
-still an explicit documentation finding, not a fix.
+`context_compaction_started`, `context_summary`,
+`context_compaction_epoch`, and `context_compaction_completed` are emitted by the
+runtime's compaction path. `checkpoint_created` is emitted after its capsule is
+written and carries the next context epoch. `StoreTrace` coordinates each event
+that has a semantic projection with a per-session WAL; an incomplete L1/L2
+lifecycle is refused rather than resumed with a partially reduced context. L3
+checkpoint completion has no separate `context_compaction_started` event and is
+recognized as a checkpoint lifecycle.
 
 ## 2. Session records
 
@@ -343,6 +342,7 @@ function: the `type` key holds the snake_case variant name (`session.rs:31`).
 | `Epoch` | `session.rs:38` | `"epoch"` | `SessionEpochRecord` (`session.rs:87`) |
 | `Compaction` | `session.rs:41` | `"compaction"` | `SessionCompactionRecord` (`session.rs:95`) |
 | `CheckpointBarrier` | `session.rs:43` | `"checkpoint_barrier"` | `SessionCheckpointRecord` (`session.rs:105`) |
+| `Reduction` | `session.rs:46` | `"reduction"` | `SessionReductionRecord` (`session.rs:128`) |
 
 Enumerated with:
 
@@ -362,9 +362,12 @@ strings for an internally-tagged union is the event-side one at
 `"model_epoch_started"`, `"user_message"`, `"model_request_started"`,
 `"model_request_completed"`, `"turn_completed"`).
 
-`SESSION_SCHEMA_VERSION: u32 = 1` (`session.rs:27`) is stamped into the header's `version`
-field, and a file claiming a newer version is refused rather than partially read
-(`crates/pi-rs-store/src/session_log.rs:226-231`).
+`SESSION_SCHEMA_VERSION: u32 = 3` (`session.rs`) is stamped into new headers.
+Version 1 remains readable for files using only its original record variants;
+version-1 files containing the version-2 `reduction` record are rejected rather
+than partially read or silently shortened. Version 2 remains readable with a
+zero/default checkpoint context epoch. A file claiming a newer version is also
+refused (`crates/pi-rs-store/src/session_log.rs`).
 
 ### 2.3 Record payload fields, quoted from `session.rs`
 
@@ -392,13 +395,24 @@ into this record so resume can restore the active epoch and continue numbering.
 
 `SessionCompactionRecord` (`session.rs:95`): `context_epoch: u32`,
 `level: crate::context::ContextLevel`, `removed_messages: u32`, `retained_from: u32`,
-`retained_messages: u32`, and `summary_present: bool`. The latter two fields let
-resume reconstruct `[summary, retained tail]` without confusing session-line and
+`retained_messages: u32`, `summary_present: bool`, and optional canonical
+`replaces_from`/`replaces_through` sequence bounds. The latter fields let resume
+reconstruct `[summary, retained tail]` without confusing session-line and
 canonical event-sequence coordinates; older records default them to zero/false.
 
+`SessionReductionRecord` (`session.rs:128`) is the durable L0 history-eviction
+projection: `event_id: EventId`, optional `seq: EventSeq`, `reason: ReductionReason`,
+`removed_messages: u32`, and `retained_messages: u32`. `SessionLog::restore` applies
+these records in order, draining exactly the evicted model-visible prefix rather
+than re-expanding history after failover or resume.
+
 `SessionCheckpointRecord` (`session.rs:105`): `checkpoint_id: CheckpointId`,
-`capsule_version: u32`, `capsule_path: String`, `capsule: ContextCapsule`. The capsule is
-"duplicated here so that resume needs one read" (`session.rs:110-111`).
+`capsule_version: u32`, `context_epoch: u32`, `capsule_path: String`,
+`capsule: ContextCapsule`. The context epoch joins the barrier to its canonical
+`CheckpointCreated` event and L3 completion. Modern `Store::restore` refuses an
+incomplete barrier lifecycle rather than guessing the retained tail; direct
+legacy session-log reads may still stage a barrier for compatibility. The
+capsule is "duplicated here so that resume needs one read" (`session.rs:110-111`).
 
 `SessionSummary` (`session.rs:120`) is not a journal line. It is the listing entry —
 `session_id: SessionId`, `started_at_ms: u64`, `working_dir: String`, `model: ModelRef`,
@@ -411,13 +425,14 @@ metadata lookup is a startup-path concern" (`session.rs:117-118`). Produced by
 
 ### 2.4 The JSONL write path
 
-Two files per session, named by the layout:
-`sessions/<id>.jsonl` (`crates/pi-rs-store/src/layout.rs:75-80`,
-`const SESSION_EXTENSION: &str = "jsonl"` at `layout.rs:39`) and
-`sessions/<id>.trace.jsonl` (`layout.rs:82-84`,
-`const TRACE_SUFFIX: &str = ".trace.jsonl"` at `layout.rs:40`). The module header calls the
-first "semantic session state" and the second "high-resolution trace"
-(`layout.rs:9-10`).
+Per-session durable state is named by the layout:
+`sessions/<id>.jsonl` (semantic projection), `sessions/<id>.trace.jsonl`
+(canonical high-resolution trace), `sessions/<id>.wal.jsonl` (short-lived
+trace/projection recovery intents), and `leases/<id>.lease` (exclusive process
+ownership, outside the deletable session directory). The WAL is compacted after clean commits; an uncommitted
+intent blocks read-only continuation until `Store::resume` repairs or refuses
+it. `begin` and `resume` hold the lease for the `Session` lifetime, while
+retention takes the same lease nonblocking before deleting a victim.
 
 * `SessionLog::create` (`session_log.rs:46`) / `create_with_policy` (`session_log.rs:51`)
   sanitize the header, serialize it with
@@ -449,11 +464,13 @@ first "semantic session state" and the second "high-resolution trace"
 
 ### 2.5 What the checkpoint barrier is for
 
-The module states the contract directly (`session.rs:10-12`):
+The module states the model-visible contract directly (`session.rs:10-12`):
 
 > [`SessionRecord::CheckpointBarrier`] marks everything before it as summarized by a
-> capsule. Resume cost is then `latest checkpoint + events after it`, which is what keeps
-> large historical sessions cheap to open.
+> capsule. Once the matching canonical checkpoint completion is present, resume cost is
+> `latest checkpoint + events after it`, which is what keeps large historical sessions
+> cheap to open. A barrier without that completion is an interrupted lifecycle and is
+> refused by `Store::restore`.
 
 `restore` implements exactly that, under the doc comment "Restore session state as
 `latest checkpoint + records after it`" (`session_log.rs:285-286`):

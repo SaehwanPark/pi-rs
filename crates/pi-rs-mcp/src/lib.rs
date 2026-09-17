@@ -15,6 +15,7 @@ pub mod client;
 pub mod error;
 pub mod manager;
 pub mod protocol;
+mod relay;
 pub mod tool;
 pub mod transport;
 pub mod worker;

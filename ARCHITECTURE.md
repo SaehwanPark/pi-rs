@@ -217,20 +217,26 @@ A journal line carries an inline budget. Above it, whole fields move to the sess
 
 Blob payload compression is optional and disabled by default. When enabled, the store prefers raw Deflate only when it reduces the logical payload; the persisted `BlobRef` records the encoding suffix while its hash and size remain those of the redacted uncompressed bytes. Existing raw references remain readable, and the append-only JSONL journal itself is never compressed so tail recovery, inspection, and export remain plain-file operations.
 
-Possible layout:
+Durable layout (the session files are kept flat so listing only reads headers):
 
 ```text
 .pi-rs/
   sessions/
+    <session-id>.jsonl              semantic resume projection
+    <session-id>.trace.jsonl        canonical ordered trace
+    <session-id>.wal.jsonl          crash-recovery projection intents
     <session-id>/
-      session.jsonl
-      trace.jsonl
       blobs/
-      artifacts/
       checkpoints/
+  leases/
+    <session-id>.lease                 exclusive session ownership
+  artifacts/
 ```
 
-Exact paths remain configurable.
+Exact paths remain configurable. A committed WAL is compacted; an incomplete
+intent blocks read-only continuation until resume repairs it or fails closed.
+`begin` and `resume` hold the per-session lease for the handle lifetime, and
+retention acquires the same lease before deleting a victim.
 
 ## 8. Reasoning provenance
 
@@ -476,7 +482,9 @@ Rules:
 - stdio and the bounded Streamable HTTP adapter are supported; HTTP POST responses are
   bounded, JSON/SSE response ids are checked, session headers are carried, and protocol-owned
   headers cannot be overridden;
-- long-lived server push and cancellation-aware blocked HTTP reads remain deferred.
+- long-lived server push remains deferred; one-shot HTTP calls run behind a per-request
+  local relay authenticated by a per-attempt nonce, so cancellation closes and joins the
+  in-flight worker without reposting; configured HTTP proxy routes are preserved.
 
 ## 15. MCP server / worker mode
 

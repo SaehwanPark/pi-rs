@@ -3,7 +3,7 @@
 use std::{
   collections::{BTreeMap, HashMap},
   fmt,
-  io::{BufReader, Read, Write},
+  io::{self, BufReader, Read, Write},
   process::{Child, ChildStdin, Command, Stdio},
   sync::{
     Arc, Mutex,
@@ -19,6 +19,7 @@ use serde_json::Value;
 use crate::{
   error::McpError,
   protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse},
+  relay::CancellableHttpRelay,
 };
 
 /// MCP transport contract.
@@ -58,6 +59,7 @@ const MAX_HTTP_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_HTTP_ERROR_BYTES: u64 = 8 * 1024;
 const MAX_HTTP_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STDIO_RESPONSE_LINE_BYTES: usize = 1024 * 1024;
+const MAX_STDIO_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_STDIO_DIAGNOSTIC_LINE_BYTES: usize = 64 * 1024;
 const RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -267,7 +269,7 @@ impl McpTransport for StdioTransport {
       });
     }
 
-    let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+    let id = next_request_id(&self.next_id)?;
     let (tx, rx) = mpsc::sync_channel(1);
 
     {
@@ -285,6 +287,13 @@ impl McpTransport for StdioTransport {
         )));
       }
     };
+
+    if serialized.len() > MAX_STDIO_REQUEST_BYTES {
+      self.pending.lock().unwrap().remove(&id);
+      return Err(McpError::Protocol(format!(
+        "MCP stdio request exceeds {MAX_STDIO_REQUEST_BYTES} bytes"
+      )));
+    }
 
     {
       let mut stdin = self.stdin.lock().unwrap();
@@ -338,6 +347,11 @@ impl McpTransport for StdioTransport {
     let notification = JsonRpcNotification::new(method, params);
     let serialized = serde_json::to_string(&notification)
       .map_err(|e| McpError::Protocol(format!("failed to serialize notification: {e}")))?;
+    if serialized.len() > MAX_STDIO_REQUEST_BYTES {
+      return Err(McpError::Protocol(format!(
+        "MCP stdio notification exceeds {MAX_STDIO_REQUEST_BYTES} bytes"
+      )));
+    }
 
     let mut stdin = self.stdin.lock().unwrap();
     writeln!(stdin, "{serialized}").map_err(|e| {
@@ -380,9 +394,12 @@ pub struct HttpTransport {
   url: String,
   headers: BTreeMap<String, String>,
   next_id: AtomicU64,
-  session_id: Mutex<Option<String>>,
-  protocol_version: Mutex<Option<String>>,
-  alive: AtomicBool,
+  session_id: Arc<Mutex<Option<String>>>,
+  protocol_version: Arc<Mutex<Option<String>>>,
+  alive: Arc<AtomicBool>,
+  /// Per-attempt credential for the localhost cancellation relay.
+  relay_nonce: Option<String>,
+  timeout: Duration,
 }
 
 impl fmt::Debug for HttpTransport {
@@ -437,10 +454,33 @@ impl HttpTransport {
       url,
       headers,
       next_id: AtomicU64::new(1),
-      session_id: Mutex::new(None),
-      protocol_version: Mutex::new(None),
-      alive: AtomicBool::new(true),
+      session_id: Arc::new(Mutex::new(None)),
+      protocol_version: Arc::new(Mutex::new(None)),
+      alive: Arc::new(AtomicBool::new(true)),
+      relay_nonce: None,
+      timeout: DEFAULT_REQUEST_TIMEOUT,
     })
+  }
+
+  /// Set the logical request deadline. The transport remains lazy; this only
+  /// changes the timeout used once a call is made.
+  pub fn with_timeout(mut self, timeout: Duration) -> Self {
+    self.timeout = timeout.max(Duration::from_millis(1));
+    self
+  }
+
+  fn clone_for_worker(&self, timeout: Duration, agent: ureq::Agent, relay_nonce: String) -> Self {
+    Self {
+      agent,
+      url: self.url.clone(),
+      headers: self.headers.clone(),
+      next_id: AtomicU64::new(self.next_id.load(Ordering::SeqCst)),
+      session_id: Arc::clone(&self.session_id),
+      protocol_version: Arc::clone(&self.protocol_version),
+      alive: Arc::clone(&self.alive),
+      relay_nonce: Some(relay_nonce),
+      timeout,
+    }
   }
 
   fn send(&self, body: &str) -> Result<ureq::Response, McpError> {
@@ -456,9 +496,16 @@ impl HttpTransport {
     for (name, value) in &self.headers {
       request = request.set(name, value);
     }
+    if let Some(nonce) = &self.relay_nonce {
+      request = request.set("x-pi-rs-relay-nonce", nonce);
+    }
     request = request
       .set("content-type", "application/json")
-      .set("accept", "application/json, text/event-stream");
+      .set("accept", "application/json, text/event-stream")
+      // The worker owns the in-flight request. A per-request deadline keeps a
+      // cancelled caller from leaving a socket blocked on the agent's much
+      // longer default timeout.
+      .timeout(self.timeout);
     if let Some(session_id) = self.session_id.lock().unwrap().as_deref() {
       request = request.set("Mcp-Session-Id", session_id);
     }
@@ -481,6 +528,9 @@ impl HttpTransport {
         )))
       }
       Err(error) => {
+        if is_ureq_timeout(&error) {
+          return Err(McpError::Timeout);
+        }
         self.alive.store(false, Ordering::SeqCst);
         Err(McpError::Transport(format!(
           "MCP HTTP request failed: {error}"
@@ -492,12 +542,93 @@ impl HttpTransport {
 
 impl McpTransport for HttpTransport {
   fn call(&self, method: &str, params: Option<Value>) -> Result<Value, McpError> {
-    let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+    self.call_with_context(method, params, &ToolExecutionContext::unbounded())
+  }
+
+  fn call_with_context(
+    &self,
+    method: &str,
+    params: Option<Value>,
+    context: &ToolExecutionContext,
+  ) -> Result<Value, McpError> {
+    if !self.is_alive() {
+      return Err(McpError::Transport("MCP HTTP transport is closed".into()));
+    }
+    if context.is_cancelled_or_expired() {
+      return Err(if context.is_cancelled() {
+        McpError::Cancelled
+      } else {
+        McpError::Timeout
+      });
+    }
+    let id = next_request_id(&self.next_id)?;
     let request = JsonRpcRequest::new(id, method, params);
     let serialized = serde_json::to_string(&request)
       .map_err(|error| McpError::Protocol(format!("failed to serialize request: {error}")))?;
-    let response = self.send(&serialized)?;
-    decode_http_response(response, id)
+    let timeout = context
+      .remaining()
+      .map(|remaining| remaining.min(self.timeout))
+      .unwrap_or(self.timeout)
+      .max(Duration::from_millis(1));
+    let mut relay = CancellableHttpRelay::start(&self.url, timeout).map_err(|error| {
+      McpError::Transport(format!("MCP cancellation relay failed to start: {error}"))
+    })?;
+    let proxy = ureq::Proxy::new(relay.proxy_url())
+      .map_err(|error| McpError::Transport(format!("MCP cancellation relay URL: {error}")))?;
+    let worker_agent = ureq::builder()
+      .timeout_connect(timeout)
+      .timeout_read(timeout)
+      .timeout_write(timeout)
+      .user_agent(&format!("pi-rs-relay/{}", relay.nonce()))
+      .proxy(proxy)
+      .build();
+    let worker = self.clone_for_worker(timeout, worker_agent, relay.nonce().to_string());
+    let (tx, rx) = mpsc::sync_channel(1);
+    let worker_handle = std::thread::spawn(move || {
+      let result = worker
+        .send(&serialized)
+        .and_then(|response| decode_http_response(response, id));
+      let _ = tx.send(result);
+    });
+    loop {
+      if context.is_cancelled_or_expired() {
+        // Closing the relay aborts the worker's one in-flight socket. Join it
+        // before returning so cancellation cannot leave a detached request
+        // behind or overlap a later mutating call.
+        relay.stop();
+        let _ = worker_handle.join();
+        // The relay was the cancelled exchange, not the MCP endpoint. The
+        // worker's socket teardown can surface as a generic ureq transport
+        // error; do not let that implementation detail poison the pooled
+        // transport for the next request.
+        self.alive.store(true, Ordering::SeqCst);
+        return Err(if context.is_cancelled() {
+          McpError::Cancelled
+        } else {
+          McpError::Timeout
+        });
+      }
+      let wait = context
+        .remaining()
+        .map(|remaining| remaining.min(RESPONSE_POLL_INTERVAL))
+        .unwrap_or(RESPONSE_POLL_INTERVAL);
+      match rx.recv_timeout(wait) {
+        Ok(result) => {
+          relay.stop();
+          let _ = worker_handle.join();
+          return result;
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+          self.alive.store(false, Ordering::SeqCst);
+          relay.stop();
+          let _ = worker_handle.join();
+          return Err(McpError::Transport(
+            "MCP HTTP worker exited without a result".into(),
+          ));
+        }
+      }
+    }
   }
 
   fn notify(&self, method: &str, params: Option<Value>) -> Result<(), McpError> {
@@ -523,6 +654,12 @@ impl McpTransport for HttpTransport {
     self.alive.store(false, Ordering::SeqCst);
     Ok(())
   }
+}
+
+fn next_request_id(next_id: &AtomicU64) -> Result<u64, McpError> {
+  next_id
+    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |id| id.checked_add(1))
+    .map_err(|_| McpError::Transport("MCP request id space is exhausted".into()))
 }
 
 fn terminate_process_tree(child: &mut Child) {
@@ -581,6 +718,20 @@ fn is_reserved_header(name: &str) -> bool {
   ]
   .iter()
   .any(|reserved| name.eq_ignore_ascii_case(reserved))
+}
+
+fn is_ureq_timeout(error: &ureq::Error) -> bool {
+  let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+  while let Some(error) = current {
+    if let Some(io_error) = error.downcast_ref::<io::Error>()
+      && (io_error.kind() == io::ErrorKind::TimedOut
+        || matches!(io_error.raw_os_error(), Some(110 | 10060)))
+    {
+      return true;
+    }
+    current = error.source();
+  }
+  false
 }
 
 fn redact_url(url: &str) -> String {
@@ -678,9 +829,13 @@ fn read_http_body(response: ureq::Response) -> Result<Vec<u8>, McpError> {
 fn read_http_body_with_limit(response: ureq::Response, limit: u64) -> Result<Vec<u8>, McpError> {
   let mut body = Vec::new();
   let mut reader = response.into_reader().take(limit + 1);
-  reader
-    .read_to_end(&mut body)
-    .map_err(|error| McpError::Transport(format!("cannot read MCP HTTP response: {error}")))?;
+  reader.read_to_end(&mut body).map_err(|error| {
+    if error.kind() == io::ErrorKind::TimedOut || error.kind() == io::ErrorKind::WouldBlock {
+      McpError::Timeout
+    } else {
+      McpError::Transport(format!("cannot read MCP HTTP response: {error}"))
+    }
+  })?;
   if body.len() as u64 > limit {
     return Err(McpError::Protocol(format!(
       "MCP HTTP response exceeds {limit} bytes"
@@ -995,6 +1150,62 @@ mod tests {
     assert!(rendered.len() < 2_000, "status diagnostics must be bounded");
     assert!(transport.is_alive());
     handle.join().unwrap();
+  }
+
+  #[test]
+  fn http_transport_enforces_a_request_deadline_without_reposting() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+    let address = listener.local_addr().expect("fixture address");
+    let handle = thread::spawn(move || {
+      let (mut stream, _) = listener.accept().expect("accept fixture request");
+      let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+      let mut request = [0u8; 1];
+      let _ = stream.read(&mut request);
+      thread::sleep(Duration::from_millis(300));
+    });
+    let transport = HttpTransport::new(format!("http://{address}/mcp"), BTreeMap::new())
+      .expect("transport")
+      .with_timeout(Duration::from_millis(75));
+    let started = std::time::Instant::now();
+    let error = transport.call("hang", None).unwrap_err();
+    assert!(matches!(error, McpError::Timeout), "{error}");
+    assert!(started.elapsed() < Duration::from_millis(250));
+    handle.join().expect("server");
+  }
+
+  #[test]
+  fn http_transport_call_cancellation_returns_without_waiting_for_the_server() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+    let address = listener.local_addr().expect("fixture address");
+    let handle = thread::spawn(move || {
+      let (mut stream, _) = listener.accept().expect("accept fixture request");
+      let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+      let mut request = [0u8; 1];
+      let _ = stream.read(&mut request);
+      thread::sleep(Duration::from_millis(500));
+    });
+    let transport = HttpTransport::new(format!("http://{address}/mcp"), BTreeMap::new())
+      .expect("transport")
+      .with_timeout(Duration::from_secs(10));
+    let cancel = pi_rs_core::CancelToken::new();
+    let trigger = cancel.clone();
+    let killer = thread::spawn(move || {
+      thread::sleep(Duration::from_millis(75));
+      trigger.cancel();
+    });
+    let context = ToolExecutionContext::new(cancel, Duration::from_secs(10));
+    let started = std::time::Instant::now();
+    let error = transport
+      .call_with_context("hang", None, &context)
+      .unwrap_err();
+    killer.join().expect("canceller");
+    assert!(matches!(error, McpError::Cancelled), "{error}");
+    assert!(
+      transport.is_alive(),
+      "cancelling one HTTP exchange must not permanently close the transport"
+    );
+    assert!(started.elapsed() < Duration::from_millis(250));
+    handle.join().expect("server");
   }
 
   #[test]

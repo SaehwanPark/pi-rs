@@ -238,6 +238,24 @@ fn an_unanswered_prompt_does_not_become_permission() {
 }
 
 #[test]
+fn invalid_infallible_policy_refuses_execution_instead_of_using_the_old_workspace() {
+  let dir = fixture();
+  let reg = ToolRegistry::new(workspace(dir.path())).with_policy(&ToolPolicy {
+    cwd: Some(dir.path().join("missing").display().to_string()),
+    ..ToolPolicy::default()
+  });
+  let executed = run(&reg, "read", json!({"path": "README.md"}));
+  assert!(!executed.started);
+  assert!(
+    executed
+      .refusal
+      .as_deref()
+      .is_some_and(|message| message.contains("configuration is invalid")),
+    "{executed:?}"
+  );
+}
+
+#[test]
 fn policy_can_deny_a_single_tool_without_disabling_the_rest() {
   let dir = fixture();
   let policy = ToolPolicy {

@@ -45,28 +45,63 @@ impl<T> ReadReport<T> {
   }
 }
 
+/// Maximum line size accepted by the general JSONL readers.
+///
+/// Session messages and trace payloads may be large, but an unbounded `read_line`
+/// turns a corrupt file into an allocation primitive. Oversized lines are counted
+/// as malformed and therefore fail closed at the store validation boundary.
+pub const MAX_JSONL_LINE_BYTES: usize = 16 * 1024 * 1024;
+
 /// Decode one JSONL file, skipping unusable lines.
 pub fn read_jsonl<T: DeserializeOwned>(path: &Path) -> Result<ReadReport<T>, StoreError> {
+  read_jsonl_with_limit(path, MAX_JSONL_LINE_BYTES)
+}
+
+/// Decode one JSONL file with an explicit per-line bound.
+pub(crate) fn read_jsonl_with_limit<T: DeserializeOwned>(
+  path: &Path,
+  max_line_bytes: usize,
+) -> Result<ReadReport<T>, StoreError> {
+  read_jsonl_with_limits(path, max_line_bytes, usize::MAX)
+}
+
+/// Decode one JSONL file with both per-line and decoded-entry bounds.
+///
+/// The entry bound matters for small, valid lines: a file made of millions of
+/// tiny records can exhaust memory even when every individual line is safe.
+pub(crate) fn read_jsonl_with_limits<T: DeserializeOwned>(
+  path: &Path,
+  max_line_bytes: usize,
+  max_items: usize,
+) -> Result<ReadReport<T>, StoreError> {
   let file = open(path)?;
   let mut reader = BufReader::new(file);
   let mut items = Vec::new();
   let mut malformed = 0usize;
   let mut first_malformed_line = None;
-  let mut line = String::new();
   let mut number = 0usize;
-  loop {
-    line.clear();
-    let read = reader.read_line(&mut line)?;
-    if read == 0 {
-      break;
-    }
+  while let Some((line, oversized)) = read_bounded_line(&mut reader, max_line_bytes)? {
     number += 1;
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
+    if oversized {
+      malformed += 1;
+      first_malformed_line.get_or_insert(number);
       continue;
     }
-    match serde_json::from_str(trimmed) {
-      Ok(item) => items.push(item),
+    let trimmed = line.strip_suffix(b"\n").unwrap_or(&line);
+    let trimmed = trimmed.strip_suffix(b"\r").unwrap_or(trimmed);
+    if trimmed.iter().all(u8::is_ascii_whitespace) {
+      continue;
+    }
+    match serde_json::from_slice(trimmed) {
+      Ok(item) => {
+        if items.len() >= max_items {
+          return Err(StoreError::Invalid(format!(
+            "{} contains more than {max_items} decoded JSONL entries",
+            path.display()
+          )));
+        }
+        items.push(item);
+      }
       Err(_) => {
         malformed += 1;
         first_malformed_line.get_or_insert(number);
@@ -78,6 +113,41 @@ pub fn read_jsonl<T: DeserializeOwned>(path: &Path) -> Result<ReadReport<T>, Sto
     malformed,
     first_malformed_line,
   })
+}
+
+/// Read and discard one bounded line without allocating its unbounded suffix.
+fn read_bounded_line<R: BufRead>(
+  reader: &mut R,
+  max_line_bytes: usize,
+) -> std::io::Result<Option<(Vec<u8>, bool)>> {
+  let mut line = Vec::new();
+  let mut oversized = false;
+  loop {
+    let available = reader.fill_buf()?;
+    if available.is_empty() {
+      if line.is_empty() && !oversized {
+        return Ok(None);
+      }
+      return Ok(Some((line, oversized)));
+    }
+    let end = available
+      .iter()
+      .position(|byte| *byte == b'\n')
+      .map_or(available.len(), |index| index + 1);
+    if !oversized {
+      if line.len().saturating_add(end) > max_line_bytes {
+        oversized = true;
+        line.clear();
+      } else {
+        line.extend_from_slice(&available[..end]);
+      }
+    }
+    let has_newline = available.get(end.saturating_sub(1)) == Some(&b'\n');
+    reader.consume(end);
+    if has_newline {
+      return Ok(Some((line, oversized)));
+    }
+  }
 }
 
 /// Decode the tail of a JSONL file without reading the whole thing.
@@ -159,11 +229,25 @@ pub fn read_first_line(path: &Path) -> Result<Option<String>, StoreError> {
     Err(error) => return Err(error),
   };
   let mut reader = BufReader::new(file);
-  let mut line = String::new();
-  if reader.read_line(&mut line)? == 0 {
+  let Some((line, oversized)) = read_bounded_line(&mut reader, MAX_JSONL_LINE_BYTES)? else {
     return Ok(None);
+  };
+  if oversized {
+    return Err(StoreError::Invalid(format!(
+      "{} has a session header larger than the {}-byte JSONL limit",
+      path.display(),
+      MAX_JSONL_LINE_BYTES
+    )));
   }
-  let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
+  let trimmed = String::from_utf8(line)
+    .map_err(|error| {
+      StoreError::Invalid(format!(
+        "{} has an invalid UTF-8 header: {error}",
+        path.display()
+      ))
+    })?
+    .trim_end_matches(['\n', '\r'])
+    .to_string();
   if trimmed.is_empty() {
     return Ok(None);
   }
@@ -241,9 +325,26 @@ impl LineWriter {
     }
     self.file.write_all(self.buffer.as_bytes())?;
     self.file.flush()?;
+    // A durable transition must survive a process crash, not merely reach the
+    // kernel's page cache. Streaming deltas still amortize this at the bounded
+    // buffer threshold; semantic lines pay the sync cost deliberately.
+    self.file.sync_data()?;
     self.buffer.clear();
     self.pending = 0;
     self.buffered_bytes = 0;
+    Ok(())
+  }
+
+  /// Truncate a journal that has no pending semantic work.
+  ///
+  /// This is used by the portable WAL compactor on platforms where replacing
+  /// an open file is not reliable. Callers must establish that no intent is
+  /// pending before clearing; an interrupted clear can only lose already
+  /// committed WAL history, never an uncommitted projection.
+  pub fn clear(&mut self) -> Result<(), StoreError> {
+    self.flush()?;
+    self.file.set_len(0)?;
+    self.file.sync_data()?;
     Ok(())
   }
 }

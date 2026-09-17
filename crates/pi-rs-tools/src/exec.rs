@@ -143,12 +143,7 @@ impl ExecTool {
     );
     // Reap in every path. A leaked child keeps running after we report a result,
     // which is the one outcome worse than an honest `Unknown`.
-    let status = wait_for_exit(&mut child, context);
-    if context.is_cancelled() {
-      outcome.cancelled = true;
-    } else if context.deadline_expired() {
-      outcome.context_deadline = true;
-    }
+    let status = wait_for_exit(&mut child, context, &deadline, &mut outcome);
     finish(outcome, status, &deadline, command)
   }
 }
@@ -218,6 +213,13 @@ fn drain(
   let mut sink = crate::BoundedProgress::new(progress, limit, deadline.clone());
 
   loop {
+    // `recv_timeout` may return immediately while a noisy command is still
+    // producing discarded output. The tool deadline must therefore be checked
+    // independently of the capture state and not only in the timeout arm.
+    if deadline.expired() {
+      timed_out = true;
+      break;
+    }
     if context.is_cancelled() {
       cancelled = true;
       break;
@@ -372,13 +374,29 @@ fn finish(
   Ok(with_elapsed(outcome, elapsed))
 }
 
-fn wait_for_exit(child: &mut Child, context: &ToolExecutionContext) -> Option<ExitStatus> {
+fn wait_for_exit(
+  child: &mut Child,
+  context: &ToolExecutionContext,
+  deadline: &Deadline,
+  outcome: &mut Drained,
+) -> Option<ExitStatus> {
   loop {
     match child.try_wait() {
       Ok(Some(status)) => return Some(status),
       Err(_) => return None,
       Ok(None) => {
-        if context.is_cancelled_or_expired() {
+        if context.is_cancelled() {
+          outcome.cancelled = true;
+          terminate_child_tree(child);
+          return child.wait().ok();
+        }
+        if context.deadline_expired() {
+          outcome.context_deadline = true;
+          terminate_child_tree(child);
+          return child.wait().ok();
+        }
+        if deadline.expired() {
+          outcome.timed_out = true;
           terminate_child_tree(child);
           return child.wait().ok();
         }
@@ -548,6 +566,28 @@ mod tests {
     assert!(outcome.is_error, "unknown is not a success");
     assert!(outcome.text.contains("unknown"), "{}", outcome.text);
     assert!(marker.exists(), "the side effect really happened");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn a_timeout_still_applies_after_the_child_closes_output_streams() {
+    let dir = tempfile::tempdir().unwrap();
+    let started = std::time::Instant::now();
+    let outcome = exec(
+      &dir,
+      json!({"command": "exec >/dev/null 2>&1; sleep 30", "timeout_ms": 150}),
+    );
+    assert_eq!(
+      outcome.state,
+      ToolExecutionState::Unknown,
+      "{}",
+      outcome.text
+    );
+    assert!(
+      started.elapsed() < Duration::from_secs(2),
+      "{}",
+      outcome.text
+    );
   }
 
   #[cfg(unix)]

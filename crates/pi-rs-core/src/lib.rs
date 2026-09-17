@@ -75,8 +75,8 @@ pub use provider::{
 };
 pub use redact::{Redacted, RedactionPolicy, SecretKind};
 pub use session::{
-  SessionCheckpointRecord, SessionCompactionRecord, SessionEpochRecord, SessionHeader,
-  SessionMessage, SessionRecord, SessionSummary,
+  InterruptedToolCall, SessionCheckpointRecord, SessionCompactionRecord, SessionEpochRecord,
+  SessionHeader, SessionMessage, SessionRecord, SessionReductionRecord, SessionSummary,
 };
 pub use sink::{EventSink, FanOut, MemorySink, NullSink, SinkError};
 pub use tool::{

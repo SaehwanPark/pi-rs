@@ -1131,6 +1131,8 @@ mod tests {
       reason: ReductionReason::OversizedToolOutput { limit_bytes: 4096 },
       original_bytes: 40_960,
       visible_bytes: 2048,
+      removed_messages: 0,
+      retained_messages: 0,
       blob: Some(BlobRef::for_bytes(b"x".as_slice(), None)),
       recovery_ref: Some("blobs/aa:aa".into()),
       tool_call_id: Some(ToolCallId::new()),
@@ -1147,6 +1149,8 @@ mod tests {
       reason: ReductionReason::RecentTargetExceeded { target_tokens: 76 },
       original_bytes: 12_000,
       visible_bytes: 300,
+      removed_messages: 0,
+      retained_messages: 0,
       blob: None,
       recovery_ref: None,
       tool_call_id: None,
@@ -1176,6 +1180,7 @@ mod tests {
       capsule_version: 1,
       summarized_events: 42,
       path: "state/sessions/abc/checkpoints/1.json".into(),
+      context_epoch: 0,
     });
     let line = &render_event(&event, &options())[0];
     assert!(
@@ -1296,6 +1301,8 @@ mod tests {
         },
         original_bytes: 40_960,
         visible_bytes: 2048,
+        removed_messages: 0,
+        retained_messages: 0,
         blob: Some(BlobRef::for_bytes(b"x".as_slice(), None)),
         recovery_ref: Some("blobs/aa:aa".into()),
         tool_call_id: None,
@@ -1315,6 +1322,7 @@ mod tests {
         capsule_version: 1,
         summarized_events: 4,
         path: "state/sessions/x/checkpoints/1.json".into(),
+        context_epoch: 0,
       }),
       AgentEvent::TurnCompleted(pi_rs_core::TurnCompleted {
         status: TurnStatus::Failed {

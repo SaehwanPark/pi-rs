@@ -44,7 +44,7 @@ use pi_rs_core::{
   tool::ToolExecutionState,
   trace::{BlobRef, ExternalContextSource, TraceEntry},
 };
-use pi_rs_store::{Store, TraceJournal, WritePolicy, tmp::TempDir};
+use pi_rs_store::{Store, StoreError, TraceJournal, WritePolicy, tmp::TempDir};
 
 fn model() -> ModelRef {
   ModelRef::new("local", "qwen")
@@ -129,6 +129,26 @@ fn variant(event: &AgentEvent) -> String {
 /// each test then asserts what only its own variant carries.
 fn round_trip(event: AgentEvent) -> TraceEntry {
   let name = variant(&event);
+  let lifecycle_event = matches!(
+    &event,
+    AgentEvent::ToolRequested(_)
+      | AgentEvent::ToolStarted(_)
+      | AgentEvent::ToolCompleted(_)
+      | AgentEvent::ToolFailed(_)
+      | AgentEvent::ToolUnknown(_)
+      | AgentEvent::ContextCompactionStarted(_)
+      | AgentEvent::ContextCompactionCompleted(_)
+  );
+  let projection_event = lifecycle_event
+    || matches!(
+      &event,
+      AgentEvent::UserMessage(_)
+        | AgentEvent::ExternalContextRetrieved(_)
+        | AgentEvent::ModelEpochStarted(_)
+        | AgentEvent::ModelRequestStarted(_)
+        | AgentEvent::ModelRequestCompleted(_)
+        | AgentEvent::CheckpointCreated(_)
+    );
   let dir = TempDir::new("event-roundtrip");
   let session_id = SessionId::new();
 
@@ -137,6 +157,29 @@ fn round_trip(event: AgentEvent) -> TraceEntry {
     .begin(header(&session_id))
     .expect("begin a durable session");
   let mut envelope = EventEnvelope::new(meta_at(&session_id, 0), event);
+  if let AgentEvent::ContextReduced(reduced) = &envelope.event {
+    if let Some(blob) = &reduced.blob {
+      let bytes = b"the full tool output that did not fit";
+      let stored = session
+        .put_recovery_blob(bytes)
+        .expect("round-trip recovery blob must be provisioned");
+      assert_eq!(
+        &stored, blob,
+        "the fixture blob must identify the bytes provisioned in the session"
+      );
+    }
+  }
+  match &envelope.event {
+    AgentEvent::ModelRequestStarted(started) => {
+      envelope.meta.model_epoch = Some(started.epoch);
+      envelope.meta.model = Some(started.model.clone());
+    }
+    AgentEvent::ModelRequestCompleted(completed) => {
+      envelope.meta.model_epoch = Some(completed.epoch);
+      envelope.meta.model = Some(completed.model.clone());
+    }
+    _ => {}
+  }
   let seq = session
     .emit(&mut envelope)
     .unwrap_or_else(|error| panic!("{name}: emit must be accepted, got {error}"));
@@ -186,10 +229,18 @@ fn round_trip(event: AgentEvent) -> TraceEntry {
     "{name}: neutral prose must not be redacted, or this test is measuring redaction"
   );
 
-  let restored = Store::open(dir.path(), WritePolicy::default())
+  let restored_result = Store::open(dir.path(), WritePolicy::default())
     .expect("open the store to restore")
-    .restore(&session_id)
-    .unwrap_or_else(|error| panic!("{name}: restore must succeed, got {error}"));
+    .restore(&session_id);
+  if projection_event {
+    assert!(
+      matches!(restored_result, Err(StoreError::Invalid(_))),
+      "{name}: an isolated projection/lifecycle event is malformed and must fail closed"
+    );
+    return entry;
+  }
+  let restored =
+    restored_result.unwrap_or_else(|error| panic!("{name}: restore must succeed, got {error}"));
   assert_eq!(
     restored.last_seq,
     Some(seq),
@@ -667,8 +718,10 @@ fn context_reduced_round_trips() {
     reason: ReductionReason::OversizedToolOutput { limit_bytes: 8_192 },
     original_bytes: 40_960,
     visible_bytes: 7_900,
+    removed_messages: 0,
+    retained_messages: 0,
     blob: Some(blob.clone()),
-    recovery_ref: Some("blobs/3f9a1c7e2b04".into()),
+    recovery_ref: Some(blob.recovery_ref()),
     tool_call_id: Some(tool_call_id()),
   });
   let entry = round_trip(original.clone());
@@ -685,10 +738,10 @@ fn context_reduced_round_trips() {
   );
   assert_eq!(body.original_bytes, 40_960);
   assert_eq!(body.visible_bytes, 7_900);
-  assert_eq!(body.blob, Some(blob));
+  assert_eq!(body.blob, Some(blob.clone()));
   assert_eq!(
     body.recovery_ref,
-    Some("blobs/3f9a1c7e2b04".into()),
+    Some(blob.recovery_ref()),
     "recovery must be possible from this string alone"
   );
   assert_eq!(body.tool_call_id, Some(tool_call_id()));
@@ -746,6 +799,7 @@ fn checkpoint_created_round_trips() {
     capsule_version: 1,
     summarized_events: 250,
     path: "checkpoints/66666666-6666-4666-8666-666666666666.json".into(),
+    context_epoch: 0,
   });
   let entry = round_trip(original.clone());
   let restored = &entry.envelope.event;
@@ -879,13 +933,12 @@ fn every_variant_round_trips_in_one_session_in_order() {
     );
   }
 
-  let restored = reopened
+  let error = reopened
     .restore(&session_id)
-    .expect("restore the mixed session");
-  assert_eq!(
-    restored.last_seq,
-    Some(EventSeq(events.len() as u64)),
-    "restore must land on the last line of a journal that mixes every variant"
+    .expect_err("the synthetic fixture has duplicate terminal tool lifecycles");
+  assert!(
+    matches!(error, StoreError::Invalid(_)),
+    "malformed tool lifecycles must fail closed: {error}"
   );
 }
 
@@ -1032,6 +1085,8 @@ fn all_variants() -> Vec<AgentEvent> {
       },
       original_bytes: 9_000,
       visible_bytes: 3_000,
+      removed_messages: 0,
+      retained_messages: 0,
       blob: Some(BlobRef::for_bytes(b"reduced payload".as_slice(), None)),
       recovery_ref: Some("blobs/000000000000".into()),
       tool_call_id: None,
@@ -1051,6 +1106,7 @@ fn all_variants() -> Vec<AgentEvent> {
       capsule_version: 1,
       summarized_events: 8,
       path: "checkpoints/66666666-6666-4666-8666-666666666666.json".into(),
+      context_epoch: 0,
     }),
     AgentEvent::TurnCompleted(TurnCompleted {
       status: TurnStatus::Cancelled,

@@ -10,7 +10,7 @@
 //! state itself. The runtime owns durability; the registry owns decisions.
 
 use std::collections::BTreeMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use pi_rs_core::{
   CancelToken, ReplayDecision, Tool, ToolChunk, ToolError, ToolExecutionContext,
@@ -146,7 +146,7 @@ impl Executed {
 /// The set of tools the runtime provides.
 pub struct ToolRegistry {
   runtime: Runtime,
-  tools: RwLock<BTreeMap<String, Box<dyn Tool>>>,
+  tools: RwLock<BTreeMap<String, Arc<dyn Tool>>>,
   allow: Vec<String>,
   deny: Vec<String>,
   /// How a mutating call is answered when the caller does not supply a gate.
@@ -154,6 +154,10 @@ pub struct ToolRegistry {
   /// Stored as data, not a trait object, so answering never requires borrowing the
   /// registry mutably while it is also being read.
   default_gate: DefaultGate,
+  /// Backward-compatible `with_policy` cannot return a `Result`; retain an
+  /// explicit configuration failure so it refuses execution instead of silently
+  /// using the previous workspace.
+  configuration_error: Option<String>,
 }
 
 impl ToolRegistry {
@@ -165,15 +169,39 @@ impl ToolRegistry {
       allow: Vec::new(),
       deny: Vec::new(),
       default_gate: DefaultGate::Deny,
+      configuration_error: None,
     }
   }
 
-  /// Apply the configured tool policy.
-  pub fn with_policy(mut self, policy: &pi_rs_core::ToolPolicy) -> Self {
-    self.runtime = self.runtime.with_policy(policy);
+  /// Apply the configured tool policy, rejecting an invalid workspace override.
+  pub fn try_with_policy(mut self, policy: &pi_rs_core::ToolPolicy) -> Result<Self, ToolError> {
+    self.runtime = self.runtime.try_with_policy(policy)?;
+    self.configuration_error = None;
     self.allow = policy.allow.clone();
     self.deny = policy.deny.clone();
     // The operator's standing answer, expressed as data. Unset stays closed.
+    self.default_gate = if policy.auto_approve_mutating {
+      DefaultGate::Allow
+    } else {
+      DefaultGate::Deny
+    };
+    Ok(self)
+  }
+
+  /// Backward-compatible infallible policy setter. New callers should use
+  /// [`Self::try_with_policy`] so an invalid configured cwd cannot be hidden.
+  pub fn with_policy(mut self, policy: &pi_rs_core::ToolPolicy) -> Self {
+    match self.runtime.clone().try_with_policy(policy) {
+      Ok(runtime) => {
+        self.runtime = runtime;
+        self.configuration_error = None;
+      }
+      Err(error) => {
+        self.configuration_error = Some(error.message);
+      }
+    }
+    self.allow = policy.allow.clone();
+    self.deny = policy.deny.clone();
     self.default_gate = if policy.auto_approve_mutating {
       DefaultGate::Allow
     } else {
@@ -187,6 +215,7 @@ impl ToolRegistry {
   /// Replacement is allowed on purpose: it is how an extension overrides a
   /// built-in without the runtime needing a second resolution rule.
   pub fn register(&mut self, tool: Box<dyn Tool>) -> &mut Self {
+    let tool: Arc<dyn Tool> = tool.into();
     let name = tool.metadata().name;
     self.tools.write().unwrap().insert(name, tool);
     self
@@ -197,6 +226,7 @@ impl ToolRegistry {
   /// This enables dynamic mid-session tool registration (e.g. on-demand MCP activation)
   /// without requiring exclusive ownership of the registry.
   pub fn register_shared(&self, tool: Box<dyn Tool>) {
+    let tool: Arc<dyn Tool> = tool.into();
     let name = tool.metadata().name;
     self.tools.write().unwrap().insert(name, tool);
   }
@@ -318,9 +348,35 @@ impl ToolRegistry {
     &self,
     request: &ToolRequest,
   ) -> Result<pi_rs_core::ReconciliationStatus, ToolError> {
-    let tools = self.tools.read().unwrap();
-    let Some(tool) = tools.get(&request.name) else {
-      return Err(ToolError::new(format!("unknown tool '{}'", request.name)));
+    self.reconcile_with_risk(request, None)
+  }
+
+  /// Reconcile against the exact risk classification captured when the request
+  /// crossed the durable `ToolRequested` boundary. A replacement tool with the
+  /// same name is not allowed to reinterpret an interrupted mutating call as a
+  /// read-only one (or the reverse).
+  pub fn reconcile_with_risk(
+    &self,
+    request: &ToolRequest,
+    expected_read_only: Option<bool>,
+  ) -> Result<pi_rs_core::ReconciliationStatus, ToolError> {
+    if let Some(error) = &self.configuration_error {
+      return Err(ToolError::new(format!(
+        "tool registry configuration is invalid: {error}"
+      )));
+    }
+    let tool = {
+      let tools = self.tools.read().unwrap();
+      let Some(tool) = tools.get(&request.name) else {
+        return Err(ToolError::new(format!("unknown tool '{}'", request.name)));
+      };
+      if expected_read_only.is_some_and(|expected| tool.metadata().read_only != expected) {
+        return Err(ToolError::new(format!(
+          "tool '{}' risk metadata changed since the interrupted request",
+          request.name
+        )));
+      }
+      Arc::clone(tool)
     };
     tool.reconcile(request)
   }
@@ -397,6 +453,12 @@ impl ToolRegistry {
     gate: &mut dyn ApprovalGate,
     on_started: &mut dyn FnMut() -> Result<(), pi_rs_core::SinkError>,
   ) -> Result<Executed, pi_rs_core::SinkError> {
+    if let Some(error) = &self.configuration_error {
+      return Ok(Executed::refused(
+        request.clone(),
+        format!("tool registry configuration is invalid: {error}"),
+      ));
+    }
     if cancel.is_cancelled() {
       return Ok(Executed {
         request: request.clone(),
@@ -411,7 +473,7 @@ impl ToolRegistry {
         cancelled: true,
       });
     }
-    let (metadata, arguments_schema) = {
+    let (tool, metadata, arguments_schema) = {
       let tools = self.tools.read().unwrap();
       let Some(tool) = tools.get(&request.name) else {
         return Ok(Executed::refused(
@@ -419,7 +481,7 @@ impl ToolRegistry {
           unknown_tool(&request.name, &self.allowed_names()),
         ));
       };
-      (tool.metadata(), tool.arguments_schema())
+      (Arc::clone(tool), tool.metadata(), tool.arguments_schema())
     };
     if !self.is_allowed(&metadata.name) {
       return Ok(Executed::refused(
@@ -430,13 +492,8 @@ impl ToolRegistry {
     if let Err(message) = validate_arguments(&metadata, &request.arguments, &arguments_schema) {
       return Ok(Executed::refused(request.clone(), message));
     }
-    {
-      let tools = self.tools.read().unwrap();
-      if let Some(tool) = tools.get(&request.name) {
-        if let Err(error) = tool.preflight(request) {
-          return Ok(Executed::refused(request.clone(), error.message));
-        }
-      }
+    if let Err(error) = tool.preflight(request) {
+      return Ok(Executed::refused(request.clone(), error.message));
     }
     if !metadata.read_only {
       // `Ask` refuses here as well: nothing in this type can deliver a prompt, so
@@ -458,11 +515,7 @@ impl ToolRegistry {
       cancel.clone(),
       std::time::Duration::from_millis(self.runtime.shell_timeout_ms),
     );
-    let result = {
-      let tools = self.tools.read().unwrap();
-      let tool = tools.get(&request.name).expect("tool exists");
-      tool.execute_with_context(request, &mut sink, &context)
-    };
+    let result = tool.execute_with_context(request, &mut sink, &context);
 
     match result {
       Ok(mut outcome) => {

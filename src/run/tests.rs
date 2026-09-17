@@ -527,6 +527,8 @@ fn write_config_with(root: &Path, base_url: &str, change: impl Fn(&mut RuntimeCo
       max_output_tokens: Some(1_024),
     },
     max_output_tokens: Some(1_024),
+    connect_timeout_ms: None,
+    read_timeout_ms: None,
   });
   change(&mut config);
   let path = root.join("config.json");
@@ -631,6 +633,8 @@ fn session_manual_failover_and_switch_back_across_turns() {
         max_output_tokens: Some(1_024),
       },
       max_output_tokens: Some(1_024),
+      connect_timeout_ms: None,
+      read_timeout_ms: None,
     });
   });
   let surface = SurfaceArgs::default();

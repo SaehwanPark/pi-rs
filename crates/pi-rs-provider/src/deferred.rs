@@ -90,6 +90,13 @@ impl ModelProvider for Deferred {
     self.capabilities.clone()
   }
 
+  fn reset_after_abandonment(&self) {
+    // Preserve lazy startup: only an already-built adapter can be re-armed.
+    if let Some(Ok(provider)) = self.built.get() {
+      provider.reset_after_abandonment();
+    }
+  }
+
   fn stream(
     &self,
     request: &ModelRequest,

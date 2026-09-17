@@ -490,6 +490,14 @@ pub struct ContextReduced {
   pub reason: ReductionReason,
   pub original_bytes: u64,
   pub visible_bytes: u64,
+  /// Number of model-visible messages evicted by this reduction. Payload-only
+  /// reductions leave this at zero; history eviction records an exact boundary
+  /// for session reconstruction.
+  #[serde(default, skip_serializing_if = "is_zero_u32")]
+  pub removed_messages: u32,
+  /// Number of model-visible messages remaining after history eviction.
+  #[serde(default, skip_serializing_if = "is_zero_u32")]
+  pub retained_messages: u32,
   /// Where the withheld bytes went, when somewhere could hold them.
   ///
   /// `None` means the bytes are gone and only this record remains. The event is
@@ -526,6 +534,10 @@ pub struct ContextCompactionCompleted {
 /// canonical record is also in the model-visible context, so the first record of
 /// a compaction claims `1`.
 pub const FIRST_COMPACTION_EPOCH: u32 = 1;
+
+fn is_zero_u32(value: &u32) -> bool {
+  *value == 0
+}
 
 /// The durable record of one context compaction epoch.
 ///
@@ -582,8 +594,14 @@ pub fn next_context_epoch<'events>(events: impl IntoIterator<Item = &'events Age
 pub struct CheckpointCreated {
   pub checkpoint_id: CheckpointId,
   pub capsule_version: u32,
+  /// Number of semantic model-visible messages replaced at this boundary. A
+  /// capsule retained from an earlier checkpoint is protected and not counted.
   pub summarized_events: u64,
   pub path: String,
+  /// Context epoch activated by the checkpoint. Optional for traces written
+  /// before checkpoint epochs became part of the durable recovery contract.
+  #[serde(default)]
+  pub context_epoch: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -638,6 +656,8 @@ mod tests {
       reason: ReductionReason::RecentTargetExceeded { target_tokens: 64 },
       original_bytes: 12_000,
       visible_bytes: 300,
+      removed_messages: 0,
+      retained_messages: 0,
       blob: Some(BlobRef::for_bytes(b"payload".as_slice(), None)),
       recovery_ref: Some("blobs/aa:aa".into()),
       tool_call_id: None,

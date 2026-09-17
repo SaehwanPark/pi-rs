@@ -56,6 +56,8 @@ fn write_config(root: &Path) -> PathBuf {
       max_output_tokens: Some(1_024),
     },
     max_output_tokens: Some(1_024),
+    connect_timeout_ms: None,
+    read_timeout_ms: None,
   });
   let path = root.join("config.json");
   fs::write(

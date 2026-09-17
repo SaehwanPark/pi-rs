@@ -256,6 +256,8 @@ fn config_at(path: &Path, state: &Path) -> PathBuf {
     api_key: None,
     capabilities: caps(),
     max_output_tokens: Some(1_024),
+    connect_timeout_ms: None,
+    read_timeout_ms: None,
   });
   fs::write(path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
   path.to_path_buf()

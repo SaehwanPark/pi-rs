@@ -74,6 +74,8 @@ fn endpoint(model: &str, base_url: Option<String>) -> ModelEndpoint {
       max_output_tokens: Some(1_024),
     },
     max_output_tokens: Some(1_024),
+    connect_timeout_ms: None,
+    read_timeout_ms: None,
   }
 }
 

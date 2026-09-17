@@ -6,7 +6,7 @@
 
 use pi_rs_core::{
   AgentEvent, AttributedMessage, EventEnvelope, SessionCompactionRecord, SessionEpochRecord,
-  SessionRecord, SinkError,
+  SessionRecord, SessionReductionRecord, SinkError,
 };
 use pi_rs_store::Session;
 
@@ -23,6 +23,12 @@ pub struct StoreTrace {
   /// Range opened by the most recent compaction epoch, carried into the compact
   /// session projection without introducing a second coordinate system.
   pending_compaction_range: Option<(pi_rs_core::EventSeq, pi_rs_core::EventSeq)>,
+  /// Capsule written before the following `CheckpointCreated` event. The
+  /// barrier is published only by that event's WAL transaction.
+  pending_checkpoint: Option<pi_rs_core::SessionCheckpointRecord>,
+  /// Compaction start is held in the WAL until its summary and completion are
+  /// durable, so a crash cannot leave a projected summary with live history.
+  pending_compaction_start: Option<pi_rs_core::EventId>,
 }
 
 impl StoreTrace {
@@ -31,6 +37,8 @@ impl StoreTrace {
       session,
       summary_pending: false,
       pending_compaction_range: None,
+      pending_checkpoint: None,
+      pending_compaction_start: None,
     }
   }
 
@@ -45,16 +53,12 @@ impl StoreTrace {
 
 impl Trace for StoreTrace {
   fn emit(&mut self, envelope: &mut EventEnvelope) -> Result<(), SinkError> {
-    self.session.emit(envelope).map_err(store_error)?;
     // The trace is authoritative for high-resolution replay, while the session
     // log carries the small projection needed to resume without hydrating it.
-    // Project transitions at the same boundary that assigns their canonical
-    // sequence; the runtime never has to remember to write a second record.
-    let record = match &envelope.event {
-      AgentEvent::ContextSummary => {
-        self.summary_pending = true;
-        None
-      }
+    // A WAL intent is prepared before either file is changed, so a crash cannot
+    // silently leave one representation ahead of the other.
+    let mut record = match &envelope.event {
+      AgentEvent::ContextSummary => None,
       AgentEvent::ContextCompactionEpoch(epoch) => {
         self.pending_compaction_range = Some((epoch.replaces_from, epoch.replaces_through));
         None
@@ -64,6 +68,11 @@ impl Trace for StoreTrace {
         model: epoch.model.clone(),
         reason: epoch.reason.clone(),
       })),
+      AgentEvent::CheckpointCreated(_) => self
+        .pending_checkpoint
+        .as_ref()
+        .cloned()
+        .map(SessionRecord::CheckpointBarrier),
       AgentEvent::ContextCompactionCompleted(completed) => {
         let has_summary = self.summary_pending
           && matches!(
@@ -89,10 +98,59 @@ impl Trace for StoreTrace {
           replaces_through: range.map(|(_, through)| through),
         }))
       }
+      AgentEvent::ContextReduced(reduced) if reduced.removed_messages > 0 => {
+        Some(SessionRecord::Reduction(SessionReductionRecord {
+          event_id: envelope.meta.event_id.clone(),
+          seq: None,
+          reason: reduced.reason.clone(),
+          removed_messages: reduced.removed_messages,
+          retained_messages: reduced.retained_messages,
+        }))
+      }
       _ => None,
     };
-    if let Some(record) = record {
-      self.session.record(&record).map_err(store_error)?;
+    let hold_for_message = matches!(
+      &envelope.event,
+      AgentEvent::UserMessage(_)
+        | AgentEvent::ExternalContextRetrieved(_)
+        | AgentEvent::ContextSummary
+        | AgentEvent::ToolCompleted(_)
+        | AgentEvent::ToolFailed(_)
+        | AgentEvent::ToolUnknown(_)
+    ) || matches!(
+      &envelope.event,
+      AgentEvent::ModelRequestCompleted(completed) if completed.finish_reason.is_some()
+    );
+    let hold_for_compaction = matches!(&envelope.event, AgentEvent::ContextCompactionStarted(_));
+    let transactional = record.is_some() || hold_for_message || hold_for_compaction;
+    if transactional {
+      self
+        .session
+        .emit_transaction(
+          envelope,
+          record.take(),
+          hold_for_message || hold_for_compaction,
+        )
+        .map_err(store_error)?;
+    } else {
+      self.session.emit(envelope).map_err(store_error)?;
+    }
+    if hold_for_compaction {
+      self.pending_compaction_start = Some(envelope.meta.event_id.clone());
+    }
+    if matches!(&envelope.event, AgentEvent::ContextCompactionCompleted(_)) {
+      if let Some(start) = self.pending_compaction_start.take() {
+        self
+          .session
+          .commit_projection_intent(&start)
+          .map_err(store_error)?;
+      }
+    }
+    if matches!(&envelope.event, AgentEvent::ContextSummary) {
+      self.summary_pending = true;
+    }
+    if matches!(&envelope.event, AgentEvent::CheckpointCreated(_)) {
+      self.pending_checkpoint = None;
     }
     if matches!(&envelope.event, AgentEvent::ContextCompactionCompleted(_)) {
       self.summary_pending = false;
@@ -101,28 +159,24 @@ impl Trace for StoreTrace {
     Ok(())
   }
 
-  fn record_message(&mut self, attributed: &AttributedMessage) -> Result<(), SinkError> {
-    let meta = &attributed.envelope.meta;
-    let turn_id = meta
-      .turn_id
-      .as_ref()
-      .ok_or_else(|| SinkError("a persisted message must belong to a turn".into()))?;
-    let epoch = meta
-      .model_epoch
-      .ok_or_else(|| SinkError("a persisted message must carry a model epoch".into()))?;
-    let model = meta
-      .model
-      .as_ref()
-      .ok_or_else(|| SinkError("a persisted message must carry a model".into()))?;
+  fn emit_without_message(&mut self, envelope: &mut EventEnvelope) -> Result<(), SinkError> {
+    self.session.emit(envelope).map(|_| ()).map_err(store_error)
+  }
+
+  fn complete_without_message(
+    &mut self,
+    envelope: &pi_rs_core::EventEnvelope,
+  ) -> Result<(), SinkError> {
     self
       .session
-      .append_message(
-        turn_id,
-        &attributed.message,
-        epoch,
-        model,
-        &attributed.envelope,
-      )
+      .commit_projection_intent(&envelope.meta.event_id)
+      .map_err(store_error)
+  }
+
+  fn record_message(&mut self, attributed: &AttributedMessage) -> Result<(), SinkError> {
+    self
+      .session
+      .complete_message(attributed)
       .map(|_| ())
       .map_err(store_error)
   }
@@ -139,8 +193,22 @@ impl Trace for StoreTrace {
     &mut self,
     capsule: &pi_rs_core::ContextCapsule,
   ) -> Result<Option<(pi_rs_core::CheckpointId, String)>, SinkError> {
-    let record = self.session.checkpoint(capsule).map_err(store_error)?;
+    let record = self
+      .session
+      .prepare_checkpoint(capsule)
+      .map_err(store_error)?;
+    self.pending_checkpoint = Some(record.clone());
     Ok(Some((record.checkpoint_id, record.capsule_path)))
+  }
+
+  fn set_checkpoint_context_epoch(&mut self, context_epoch: u32) -> Result<(), SinkError> {
+    let Some(checkpoint) = self.pending_checkpoint.as_mut() else {
+      return Err(SinkError(
+        "checkpoint context epoch was set without a prepared checkpoint".into(),
+      ));
+    };
+    checkpoint.context_epoch = context_epoch;
+    Ok(())
   }
 
   fn list_checkpoints(
@@ -162,8 +230,8 @@ fn store_error(error: pi_rs_store::StoreError) -> SinkError {
 mod tests {
   use pi_rs_core::{
     AgentEvent, AttributedMessage, EventMeta, ExternalContextRetrieved, ExternalContextSource,
-    Message, ModelRef, SessionHeader, SessionId, TraceId, TurnId, UserMessage,
-    session::SESSION_SCHEMA_VERSION,
+    Message, ModelRef, SessionHeader, SessionId, ToolCallId, ToolFailed, ToolRequested, TraceId,
+    TurnId, UserMessage, session::SESSION_SCHEMA_VERSION,
   };
   use pi_rs_store::{StateLayout, Store, TempDir, TraceJournal, WritePolicy};
 
@@ -365,5 +433,63 @@ mod tests {
     );
     assert_eq!(journal.items[0].envelope.meta.session_id, session_id);
     assert_eq!(restored.messages[0].message, Message::user("hello"));
+  }
+
+  #[test]
+  fn a_no_execution_tool_failure_closes_its_wal_intent() {
+    let temp = pi_rs_store::TempDir::new("runtime-store-unexecuted-tool");
+    let store = Store::open(temp.path(), WritePolicy::default()).unwrap();
+    let session_id = SessionId::new();
+    let model = ModelRef::new("local", "model");
+    let session = store
+      .begin(SessionHeader {
+        session_id: session_id.clone(),
+        version: SESSION_SCHEMA_VERSION,
+        started_at_ms: 1,
+        working_dir: "/workspace".into(),
+        model: model.clone(),
+        parent_session: None,
+        branched_from_event: None,
+        imported_from: None,
+      })
+      .unwrap();
+    let turn_id = TurnId::new();
+    let mut trace = StoreTrace::new(session);
+    let mut request_meta = EventMeta::new(session_id.clone(), TraceId::new());
+    request_meta.turn_id = Some(turn_id.clone());
+    request_meta.model_epoch = Some(0);
+    request_meta.model = Some(model.clone());
+    let call_id = ToolCallId::new();
+    let mut requested = EventEnvelope::new(
+      request_meta,
+      AgentEvent::ToolRequested(ToolRequested {
+        call_id: call_id.clone(),
+        name: "write".into(),
+        arguments: serde_json::json!({"path":"a.txt", "content":"x"}),
+        read_only: false,
+      }),
+    );
+    trace.emit(&mut requested).unwrap();
+    let mut failed_meta = EventMeta::new(session_id.clone(), TraceId::new());
+    failed_meta.turn_id = Some(turn_id);
+    failed_meta.model_epoch = Some(0);
+    failed_meta.model = Some(model);
+    let mut failed = EventEnvelope::new(
+      failed_meta,
+      AgentEvent::ToolFailed(ToolFailed {
+        call_id,
+        name: "write".into(),
+        message: "tool was not executed".into(),
+        duration_ms: 0,
+        status: None,
+      }),
+    );
+    trace.emit_without_message(&mut failed).unwrap();
+    trace.into_session().finish().unwrap();
+
+    let restored = store
+      .restore(&session_id)
+      .expect("explicit terminal closes the request");
+    assert!(restored.interrupted_tools.is_empty());
   }
 }

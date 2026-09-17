@@ -79,7 +79,10 @@ impl Runtime {
     ToolOutcome::succeeded(text)
   }
 
-  pub(crate) fn with_policy(mut self, policy: &pi_rs_core::ToolPolicy) -> Self {
+  pub(crate) fn try_with_policy(
+    mut self,
+    policy: &pi_rs_core::ToolPolicy,
+  ) -> Result<Self, ToolError> {
     self.max_output_bytes = policy.max_output_bytes;
     self.shell_timeout_ms = policy.shell_timeout_ms;
     self.workspace = self
@@ -88,15 +91,14 @@ impl Runtime {
       .with_read_outside(policy.allow_read_outside)
       .with_search_outside(policy.allow_search_outside)
       .with_write_outside(policy.allow_write_outside);
-    if let Some(cwd) = policy.cwd.as_deref()
-      && let Ok(workspace) = Workspace::new(cwd)
-    {
-      self.workspace = workspace
+    if let Some(cwd) = policy.cwd.as_deref() {
+      self.workspace = Workspace::new(cwd)
+        .map_err(|error| ToolError::new(format!("invalid tool policy cwd '{cwd}': {error}")))?
         .with_read_outside(policy.allow_read_outside)
         .with_search_outside(policy.allow_search_outside)
         .with_write_outside(policy.allow_write_outside);
     }
-    self
+    Ok(self)
   }
 }
 
