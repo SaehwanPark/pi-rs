@@ -32,7 +32,7 @@ use serde_json::{Value, json};
 use crate::{
   StoreError,
   blob::BlobStore,
-  jsonl::{LineWriter, ReadReport, read_jsonl, read_jsonl_tail},
+  jsonl::{LineWriter, MAX_JSONL_LINE_BYTES, ReadReport, read_jsonl, read_jsonl_tail},
   payload,
 };
 
@@ -185,7 +185,15 @@ impl TraceJournal {
     // A budget smaller than the irreducible bookkeeping envelope cannot be
     // met without hiding identity or ordering fields. `payload::bound` has
     // already spilled every safe candidate; keep that valid line rather than
-    // rejecting an otherwise recoverable import.
+    // rejecting an otherwise recoverable import. The reader's hard bound still
+    // applies to every write path, including low-level callers without blobs.
+    if text.len() > MAX_JSONL_LINE_BYTES {
+      return Err(StoreError::Invalid(format!(
+        "{} trace record exceeds the {}-byte JSONL line bound",
+        self.path().display(),
+        MAX_JSONL_LINE_BYTES
+      )));
+    }
     // Streaming deltas are the high-frequency case; everything that changes
     // state is written through so that a crash cannot lose a transition.
     let durable = requires_durable_write(&entry.envelope.event);
@@ -969,6 +977,23 @@ mod tests {
     assert!(written[0].contains(&"y".repeat(1024)), "still inline");
     let entry: TraceEntry = serde_json::from_str(&written[0]).unwrap();
     assert!(entry.externalized.is_empty());
+  }
+
+  #[test]
+  fn a_low_level_append_rejects_lines_over_the_reader_bound() {
+    let tmp = TempDir::new("journal-hard-line-bound");
+    let mut journal = journal(&tmp, RedactionPolicy::default());
+    let (session, _blobs) = session_blobs(&tmp);
+    let error = journal
+      .append_bounded(
+        &huge_write_request(&session, &"q".repeat(MAX_JSONL_LINE_BYTES)),
+        None,
+        None,
+        u64::MAX,
+      )
+      .expect_err("a trace line larger than the reader bound must be refused");
+    assert!(error.to_string().contains("JSONL line bound"));
+    assert!(lines(tmp.path().join("trace.jsonl").as_path()).is_empty());
   }
 
   #[test]

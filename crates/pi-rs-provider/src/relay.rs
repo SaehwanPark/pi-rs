@@ -46,7 +46,7 @@ impl CancellableHttpRelay {
         "provider URL has no usable authority",
       )
     })?;
-    let upstream = configured_upstream_proxy()?;
+    let upstream = configured_upstream_proxy(&target)?;
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     listener.set_nonblocking(true)?;
     let address = listener.local_addr()?;
@@ -685,10 +685,18 @@ fn copy_until_stopped(mut source: TcpStream, mut destination: TcpStream, stop: A
   }
 }
 
-fn configured_upstream_proxy() -> io::Result<Option<UpstreamProxy>> {
+fn configured_upstream_proxy(target: &(String, u16)) -> io::Result<Option<UpstreamProxy>> {
   // Match ureq's environment precedence. The worker agent cannot use the
   // environment because its proxy is the localhost cancellation relay, so the
   // relay must preserve the operator's configured outbound route explicitly.
+  // Honour the standard bypass list before selecting an upstream route.
+  if std::env::var("NO_PROXY")
+    .or_else(|_| std::env::var("no_proxy"))
+    .ok()
+    .is_some_and(|value| no_proxy_matches(&target.0, target.1, &value))
+  {
+    return Ok(None);
+  }
   let mut unsupported = false;
   for name in [
     "ALL_PROXY",
@@ -718,6 +726,48 @@ fn configured_upstream_proxy() -> io::Result<Option<UpstreamProxy>> {
     ));
   }
   Ok(None)
+}
+
+fn no_proxy_matches(host: &str, port: u16, list: &str) -> bool {
+  let host = host.trim_end_matches('.');
+  list
+    .split(|byte: char| byte == ',' || byte.is_ascii_whitespace())
+    .filter_map(|entry| {
+      let entry = entry.trim();
+      if entry.is_empty() {
+        return None;
+      }
+      if entry == "*" {
+        return Some(true);
+      }
+      let (pattern, expected_port) = if entry.starts_with('[') {
+        let close = entry.find(']')?;
+        let pattern = &entry[1..close];
+        let suffix = &entry[close + 1..];
+        let expected_port = suffix
+          .strip_prefix(':')
+          .and_then(|value| value.parse::<u16>().ok());
+        (pattern, expected_port)
+      } else if entry.matches(':').count() == 1 {
+        let (pattern, port) = entry.rsplit_once(':')?;
+        (pattern, port.parse::<u16>().ok())
+      } else {
+        (entry, None)
+      };
+      if expected_port.is_some_and(|expected| expected != port) {
+        return Some(false);
+      }
+      let pattern = pattern.trim_start_matches('.').trim_end_matches('.');
+      if pattern.is_empty() {
+        return Some(false);
+      }
+      let matches = host.eq_ignore_ascii_case(pattern)
+        || host
+          .strip_suffix(pattern)
+          .is_some_and(|suffix| suffix.ends_with('.') && suffix.len() > 1);
+      Some(matches)
+    })
+    .any(|matches| matches)
 }
 
 fn parse_upstream_proxy(value: &str) -> Option<UpstreamProxy> {
@@ -912,5 +962,23 @@ mod tests {
     assert_eq!(&echoed, b"pong");
     relay.stop();
     target.join().expect("target thread");
+  }
+
+  #[test]
+  fn no_proxy_matches_domains_and_ports_without_overmatching() {
+    assert!(no_proxy_matches("api.example.com", 443, "example.com"));
+    assert!(no_proxy_matches(
+      "api.example.com",
+      8443,
+      ".example.com:8443"
+    ));
+    assert!(!no_proxy_matches(
+      "api.example.com",
+      443,
+      "example.com:8443"
+    ));
+    assert!(!no_proxy_matches("notexample.com", 443, "example.com"));
+    assert!(no_proxy_matches("198.51.100.7", 443, "198.51.100.7"));
+    assert!(no_proxy_matches("api.example.com", 443, "*"));
   }
 }

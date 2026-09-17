@@ -319,6 +319,8 @@ fn proxy_environment_fingerprint() -> u64 {
     "https_proxy",
     "HTTP_PROXY",
     "http_proxy",
+    "NO_PROXY",
+    "no_proxy",
   ] {
     name.hash(&mut hasher);
     std::env::var_os(name).hash(&mut hasher);
