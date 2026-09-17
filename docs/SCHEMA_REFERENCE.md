@@ -457,20 +457,20 @@ retention takes the same lease nonblocking before deleting a victim.
   then appends the barrier (`store.rs:434-436`).
 * Producers, same rule as §1: `Header` yes (`crates/pi-rs-store/src/session_log.rs:66`),
   `Message` yes (`crates/pi-rs-store/src/store.rs:403`), `CheckpointBarrier` yes
-  (`store.rs:436`); `Epoch` **none found** and `Compaction` **none found**. Both are read —
-  `restore` accumulates them (`session_log.rs:304-305`) and `summary_report` reads `Epoch`
-  (`session_log.rs:191`) — but no production code appends them. As with §1.4 this is
-  recorded, not fixed.
+  (`store.rs:436`); `Epoch`, `Compaction`, and `Reduction` are emitted by `StoreTrace`
+  (`crates/pi-rs-runtime/src/store_trace.rs:48-108`) and recovered with their canonical
+  joins. Legacy low-level callers may still append only the older record variants.
 
 ### 2.5 What the checkpoint barrier is for
 
 The module states the model-visible contract directly (`session.rs:10-12`):
 
 > [`SessionRecord::CheckpointBarrier`] marks everything before it as summarized by a
-> capsule. Once the matching canonical checkpoint completion is present, resume cost is
-> `latest checkpoint + events after it`, which is what keeps large historical sessions
-> cheap to open. A barrier without that completion is an interrupted lifecycle and is
-> refused by `Store::restore`.
+> capsule. Once the matching canonical checkpoint completion is present, model-visible
+> reconstruction is `latest checkpoint + events after it`, which keeps the resumed context
+> small. Strict `Store::restore` still scans canonical history to validate lifecycle
+> integrity and unresolved side effects. A barrier without that completion is an interrupted
+> lifecycle and is refused by `Store::restore`.
 
 `restore` implements exactly that, under the doc comment "Restore session state as
 `latest checkpoint + records after it`" (`session_log.rs:285-286`):
@@ -489,18 +489,16 @@ SessionRecord::CheckpointBarrier(barrier) => {   // session_log.rs:306
 Its result is `RestoredSession` (`session_log.rs:264`): `header: SessionHeader`,
 `messages: Vec<SessionMessage>` ("When a checkpoint barrier exists this is the post-barrier
 window only", `session_log.rs:266-267`), `checkpoint: Option<ContextCapsule>`,
-`checkpoint_seq: Option<EventSeq>` ("so that post-checkpoint trace events can be read
-without a full scan", `session_log.rs:272-273`; the read side is
-`Journal::read_after(path, seq)` at `crates/pi-rs-store/src/journal.rs:165`),
+`checkpoint_seq: Option<EventSeq>` (the coordinate used by projection/replay helpers),
 `epochs: Vec<SessionEpochRecord>`, `compactions: Vec<SessionCompactionRecord>`,
 `summarized_messages: usize`, `last_seq: Option<EventSeq>`,
 `malformed_records: usize`, `total_records: usize`.
 
-So the barrier is a resume-cost device, not a truncation: earlier lines stay in the file and
-in canonical history, and `summarized_messages` exists "for honest UI reporting"
+So the barrier is a model-context projection device, not a truncation: earlier lines stay in
+the file and in canonical history, and `summarized_messages` exists "for honest UI reporting"
 (`session_log.rs:277`). `Store::restore` reaches it through
-`session_log::restore(&self.layout.session_path(session))` (`store.rs:192`). Session state
-never depends on reading `*.trace.jsonl`.
+`session_log::restore_from_report` after scanning canonical history for integrity and
+lifecycle validation. The resumed model state does not re-expand the pre-barrier window.
 
 ## 3. Provenance
 
