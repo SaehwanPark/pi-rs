@@ -3,7 +3,8 @@
 //! The session log is what the runtime needs in order to continue: the header,
 //! the messages with model attribution, epoch records, compaction markers, and
 //! checkpoint barriers. It is a projection of the canonical trace, written so
-//! that resuming does not require reading the trace at all.
+//! that model-visible reconstruction does not need to hydrate the trace; the
+//! store still scans canonical history to validate integrity and uncertainty.
 //!
 //! Every line is written durably. Unlike trace deltas, a lost message is not a
 //! cosmetic loss: it silently changes what the next model request believes

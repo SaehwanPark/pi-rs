@@ -265,9 +265,10 @@ impl Store {
 
   /// Read what is needed to continue, without opening writers.
   ///
-  /// Resume cost is bounded by the checkpoint barrier, not by total session
-  /// length: messages before the latest barrier are summarized inside the
-  /// capsule, so reading them would be pure waste.
+  /// Model-visible reconstruction is bounded by the latest checkpoint barrier:
+  /// messages before it are summarized inside the capsule. The integrity and
+  /// lifecycle pass still scans canonical history, because skipping an older
+  /// unresolved tool or projection would make fail-closed resume unsound.
   pub fn restore(&self, session: &SessionId) -> Result<RestoredSession, StoreError> {
     StateLayout::validate_session_id(session)?;
     let pending = ProjectionWal::pending_at(&self.layout.wal_path(session))?;

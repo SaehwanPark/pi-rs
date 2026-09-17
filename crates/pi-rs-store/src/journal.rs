@@ -252,7 +252,9 @@ impl TraceJournal {
 
   /// Read events after one sequence number, in order.
   ///
-  /// This is the resumption primitive: `latest checkpoint + events after it`.
+  /// This is the projection/replay primitive: `latest checkpoint + events after it`.
+  /// Store-level resume may still scan the full canonical journal first when
+  /// validating lifecycle integrity and unresolved side effects.
   pub fn read_after(path: &Path, seq: EventSeq) -> Result<ReadReport<TraceEntry>, StoreError> {
     let mut report = Self::read(path)?;
     report.items.retain(|entry| {

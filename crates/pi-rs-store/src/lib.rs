@@ -12,18 +12,20 @@
 //!   producers, and are recovered from the journal tail on reopen. A session can
 //!   therefore be resumed without hydrating it.
 //! - **Two representations of the same session.** `sessions/<id>.jsonl` holds
-//!   semantic state that resume needs; `sessions/<id>.trace.jsonl` holds the
-//!   canonical, high-resolution history. Neither is derived from the other at
-//!   read time, which is why resume is cheap and the trace stays complete.
+//!   semantic state that model-visible resume needs; `sessions/<id>.trace.jsonl`
+//!   holds the canonical, high-resolution history. Neither is derived from the
+//!   other for projection reconstruction. A strict resume still scans the trace
+//!   when validating lifecycle integrity and unresolved side effects.
 //! - **A bounded line.** A journal line is the unit every later reader pays for,
 //!   so bytes above the inline budget go to the blob store and the line keeps a
 //!   preview naming the reference, plus a machine-readable record of what moved.
 //!   Nothing is silently truncated: the bytes stay recoverable, and an elided
 //!   field is always announced.
 //!
-//! All I/O is blocking and bounded. Nothing in this crate scans a directory
-//! eagerly, parses a whole journal to answer a metadata question, or creates a
-//! task. Startup calls [`Store::open`] once; everything else is on demand.
+//! All I/O is blocking and bounded at the record/payload boundary. Nothing in
+//! this crate scans a directory eagerly, parses a whole journal to answer a
+//! metadata question, or creates a task. Startup calls [`Store::open`] once;
+//! full canonical validation is an explicit restore/resume operation.
 //!
 //! ```text
 //! Store::open(root, WritePolicy)      one bounded mkdir pass
