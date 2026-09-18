@@ -355,8 +355,8 @@ impl LineWriter {
       .open(&self.path)?;
     file.sync_all()?;
     drop(file);
+    #[cfg(not(windows))]
     if let Some(parent) = self.path.parent() {
-      #[cfg(not(windows))]
       if let Ok(directory) = fs::File::open(parent) {
         let _ = directory.sync_all();
       }
