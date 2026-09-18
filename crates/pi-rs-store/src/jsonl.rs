@@ -283,11 +283,20 @@ impl LineWriter {
   pub const MAX_BUFFERED_BYTES: usize = 64 * 1024;
 
   /// Open for append, creating the file and its parent directory if needed.
+  ///
+  /// `write(true)` is explicitly paired with `append(true)` so Windows file
+  /// handles receive `FILE_GENERIC_WRITE` rather than `FILE_APPEND_DATA` only,
+  /// allowing `clear` to truncate via `set_len(0)`.
+  #[allow(clippy::ineffective_open_options)]
   pub fn create(path: &Path) -> Result<Self, StoreError> {
     if let Some(parent) = path.parent() {
       fs::create_dir_all(parent)?;
     }
-    let file = OpenOptions::new().append(true).create(true).open(path)?;
+    let file = OpenOptions::new()
+      .write(true)
+      .append(true)
+      .create(true)
+      .open(path)?;
     Ok(Self {
       path: path.to_path_buf(),
       file,
@@ -344,7 +353,11 @@ impl LineWriter {
   pub fn clear(&mut self) -> Result<(), StoreError> {
     self.flush()?;
     self.file.set_len(0)?;
+    self.file.seek(SeekFrom::Start(0))?;
     self.file.sync_data()?;
+    self.buffer.clear();
+    self.pending = 0;
+    self.buffered_bytes = 0;
     Ok(())
   }
 }
@@ -499,6 +512,32 @@ mod tests {
     assert_eq!(read_first_line(&target).unwrap().as_deref(), Some("first"));
     fs::write(&target, "").unwrap();
     assert_eq!(read_first_line(&target).unwrap(), None);
+  }
+
+  #[test]
+  fn clear_truncates_the_file_and_allows_subsequent_writes() {
+    let tmp = TempDir::new("jsonl-clear");
+    let target = path(&tmp, "journal.jsonl");
+    let mut writer = LineWriter::create(&target).unwrap();
+    writer.write_line(&line_json(1, "first"), true).unwrap();
+    writer.write_line(&line_json(2, "second"), true).unwrap();
+    assert_eq!(fs::read_to_string(&target).unwrap().lines().count(), 2);
+
+    writer.clear().unwrap();
+    assert_eq!(
+      fs::read_to_string(&target).unwrap(),
+      "",
+      "cleared file is empty"
+    );
+
+    writer.write_line(&line_json(3, "third"), true).unwrap();
+    let content = fs::read_to_string(&target).unwrap();
+    assert_eq!(
+      content.lines().count(),
+      1,
+      "only the line written after clear is present"
+    );
+    assert!(content.contains("third"));
   }
 
   fn line_json(seq: u64, text: &str) -> String {

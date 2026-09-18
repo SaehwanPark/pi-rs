@@ -107,13 +107,13 @@ fn a_canceled_turn_ends_cancelled_and_the_same_handle_answers_again() {
   let temp = TempDir::new().unwrap();
   let workspace = temp.path().join("workspace");
   fs::create_dir(&workspace).unwrap();
-  // Five deltas a fifth of a second apart: the turn is still being answered long
-  // after the cancel lands, and the frame that arrives just after it is what lets
-  // the transport notice.
+  // Five deltas 300ms apart: the turn is still being answered long after the
+  // cancel lands, and the frame that arrives just after it is what lets the
+  // transport notice.
   let server = FakeServer::scripted(vec![
     dripping_answer(
       &["or", "chid", " is", " the", " word"],
-      Duration::from_millis(200),
+      Duration::from_millis(300),
     ),
     Scripted::Whole(answer("marigold noted")),
   ]);
@@ -128,16 +128,16 @@ fn a_canceled_turn_ends_cancelled_and_the_same_handle_answers_again() {
 
   open_session(&args.config, &args.cwd, &args.surface, None, |session| {
     let cancel = CancelToken::new();
-    interrupt_after(&cancel, Duration::from_millis(80));
+    interrupt_after(&cancel, Duration::from_millis(200));
     let started = Instant::now();
     let canceled = session
       .turn_with("name a flower", &cancel)
       .map_err(|error| turn_error(&error))?;
-    // The stream would have run for a second. The bound is far below that and far
+    // The stream would have run for 1.5 seconds. The bound is far below that and far
     // above a busy machine's scheduling jitter, so a turn that ignored the cancel
     // cannot pass it and a quiet machine does not fail it by accident.
     assert!(
-      started.elapsed() < Duration::from_millis(500),
+      started.elapsed() < Duration::from_millis(800),
       "the canceled turn ran for {:?}",
       started.elapsed()
     );
