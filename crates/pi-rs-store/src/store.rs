@@ -861,9 +861,19 @@ impl Session {
       )));
     }
     let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, &encoded)?;
+    {
+      let mut file = std::fs::File::create(&temporary)?;
+      use std::io::Write;
+      file.write_all(&encoded)?;
+      file.sync_all()?;
+    }
     std::fs::rename(&temporary, &path)?;
-    std::fs::File::open(&path)?.sync_data()?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+      if let Ok(dir) = std::fs::File::open(parent) {
+        let _ = dir.sync_all();
+      }
+    }
 
     Ok(SessionCheckpointRecord {
       capsule_path: format!("checkpoints/{checkpoint_id}.json"),

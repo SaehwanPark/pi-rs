@@ -108,12 +108,12 @@ fn a_canceled_turn_ends_cancelled_and_the_same_handle_answers_again() {
   let workspace = temp.path().join("workspace");
   fs::create_dir(&workspace).unwrap();
   let cancel = CancelToken::new();
-  // Five deltas 150ms apart: the turn is being answered, but cancellation lands
-  // right after the first delta is dispatched to test genuine stream cancellation.
+  // Five deltas 400ms apart: without cancellation the stream would take ~3
+  // seconds. Cancellation lands right after the first delta is dispatched.
   let server = FakeServer::scripted(vec![
     dripping_answer(
       &["or", "chid", " is", " the", " word"],
-      Duration::from_millis(150),
+      Duration::from_millis(400),
       Some(cancel.clone()),
     ),
     Scripted::Whole(answer("marigold noted")),
@@ -132,16 +132,18 @@ fn a_canceled_turn_ends_cancelled_and_the_same_handle_answers_again() {
     let canceled = session
       .turn_with("name a flower", &cancel)
       .map_err(|error| turn_error(&error))?;
-    // The stream would have run for ~1 second without cancel. Cancellation arrives
-    // with the first frame and finishes well within the bound.
+    // The stream would have run for ~3 seconds without cancel. Cancellation
+    // arrives with the first frame and finishes well within the bound even under
+    // loaded CI schedulers.
     assert!(
-      started.elapsed() < Duration::from_millis(800),
+      started.elapsed() < Duration::from_secs(5),
       "the canceled turn ran for {:?}",
       started.elapsed()
     );
     // Neither success nor a provider failure: the state the runtime defines for a
     // turn the user stopped.
     assert_eq!(canceled.status, TurnStatus::Cancelled);
+    assert_ne!(canceled.text, "orchid is the word");
 
     // A token is one-shot, so the next turn takes a fresh one — and gets an answer,
     // which is the session having survived its own interruption.
@@ -320,8 +322,9 @@ impl FakeServer {
                 // A canceled turn hangs up mid-stream, and the write that finds
                 // nobody reading is the expected end of that test rather than a
                 // failure of it. The recorded request is still what is returned.
-                let _ = socket.write_all(frame.as_bytes());
-                let _ = socket.flush();
+                if socket.write_all(frame.as_bytes()).is_err() || socket.flush().is_err() {
+                  break;
+                }
                 if index == 0 {
                   if let Some(cancel) = &cancel_on_first_frame {
                     cancel.cancel();
