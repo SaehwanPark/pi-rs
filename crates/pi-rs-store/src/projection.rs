@@ -12,8 +12,6 @@
 //! user text, tool arguments, or provider payloads, so retaining it in a WAL
 //! would make crash metadata an unbounded second copy of the trace.
 
-#[cfg(not(windows))]
-use std::fs;
 use std::{
   collections::{BTreeMap, BTreeSet},
   path::{Path, PathBuf},
@@ -213,31 +211,13 @@ impl ProjectionWal {
     })?;
     // A clean WAL is an implementation detail, not durable history. Compacting
     // it after the commit keeps reopen cost bounded by incomplete work rather
-    // than by the number of successful messages in a long session. On Unix the
-    // replacement is crash-safe; Windows clears the already-committed file in
-    // place because replacing an open file is not reliable there.
+    // than by the number of successful messages in a long session.
     if self.pending()?.is_empty() {
       self.compact()?;
     }
     Ok(())
   }
 
-  #[cfg(not(windows))]
-  fn compact(&mut self) -> Result<(), StoreError> {
-    let temporary = self.path.with_extension("wal.jsonl.tmp");
-    let file = fs::File::create(&temporary)?;
-    file.sync_all()?;
-    fs::rename(&temporary, &self.path)?;
-    if let Some(parent) = self.path.parent() {
-      if let Ok(directory) = fs::File::open(parent) {
-        let _ = directory.sync_all();
-      }
-    }
-    self.writer = LineWriter::create(&self.path)?;
-    Ok(())
-  }
-
-  #[cfg(windows)]
   fn compact(&mut self) -> Result<(), StoreError> {
     self.writer.clear()
   }

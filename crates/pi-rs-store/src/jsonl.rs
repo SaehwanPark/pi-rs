@@ -273,7 +273,7 @@ fn open(path: &Path) -> Result<File, StoreError> {
 #[derive(Debug)]
 pub struct LineWriter {
   path: PathBuf,
-  file: File,
+  file: Option<File>,
   buffer: String,
   pending: usize,
   buffered_bytes: usize,
@@ -283,23 +283,14 @@ impl LineWriter {
   pub const MAX_BUFFERED_BYTES: usize = 64 * 1024;
 
   /// Open for append, creating the file and its parent directory if needed.
-  ///
-  /// `write(true)` is explicitly paired with `append(true)` so Windows file
-  /// handles receive `FILE_GENERIC_WRITE` rather than `FILE_APPEND_DATA` only,
-  /// allowing `clear` to truncate via `set_len(0)`.
-  #[allow(clippy::ineffective_open_options)]
   pub fn create(path: &Path) -> Result<Self, StoreError> {
     if let Some(parent) = path.parent() {
       fs::create_dir_all(parent)?;
     }
-    let file = OpenOptions::new()
-      .write(true)
-      .append(true)
-      .create(true)
-      .open(path)?;
+    let file = OpenOptions::new().append(true).create(true).open(path)?;
     Ok(Self {
       path: path.to_path_buf(),
-      file,
+      file: Some(file),
       buffer: String::new(),
       pending: 0,
       buffered_bytes: 0,
@@ -332,12 +323,14 @@ impl LineWriter {
     if self.buffer.is_empty() {
       return Ok(());
     }
-    self.file.write_all(self.buffer.as_bytes())?;
-    self.file.flush()?;
-    // A durable transition must survive a process crash, not merely reach the
-    // kernel's page cache. Streaming deltas still amortize this at the bounded
-    // buffer threshold; semantic lines pay the sync cost deliberately.
-    self.file.sync_data()?;
+    if let Some(file) = &mut self.file {
+      file.write_all(self.buffer.as_bytes())?;
+      file.flush()?;
+      // A durable transition must survive a process crash, not merely reach the
+      // kernel's page cache. Streaming deltas still amortize this at the bounded
+      // buffer threshold; semantic lines pay the sync cost deliberately.
+      file.sync_data()?;
+    }
     self.buffer.clear();
     self.pending = 0;
     self.buffered_bytes = 0;
@@ -346,18 +339,34 @@ impl LineWriter {
 
   /// Truncate a journal that has no pending semantic work.
   ///
-  /// This is used by the portable WAL compactor on platforms where replacing
-  /// an open file is not reliable. Callers must establish that no intent is
-  /// pending before clearing; an interrupted clear can only lose already
-  /// committed WAL history, never an uncommitted projection.
+  /// Callers must establish that no intent is pending before clearing; an
+  /// interrupted clear can only lose already committed WAL history, never an
+  /// uncommitted projection.
   pub fn clear(&mut self) -> Result<(), StoreError> {
     self.flush()?;
-    self.file.set_len(0)?;
-    self.file.seek(SeekFrom::Start(0))?;
-    self.file.sync_data()?;
     self.buffer.clear();
     self.pending = 0;
     self.buffered_bytes = 0;
+    drop(self.file.take());
+    let file = OpenOptions::new()
+      .write(true)
+      .create(true)
+      .truncate(true)
+      .open(&self.path)?;
+    file.sync_all()?;
+    drop(file);
+    if let Some(parent) = self.path.parent() {
+      #[cfg(not(windows))]
+      if let Ok(directory) = fs::File::open(parent) {
+        let _ = directory.sync_all();
+      }
+    }
+    self.file = Some(
+      OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&self.path)?,
+    );
     Ok(())
   }
 }
