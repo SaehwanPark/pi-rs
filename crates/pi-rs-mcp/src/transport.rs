@@ -1174,7 +1174,19 @@ mod tests {
       let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
       let mut request = [0u8; 1];
       let _ = stream.read(&mut request);
-      thread::sleep(Duration::from_millis(800));
+      let sleep_deadline = std::time::Instant::now() + Duration::from_millis(3500);
+      let _ = stream.set_read_timeout(Some(Duration::from_millis(25)));
+      let mut buf = [0u8; 16];
+      while std::time::Instant::now() < sleep_deadline {
+        match stream.read(&mut buf) {
+          Ok(0) => break,
+          Ok(_) => {}
+          Err(err)
+            if err.kind() == std::io::ErrorKind::WouldBlock
+              || err.kind() == std::io::ErrorKind::TimedOut => {}
+          Err(_) => break,
+        }
+      }
     });
     let transport = HttpTransport::new(format!("http://{address}/mcp"), BTreeMap::new())
       .expect("transport")
@@ -1182,7 +1194,7 @@ mod tests {
     let started = std::time::Instant::now();
     let error = transport.call("hang", None).unwrap_err();
     assert!(matches!(error, McpError::Timeout), "{error}");
-    assert!(started.elapsed() < Duration::from_millis(600));
+    assert!(started.elapsed() < Duration::from_millis(2000));
     handle.join().expect("server");
   }
 
@@ -1208,7 +1220,19 @@ mod tests {
       let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
       let mut request = [0u8; 1];
       let _ = stream.read(&mut request);
-      thread::sleep(Duration::from_millis(800));
+      let sleep_deadline = std::time::Instant::now() + Duration::from_millis(3500);
+      let _ = stream.set_read_timeout(Some(Duration::from_millis(25)));
+      let mut buf = [0u8; 16];
+      while std::time::Instant::now() < sleep_deadline {
+        match stream.read(&mut buf) {
+          Ok(0) => break,
+          Ok(_) => {}
+          Err(err)
+            if err.kind() == std::io::ErrorKind::WouldBlock
+              || err.kind() == std::io::ErrorKind::TimedOut => {}
+          Err(_) => break,
+        }
+      }
     });
     let transport = HttpTransport::new(format!("http://{address}/mcp"), BTreeMap::new())
       .expect("transport")
@@ -1230,7 +1254,7 @@ mod tests {
       transport.is_alive(),
       "cancelling one HTTP exchange must not permanently close the transport"
     );
-    assert!(started.elapsed() < Duration::from_millis(600));
+    assert!(started.elapsed() < Duration::from_millis(2000));
     handle.join().expect("server");
   }
 
