@@ -284,11 +284,12 @@ Mapped, at the fidelity the file supports:
 
 One plan writes two durable records. The trace journal holds the events above. The session
 log holds the conversation as message records, each bound to the event that introduced it: a
-user message to its `user_message`, an assistant reply — its prose and its calls, never its
-reasoning — to the first `assistant_delta`, a tool result to its terminal tool event. That
-binding is what makes an imported session resumable rather than merely readable, and it is
-the same mechanism a native session uses, so `load_session` needs no idea that Pi was
-involved. Pi records no turn ids, so the import anchors one turn per user entry (`turn-<entry
+user message to its `user_message`, an imported assistant reply — its prose and its calls,
+never its reasoning — to the first `assistant_delta`, and a tool result to its terminal tool
+event. Native runtime replies bind to the terminal `model_request_completed` instead, so
+assistant prose and tool calls are recovered as one atomic message transaction. That binding
+is what makes an imported session resumable rather than merely readable, and the distinction
+stays inside the store so `load_session` needs no idea that Pi was involved. Pi records no turn ids, so the import anchors one turn per user entry (`turn-<entry
 id>`); it is derived from the file, so re-importing produces the same turns.
 
 Deliberately not carried, each reported by kind with its reason:

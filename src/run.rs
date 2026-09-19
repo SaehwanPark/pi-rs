@@ -785,6 +785,20 @@ impl Trace for ReportingTrace {
     self.inner.emit(envelope)
   }
 
+  fn emit_message(
+    &mut self,
+    envelope: &mut EventEnvelope,
+    message: &Message,
+  ) -> Result<(), SinkError> {
+    if self.options.diagnostics.shows(&envelope.event) && !is_streamed(&envelope.event) {
+      let palette = self.options.palette;
+      for line in render_event(&envelope.event, &self.options) {
+        let _ = writeln!(io::stderr(), "{}", line.render(palette));
+      }
+    }
+    self.inner.emit_message(envelope, message)
+  }
+
   fn emit_without_message(&mut self, envelope: &mut EventEnvelope) -> Result<(), SinkError> {
     self.inner.emit_without_message(envelope)
   }

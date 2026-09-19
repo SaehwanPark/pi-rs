@@ -1,12 +1,13 @@
 //! Bridge from runtime events to the durable session and trace store.
 //!
 //! The store remains the sole sequence authority. The runtime supplies event
-//! identity and semantic attribution; this adapter writes the event first, then
-//! writes any session message against the sequence the store assigned.
+//! identity and semantic attribution; message-bearing boundaries use the store's
+//! atomic event/projection transaction, while legacy already-sequenced callers
+//! retain the compatibility completion path.
 
 use pi_rs_core::{
-  AgentEvent, AttributedMessage, EventEnvelope, SessionCompactionRecord, SessionEpochRecord,
-  SessionRecord, SessionReductionRecord, SinkError,
+  AgentEvent, AttributedMessage, EventEnvelope, Message, SessionCompactionRecord,
+  SessionEpochRecord, SessionRecord, SessionReductionRecord, SinkError,
 };
 use pi_rs_store::Session;
 
@@ -162,6 +163,33 @@ impl Trace for StoreTrace {
     Ok(())
   }
 
+  fn emit_message(
+    &mut self,
+    envelope: &mut EventEnvelope,
+    message: &Message,
+  ) -> Result<(), SinkError> {
+    if envelope.meta.seq.is_some() {
+      self
+        .session
+        .complete_message(&AttributedMessage {
+          envelope: envelope.clone(),
+          message: message.clone(),
+        })
+        .map(|_| ())
+        .map_err(store_error)?;
+    } else {
+      self
+        .session
+        .emit_message(envelope, message)
+        .map(|_| ())
+        .map_err(store_error)?;
+    }
+    if matches!(&envelope.event, AgentEvent::ContextSummary) {
+      self.summary_pending = true;
+    }
+    Ok(())
+  }
+
   fn emit_without_message(&mut self, envelope: &mut EventEnvelope) -> Result<(), SinkError> {
     self.session.emit(envelope).map(|_| ()).map_err(store_error)
   }
@@ -232,9 +260,9 @@ fn store_error(error: pi_rs_store::StoreError) -> SinkError {
 #[cfg(test)]
 mod tests {
   use pi_rs_core::{
-    AgentEvent, AttributedMessage, EventMeta, ExternalContextRetrieved, ExternalContextSource,
-    Message, ModelRef, SessionHeader, SessionId, ToolCallId, ToolFailed, ToolRequested, TraceId,
-    TurnId, UserMessage, session::SESSION_SCHEMA_VERSION,
+    AgentEvent, EventMeta, ExternalContextRetrieved, ExternalContextSource, Message, ModelRef,
+    SessionHeader, SessionId, ToolCallId, ToolFailed, ToolRequested, TraceId, TurnId, UserMessage,
+    session::SESSION_SCHEMA_VERSION,
   };
   use pi_rs_store::{StateLayout, Store, TempDir, TraceJournal, WritePolicy};
 
@@ -277,12 +305,8 @@ mod tests {
       }),
     );
     let mut trace = StoreTrace::new(session);
-    trace.emit(&mut envelope).unwrap();
     trace
-      .record_message(&AttributedMessage {
-        envelope,
-        message: Message::user(text),
-      })
+      .emit_message(&mut envelope, &Message::user(&text))
       .unwrap();
     let blob = trace
       .put_payload(format!("recovery {secret} or {recognized}").as_bytes())
@@ -303,6 +327,11 @@ mod tests {
       );
       assert!(durable.contains("[redacted:"), "{durable}");
     }
+    let restored = store.restore(&session_id).unwrap();
+    assert_eq!(
+      restored.messages[0].message.text(),
+      "do not persist [redacted:field] or [redacted:key sk-]"
+    );
   }
 
   #[test]
@@ -349,10 +378,7 @@ mod tests {
       }),
     );
     let mut trace = StoreTrace::new(session);
-    trace.emit(&mut envelope).unwrap();
-    trace
-      .record_message(&AttributedMessage { envelope, message })
-      .unwrap();
+    trace.emit_message(&mut envelope, &message).unwrap();
     trace.flush().unwrap();
 
     let restored = store.restore(&session_id).unwrap();
@@ -399,12 +425,8 @@ mod tests {
     );
     let mut trace = StoreTrace::new(session);
 
-    trace.emit(&mut envelope).unwrap();
     trace
-      .record_message(&AttributedMessage {
-        envelope: envelope.clone(),
-        message: Message::user("hello"),
-      })
+      .emit_message(&mut envelope, &Message::user("hello"))
       .unwrap();
     trace.flush().unwrap();
 
