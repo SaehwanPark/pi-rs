@@ -22,73 +22,18 @@ Check at these points rather than running a dedicated monitor:
 3. after unusually model-heavy delegated/review work;
 4. before intentionally launching parallel model-backed workers.
 
-A usage check should not itself trigger more model-backed work. If the usage
-provider is unavailable or ambiguous, report that uncertainty rather than
-assuming there is sufficient headroom.
+If the usage provider is unavailable or ambiguous, assume there is sufficient headroom.
 
-## Per-Provider Usage
+## Tool to use
 
-#### Provider: OpenAI (ChatGPT subscription or openai-codex)
+Use [ai-usage-monitor](https://github.com/SaehwanPark/ai-usage-monitor).
 
 ```bash
-# Returns what is higher between 5-hour and weekly usage
-codexbar --provider codex --json-only | jq '.[0].usage | [.primary.usedPercent, .secondary.usedPercent] | max'
+uvx --from ../ai-usage-monitor usage <subscription>
 ```
 
-```bash
-# 5-hour only results
-codexbar --provider codex --json-only | jq '.[0].usage.primary.usedPercent'
+Replace `<subscription>` with the desired subscription name among `codex`, `cursor`, `antigravity`.
 
-# When 5-hour limit is reset? (may be reset time point or remaining timedelta)
-codexbar --provider codex --json-only | jq '.[0].usage.primary.resetDescription'
-
-# Weekly only results
-codexbar --provider codex --json-only | jq '.[0].usage.secondary.usedPercent'
-
-# When weekly limit is reset? (may be reset time point or remaining timedelta)
-codexbar --provider codex --json-only | jq '.[0].usage.secondary.resetDescription'
-```
-
-For handoffs, record both percentages and the reset description so the next
-session can distinguish a short-window stop from weekly exhaustion.
-
-#### Provider:Cursor (whose models include Cursor models and 3rd-party models)
-
-Cursor models (Grok, Composer):
-
-```bash
-# Monthly usage
-codexbar --provider cursor --json-only | jq '.[0].usage.secondary.usedPercent'
-```
-
-Other models (3rd-party models):
-
-```bash
-# Monthly usage
-codexbar --provider cursor --json-only | jq '.[0].usage.tertiary.usedPercent'
-```
-
-#### Provider: Google AI or AntiGravity (providing Gemini models)
-
-Gemini models:
-
-```bash
-# Returns what is higher between 5-hour and weekly usage
-codexbar --provider antigravity --json-only | jq '.[0].usage | [.primary.usedPercent, .extraRateWindows.[0].window.usedPercent] | max'
-```
-
-To know 5-hour usage:
-
-```bash
-# 5-hour usage amount
-codexbar --provider antigravity --json-only | jq '.[0].usage.extraRateWindows.[0].window.usedPercent'
-
-# When 5-hour limit is reset? (may be reset time point or remaining timedelta)
-codexbar --provider antigravity --json-only | jq '.[0].usage.extraRateWindows.[0].window.resetDescription'
-```
-
-To know weekly usage:
-
-```bash
-codexbar --provider antigravity --json-only | jq '.[0].usage.primary.usedPercent'
-```
+- `codex`: OpenAI Codex subscription. Use this when you use OpenAI GPT models.
+- `cursor`: Cursor subscription. Use this when you use models via Cursor routing (both Cursor-provided models and 3rd-party models). Note this subscription does have only monthly usage limits.
+- `antigravity`: Google AI subscription. Use this when you use Gemini models via Antigravity.
