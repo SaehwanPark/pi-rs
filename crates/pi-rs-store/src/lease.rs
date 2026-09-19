@@ -249,52 +249,35 @@ fn legacy_process_alive(pid: u32) -> bool {
 #[cfg(windows)]
 fn legacy_process_alive(pid: u32) -> bool {
   // One-time migration of the pre-lock format needs a real liveness check: an
-  // old owner marker has no kernel handle that this build can probe. Querying a
-  // limited process handle avoids shelling out to `tasklist`; inaccessible
-  // processes remain conservatively active, while an exited user process can
-  // be reclaimed without permanently poisoning its session.
-  use std::ffi::c_void;
-
-  const ERROR_INVALID_PARAMETER: u32 = 87;
-  const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-  type Handle = *mut c_void;
-
-  #[link(name = "kernel32")]
-  #[allow(non_snake_case)]
-  unsafe extern "system" {
-    fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> Handle;
-    fn GetLastError() -> u32;
-    fn WaitForSingleObject(object: Handle, milliseconds: u32) -> u32;
-    fn CloseHandle(object: Handle) -> i32;
-  }
+  // old owner marker has no kernel handle that this build can probe. Use the
+  // platform's task-list utility without a shell; command failure remains
+  // conservative, while an exited user process can be reclaimed.
+  use std::{path::PathBuf, process::Command};
 
   if pid == 0 {
     return true;
   }
-  // SAFETY: `pid` is read from the bounded legacy marker, the access right is
-  // query-only, and the returned handle is closed on every successful open.
-  let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-  if handle.is_null() {
-    // ERROR_INVALID_PARAMETER means the PID no longer exists. Every other
-    // failure (notably access denied for a protected process) is ambiguous and
-    // therefore retains the lease conservatively.
-    let error = unsafe { GetLastError() };
-    return error != ERROR_INVALID_PARAMETER;
-  }
-  // SAFETY: `handle` is a valid process handle returned by OpenProcess. A
-  // zero-time wait only observes whether the process has exited and never
-  // blocks the lease acquisition path.
-  let state = unsafe { WaitForSingleObject(handle, 0) };
-  // SAFETY: `handle` is owned by this function and has not been closed yet.
-  let closed = unsafe { CloseHandle(handle) != 0 };
-  // Treat every API ambiguity as active. WAIT_OBJECT_0 is the only result that
-  // proves the legacy owner exited; this avoids confusing a legitimate process
-  // exit code of STILL_ACTIVE (259) with a live process.
-  if !closed {
+  let Some(system_root) = std::env::var_os("SystemRoot") else {
     return true;
-  }
-  const WAIT_OBJECT_0: u32 = 0;
-  state != WAIT_OBJECT_0
+  };
+  let executable = PathBuf::from(system_root)
+    .join("System32")
+    .join("tasklist.exe");
+  let filter = format!("PID eq {pid}");
+  let output = match Command::new(executable)
+    .args(["/FI", filter.as_str(), "/FO", "CSV", "/NH"])
+    .output()
+  {
+    Ok(output) if output.status.success() => output,
+    _ => return true,
+  };
+  let expected = pid.to_string();
+  String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+    line
+      .split(',')
+      .nth(1)
+      .is_some_and(|field| field.trim_matches('"').trim() == expected)
+  })
 }
 
 #[cfg(not(any(unix, windows)))]
