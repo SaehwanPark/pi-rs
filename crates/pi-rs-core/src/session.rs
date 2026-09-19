@@ -21,13 +21,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
   capability::ModelRef,
-  context::{ContextCapsule, ExternalContextRef},
+  context::{ContextCapsule, ExternalContextRef, ReductionReason},
   ids::{CheckpointId, EventId, EventSeq, SessionId, TurnId},
   message::{Message, Role},
+  tool::{ToolExecutionState, ToolRequest},
 };
 
 /// Schema version stamped on the session header.
-pub const SESSION_SCHEMA_VERSION: u32 = 1;
+///
+/// Version 2 adds the `reduction` semantic record and canonical sequence
+/// bounds on compaction records. Version 3 adds the checkpoint context epoch;
+/// readers continue to accept older headers because the field is optional and
+/// legacy state derives the epoch from later durable compaction records.
+pub const SESSION_SCHEMA_VERSION: u32 = 3;
 
 /// One line of `session.jsonl`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +50,8 @@ pub enum SessionRecord {
   Compaction(SessionCompactionRecord),
   /// A capsule summarizes everything up to this point.
   CheckpointBarrier(SessionCheckpointRecord),
+  /// Model-visible history was evicted without a semantic summary.
+  Reduction(SessionReductionRecord),
 }
 
 /// Session metadata, written once and readable without parsing the rest.
@@ -106,8 +114,10 @@ pub struct SessionCompactionRecord {
   pub removed_messages: u32,
   /// Line index (0-based, header excluded) of the first retained message.
   pub retained_from: u32,
-  /// Number of model-visible messages retained after the summary (or reset).
-  /// Added for resume reconstruction; older records default to zero.
+  /// Number of semantic tail messages retained after the summary (or reset).
+  /// A protected checkpoint capsule is stored separately and is not included
+  /// in this projection count. Added for resume reconstruction; older records
+  /// default to zero.
   #[serde(default)]
   pub retained_messages: u32,
   /// Whether this marker follows a persisted `ContextSummary` message. Older
@@ -123,11 +133,44 @@ pub struct SessionCompactionRecord {
   pub replaces_through: Option<EventSeq>,
 }
 
+/// A durable projection of an L0 history eviction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionReductionRecord {
+  /// Event that established the reduced model-visible boundary.
+  pub event_id: EventId,
+  /// Canonical sequence of the reduction event, when available.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub seq: Option<EventSeq>,
+  pub reason: ReductionReason,
+  /// Number of oldest model-visible messages removed by this reduction.
+  pub removed_messages: u32,
+  /// Number of messages left in the model-visible projection after removal.
+  pub retained_messages: u32,
+}
+
+/// A tool request whose terminal lifecycle event was not observed before the
+/// process stopped. It is derived from the canonical trace during resume and
+/// must be reconciled before any new provider request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterruptedToolCall {
+  pub request: ToolRequest,
+  pub state: ToolExecutionState,
+  pub read_only: bool,
+  pub turn_id: Option<TurnId>,
+  pub epoch: Option<u32>,
+  pub model: Option<ModelRef>,
+}
+
 /// A checkpoint barrier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionCheckpointRecord {
   pub checkpoint_id: CheckpointId,
   pub capsule_version: u32,
+  /// Context epoch that becomes active after this checkpoint. Zero means a
+  /// legacy record did not persist the boundary and must be derived from the
+  /// surrounding projection where possible.
+  #[serde(default)]
+  pub context_epoch: u32,
   /// Relative path of the capsule file inside the session directory.
   pub capsule_path: String,
   /// Full capsule, duplicated here so that resume needs one read. Resume must
@@ -192,7 +235,7 @@ mod tests {
     });
     let line = serde_json::to_string(&header).unwrap();
     assert!(line.contains("\"type\":\"header\""), "{line}");
-    assert!(line.contains("\"version\":1"), "{line}");
+    assert!(line.contains("\"version\":3"), "{line}");
     assert_eq!(
       serde_json::from_str::<SessionRecord>(&line).unwrap(),
       header
@@ -242,6 +285,7 @@ mod tests {
     let record = SessionRecord::CheckpointBarrier(SessionCheckpointRecord {
       checkpoint_id: CheckpointId::new(),
       capsule_version: CAPSULE_SCHEMA_VERSION,
+      context_epoch: 0,
       capsule_path: "checkpoints/0001.json".into(),
       capsule: capsule.clone(),
     });

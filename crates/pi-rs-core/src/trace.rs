@@ -92,23 +92,29 @@ impl BlobRef {
     self.hash.chars().take(12).collect()
   }
 
+  /// Whether this reference has the canonical content-addressed shape.
+  pub fn is_well_formed(&self) -> bool {
+    self.hash.len() == 64 && self.hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+  }
+
   /// Relative path used inside a session directory.
   ///
   /// Two levels of prefix sharding keep directories usable when a long session
   /// stores many payloads. Encoded payloads add a validated suffix so raw and
-  /// compressed representations never collide.
+  /// compressed representations never collide. Malformed references return a
+  /// harmless non-escaping path here; callers that trust a durable reference
+  /// must reject [`Self::is_well_formed`] first.
   pub fn relative_path(&self) -> String {
     let suffix = self
       .compression
       .suffix()
       .map(|suffix| format!(".{suffix}"))
       .unwrap_or_default();
-    format!(
-      "blobs/{}/{}{}",
-      &self.hash[..2.min(self.hash.len())],
-      self.hash,
-      suffix
-    )
+    if !self.is_well_formed() {
+      return "blobs/invalid/invalid".to_string();
+    }
+    let shard = &self.hash[..2];
+    format!("blobs/{shard}/{}{suffix}", self.hash)
   }
 
   /// Recovery pointer a human or later model stage can act on alone.

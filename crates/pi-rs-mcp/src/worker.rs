@@ -559,8 +559,11 @@ impl<E: WorkerEngine> WorkerService<E> {
     let session = sessions
       .get_mut(&request.session_id)
       .ok_or_else(|| WorkerError::not_found("session was removed during compaction"))?;
+    let next_epoch = session.state.context_epoch.checked_add(1).ok_or_else(|| {
+      WorkerError::new("epoch_exhausted", "worker context epoch space is exhausted")
+    })?;
     self.apply_execution(session, execution);
-    session.state.context_epoch = session.state.context_epoch.saturating_add(1);
+    session.state.context_epoch = next_epoch;
     session.state.updated_at_ms = now_millis();
     if session.state.status == WorkerStatus::Idle {
       session.state.status = WorkerStatus::Completed;
@@ -1392,7 +1395,7 @@ fn page_diff(diff: WorkerDiff, query: ResourceQuery) -> Value {
     .take(query.limit)
     .collect();
   let next_after_seq = if files.len() == query.limit {
-    Some(start + files.len())
+    start.checked_add(files.len())
   } else {
     None
   };

@@ -38,8 +38,8 @@ use pi_rs_core::{
   AgentEvent, AssistantDelta, ContentBlock, Diagnostic, DiagnosticLevel, EventEnvelope, EventMeta,
   Message, ModelRef, ModelRequestCompleted, ModelRequestStarted, ReasoningDelta,
   ReasoningProvenance, Role, SessionHeader, SessionId, ToolCallBlock, ToolCallId, ToolCompleted,
-  ToolExecutionState, ToolFailed, ToolRequested, ToolResultBlock, TraceId, TurnId, UserMessage,
-  session::SESSION_SCHEMA_VERSION,
+  ToolExecutionState, ToolFailed, ToolRequested, ToolResultBlock, ToolStarted, TraceId, TurnId,
+  UserMessage, session::SESSION_SCHEMA_VERSION,
 };
 
 use crate::{Payload, Store, StoreError};
@@ -1001,6 +1001,18 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
           // the call succeeded: a resume needs what the tools answered, including the failures
           // the model then had to work around.
           let failed = entry.message_flag("isError");
+          // Pi persists the terminal result but not an execution boundary. Add an explicit
+          // reconstructed start before that result so imported history cannot leave a durable
+          // request in the ambiguous Requested state. The terminal payload remains the source
+          // of truth; this synthetic boundary never claims timing or provider provenance.
+          push(
+            AgentEvent::ToolStarted(ToolStarted {
+              call_id: call_id.clone(),
+              name: name.clone(),
+            }),
+            None,
+            None,
+          );
           let record = message_record(
             &Extracted {
               blocks: vec![ContentBlock::ToolResult(ToolResultBlock {
@@ -1243,6 +1255,7 @@ pub fn write(store: &Store, plan: &ImportPlan) -> Result<SessionId, StoreError> 
     if let Some(timestamp) = mapped.timestamp_ms {
       meta.timestamp_ms = timestamp;
     }
+    meta.turn_id = mapped.turn_id.clone();
     let mut envelope = EventEnvelope::new(meta, event);
     session.emit(&mut envelope)?;
     if let Some(record) = &mapped.message {

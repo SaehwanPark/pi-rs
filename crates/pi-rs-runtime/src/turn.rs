@@ -73,6 +73,9 @@ pub struct ResumeState {
   /// The model-visible window, already reduced past the latest checkpoint and
   /// compaction boundaries.
   pub messages: Vec<Message>,
+  /// Canonical sequence for each visible message when it came from durable
+  /// history. `None` denotes an in-memory/system capsule message.
+  pub message_seqs: Vec<Option<EventSeq>>,
   /// All model epochs in durable order, including the active epoch.
   pub epochs: Vec<ModelEpoch>,
   /// Next context-compaction epoch to continue from.
@@ -83,6 +86,9 @@ pub struct ResumeState {
   /// Canonical event range inherited from the prior process, used by the next
   /// compaction to cite the history it replaces.
   pub cited_history: Option<(EventSeq, EventSeq)>,
+  /// Tool calls whose terminal event was absent when the prior process stopped.
+  /// These must be reconciled before a new provider request.
+  pub interrupted_tools: Vec<pi_rs_core::InterruptedToolCall>,
 }
 
 /// How many model round-trips one user input may take.
@@ -117,6 +123,20 @@ pub trait Trace: Send {
   /// back into the envelope.
   fn emit(&mut self, envelope: &mut EventEnvelope) -> Result<(), SinkError>;
 
+  /// Deliver a terminal event that intentionally has no model-visible message.
+  /// Durable sinks can commit its transaction immediately instead of leaving a
+  /// held message intent that has no caller to complete.
+  fn emit_without_message(&mut self, envelope: &mut EventEnvelope) -> Result<(), SinkError> {
+    self.emit(envelope)
+  }
+
+  /// Close an emitted terminal event whose provider response produced no
+  /// model-visible message. Durable sinks use this to commit a held WAL intent;
+  /// trace-only sinks have nothing to do.
+  fn complete_without_message(&mut self, _envelope: &EventEnvelope) -> Result<(), SinkError> {
+    Ok(())
+  }
+
   /// Persist one semantic message against the event that introduced it.
   fn record_message(&mut self, attributed: &AttributedMessage) -> Result<(), SinkError> {
     let _ = attributed;
@@ -142,6 +162,12 @@ pub trait Trace: Send {
     Ok(None)
   }
 
+  /// Attach the context epoch that will become active at the checkpoint
+  /// boundary. Durable sinks use this before publishing `CheckpointCreated`.
+  fn set_checkpoint_context_epoch(&mut self, _context_epoch: u32) -> Result<(), SinkError> {
+    Ok(())
+  }
+
   /// List checkpoint capsules recorded for this session if supported.
   fn list_checkpoints(&self) -> Result<Vec<(CheckpointId, ContextCapsule)>, SinkError> {
     Ok(Vec::new())
@@ -158,6 +184,14 @@ impl<T: Trace + ?Sized> Trace for &mut T {
     <T as Trace>::emit(self, envelope)
   }
 
+  fn emit_without_message(&mut self, envelope: &mut EventEnvelope) -> Result<(), SinkError> {
+    <T as Trace>::emit_without_message(self, envelope)
+  }
+
+  fn complete_without_message(&mut self, envelope: &EventEnvelope) -> Result<(), SinkError> {
+    <T as Trace>::complete_without_message(self, envelope)
+  }
+
   fn record_message(&mut self, attributed: &AttributedMessage) -> Result<(), SinkError> {
     <T as Trace>::record_message(self, attributed)
   }
@@ -171,6 +205,10 @@ impl<T: Trace + ?Sized> Trace for &mut T {
     capsule: &ContextCapsule,
   ) -> Result<Option<(CheckpointId, String)>, SinkError> {
     <T as Trace>::create_checkpoint(self, capsule)
+  }
+
+  fn set_checkpoint_context_epoch(&mut self, context_epoch: u32) -> Result<(), SinkError> {
+    <T as Trace>::set_checkpoint_context_epoch(self, context_epoch)
   }
 
   fn list_checkpoints(&self) -> Result<Vec<(CheckpointId, ContextCapsule)>, SinkError> {
@@ -319,6 +357,7 @@ pub struct TurnLoop<'a> {
   trace_id: TraceId,
   epochs: Vec<Epoch>,
   messages: Vec<Message>,
+  message_seqs: Vec<Option<EventSeq>>,
   system: Option<String>,
   working_dir: String,
   thinking: ThinkingLevel,
@@ -332,6 +371,12 @@ pub struct TurnLoop<'a> {
   /// Whether the first lifecycle event belongs to a continuation of an existing
   /// durable journal rather than a newly created session.
   resumed: bool,
+  /// Interrupted tool lifecycles recovered from the canonical trace.
+  interrupted_tools: Vec<pi_rs_core::InterruptedToolCall>,
+  /// A failed reconciliation is sticky for this loop. Dropping the queue after
+  /// an error would let a caller catch the error and issue a provider request
+  /// against history whose side effects are still uncertain.
+  recovery_blocked: bool,
   context_epoch: u32,
   /// Leading checkpoint capsule messages protected from ordinary compaction.
   checkpoint_floor: usize,
@@ -387,6 +432,7 @@ impl<'a> TurnLoop<'a> {
       trace_id,
       epochs: vec![epoch],
       messages: Vec::new(),
+      message_seqs: Vec::new(),
       system: None,
       working_dir: String::new(),
       thinking: ThinkingLevel::default(),
@@ -394,6 +440,8 @@ impl<'a> TurnLoop<'a> {
       requests: AtomicUsize::new(0),
       session_started: false,
       resumed: false,
+      interrupted_tools: Vec::new(),
+      recovery_blocked: false,
       context_epoch: 0,
       checkpoint_floor: 0,
       checkpoint_cited_from: None,
@@ -489,6 +537,7 @@ impl<'a> TurnLoop<'a> {
 
   /// Seed the visible history, for example after a session resume.
   pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
+    self.message_seqs = vec![None; messages.len()];
     self.messages = messages;
     self
   }
@@ -537,8 +586,20 @@ impl<'a> TurnLoop<'a> {
       })
       .collect();
     self.messages = state.messages;
+    self.message_seqs = state.message_seqs;
+    if self.message_seqs.len() != self.messages.len() {
+      return Err(TurnError::Sink(
+        "cannot resume a session with message sequence metadata out of alignment".into(),
+      ));
+    }
+    if state.checkpoint_floor > self.messages.len() {
+      return Err(TurnError::Sink(
+        "cannot resume a session with a checkpoint floor beyond its messages".into(),
+      ));
+    }
+    self.interrupted_tools = state.interrupted_tools;
     self.context_epoch = state.context_epoch;
-    self.checkpoint_floor = state.checkpoint_floor.min(self.messages.len());
+    self.checkpoint_floor = state.checkpoint_floor;
     self.history = state.cited_history;
     self.checkpoint_cited_from = (self.checkpoint_floor > 0)
       .then(|| self.history.map(|(first, _)| first).unwrap_or(EventSeq(1)));
@@ -635,8 +696,12 @@ impl<'a> TurnLoop<'a> {
         backup.model()
       )));
     }
+    let index = self
+      .epoch_index()
+      .checked_add(1)
+      .ok_or_else(|| TurnError::Sink("model epoch space is exhausted".into()))?;
     let epoch = Epoch {
-      index: self.epoch_index() + 1,
+      index,
       model: backup.model().clone(),
       capabilities: backup_caps.clone(),
       reason: EpochReason::ManualSwitch,
@@ -670,8 +735,12 @@ impl<'a> TurnLoop<'a> {
         self.primary.model()
       )));
     }
+    let index = self
+      .epoch_index()
+      .checked_add(1)
+      .ok_or_else(|| TurnError::Sink("model epoch space is exhausted".into()))?;
     let epoch = Epoch {
-      index: self.epoch_index() + 1,
+      index,
       model: self.primary.model().clone(),
       capabilities: self.primary.capabilities(),
       reason: EpochReason::ManualSwitchBack,
@@ -704,9 +773,113 @@ impl<'a> TurnLoop<'a> {
     self.tools.reconcile(request)
   }
 
+  /// Reconcile tool lifecycles left open by a crashed predecessor. No provider
+  /// request is permitted until every call is either normalized into a durable
+  /// result or explicitly blocked for human inspection.
+  fn reconcile_interrupted_tools(&mut self) -> Result<(), TurnError> {
+    if self.recovery_blocked {
+      return Err(TurnError::Sink(
+        "cannot continue session: interrupted tool reconciliation is still unresolved".into(),
+      ));
+    }
+    while let Some(call) = self.interrupted_tools.first().cloned() {
+      let turn_id = match call.turn_id.clone() {
+        Some(turn_id) => turn_id,
+        None => {
+          self.recovery_blocked = true;
+          return Err(TurnError::Sink(format!(
+            "cannot resume interrupted tool '{}': trace has no turn identity",
+            call.request.name
+          )));
+        }
+      };
+      let status = match self
+        .tools
+        .reconcile_with_risk(&call.request, Some(call.read_only))
+      {
+        Ok(status) => status,
+        Err(error) => {
+          self.recovery_blocked = true;
+          return Err(TurnError::Sink(format!(
+            "cannot reconcile interrupted tool '{}': {}",
+            call.request.name, error.message
+          )));
+        }
+      };
+      let (state, is_error, event, details) = match status {
+        pi_rs_core::ReconciliationStatus::Committed { details } => (
+          ToolExecutionState::Succeeded,
+          false,
+          AgentEvent::ToolCompleted(ToolCompleted {
+            call_id: call.request.call_id.clone(),
+            name: call.request.name.clone(),
+            state: ToolExecutionState::Succeeded,
+            duration_ms: 0,
+            status: None,
+            reduced: false,
+            blob: None,
+            visible_bytes: format!("recovered interrupted call: {details}").len() as u64,
+          }),
+          details,
+        ),
+        pi_rs_core::ReconciliationStatus::Unmodified { details } => (
+          ToolExecutionState::Failed,
+          true,
+          AgentEvent::ToolFailed(ToolFailed {
+            call_id: call.request.call_id.clone(),
+            name: call.request.name.clone(),
+            message: details.clone(),
+            duration_ms: 0,
+            status: None,
+          }),
+          details,
+        ),
+        pi_rs_core::ReconciliationStatus::Diverged { details }
+        | pi_rs_core::ReconciliationStatus::RequiresManualInspection { details } => {
+          self.recovery_blocked = true;
+          return Err(TurnError::Sink(format!(
+            "cannot continue session: interrupted mutating tool '{}' requires manual inspection: {details}",
+            call.request.name
+          )));
+        }
+      };
+      let visible_text = format!("recovered interrupted call: {details}");
+      let message = Message::new(
+        Role::Tool,
+        vec![ContentBlock::ToolResult(ToolResultBlock {
+          id: call.request.call_id.clone(),
+          name: call.request.name.clone(),
+          state,
+          text: visible_text,
+          is_error,
+          reduced: false,
+        })],
+      );
+      let envelope = match self.emit_message(Some(turn_id), event, &message) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+          self.recovery_blocked = true;
+          return Err(error);
+        }
+      };
+      self.push_message(message, envelope.meta.seq);
+      self.interrupted_tools.remove(0);
+    }
+    Ok(())
+  }
+
+  fn normalize_message_seqs(&mut self) {
+    match self.message_seqs.len().cmp(&self.messages.len()) {
+      std::cmp::Ordering::Less => self.message_seqs.resize(self.messages.len(), None),
+      std::cmp::Ordering::Greater => self.message_seqs.truncate(self.messages.len()),
+      std::cmp::Ordering::Equal => {}
+    }
+  }
+
   /// Model-visible history so far.
   /// Test-visible view of the live model context.
   pub fn messages_mut(&mut self) -> &mut Vec<Message> {
+    self.normalize_message_seqs();
     &mut self.messages
   }
 
@@ -736,6 +909,10 @@ impl<'a> TurnLoop<'a> {
     cancel: &CancelToken,
     progress: &mut dyn TurnProgress,
   ) -> Result<TurnReport, TurnError> {
+    // A provider may quarantine an uncertain cancelled/idle request. This is a
+    // new user turn boundary, so let it explicitly open a fresh generation;
+    // automatic retries inside the previous turn never reach this hook.
+    self.provider().reset_after_abandonment();
     let turn_id = TurnId::new();
     let clock = Instant::now();
     let mut report = TurnReport::new(turn_id.clone(), self.epoch_index());
@@ -746,12 +923,13 @@ impl<'a> TurnLoop<'a> {
     let mut overflow_recovery_used = false;
 
     self.ensure_session_started()?;
+    self.reconcile_interrupted_tools()?;
 
     for item in external_context {
       let bytes = item.text.len() as u64;
       let context_text = item.format_for_model();
       let msg = Message::user(context_text);
-      self.emit_message(
+      let envelope = self.emit_message(
         Some(turn_id.clone()),
         AgentEvent::ExternalContextRetrieved(ExternalContextRetrieved {
           source: item.source.clone(),
@@ -762,11 +940,11 @@ impl<'a> TurnLoop<'a> {
         }),
         &msg,
       )?;
-      self.messages.push(msg);
+      self.push_message(msg, envelope.meta.seq);
     }
 
     let user = Message::user(input);
-    self.emit_message(
+    let envelope = self.emit_message(
       Some(turn_id.clone()),
       AgentEvent::UserMessage(UserMessage {
         text: input.to_string(),
@@ -774,7 +952,7 @@ impl<'a> TurnLoop<'a> {
       }),
       &user,
     )?;
-    self.messages.push(user);
+    self.push_message(user, envelope.meta.seq);
     progress.on_user_message(input);
 
     // The loop is bounded by *requests*, not rounds: a turn that keeps asking for
@@ -823,7 +1001,7 @@ impl<'a> TurnLoop<'a> {
       report.requests = self.requests.load(Ordering::SeqCst);
 
       let mut blocks = Vec::new();
-      if let Some(text) = response.text.as_ref() {
+      if let Some(text) = response.text.as_ref().filter(|text| !text.is_empty()) {
         blocks.push(ContentBlock::text(text.clone()));
         report.text.push_str(text);
       }
@@ -836,11 +1014,16 @@ impl<'a> TurnLoop<'a> {
       }
       if !blocks.is_empty() {
         let message = Message::new(Role::Assistant, blocks);
+        let introduced_by = response.introduced_by.clone();
         self.trace.record_message(&AttributedMessage {
-          envelope: response.introduced_by.clone(),
+          envelope: introduced_by.clone(),
           message: message.clone(),
         })?;
-        self.messages.push(message);
+        self.push_message(message, introduced_by.meta.seq);
+      } else {
+        self
+          .trace
+          .complete_without_message(&response.introduced_by)?;
       }
 
       if response.calls.is_empty() {
@@ -848,7 +1031,12 @@ impl<'a> TurnLoop<'a> {
         return self.finish(report, TurnStatus::Completed, clock, Some(turn_id.clone()));
       }
 
-      report.tool_calls += response.calls.len() as u32;
+      let tool_calls = u32::try_from(response.calls.len())
+        .map_err(|_| TurnError::Sink("tool-call count exceeds durable limit".into()))?;
+      report.tool_calls = report
+        .tool_calls
+        .checked_add(tool_calls)
+        .ok_or_else(|| TurnError::Sink("turn tool-call count is exhausted".into()))?;
       self.execute_calls(turn_id.clone(), &response.calls, cancel, progress)?;
     }
 
@@ -939,6 +1127,23 @@ impl<'a> TurnLoop<'a> {
     turn_id: Option<TurnId>,
     event: AgentEvent,
   ) -> Result<EventEnvelope, TurnError> {
+    self.emit_with_sink(turn_id, event, false)
+  }
+
+  fn emit_without_message(
+    &mut self,
+    turn_id: Option<TurnId>,
+    event: AgentEvent,
+  ) -> Result<EventEnvelope, TurnError> {
+    self.emit_with_sink(turn_id, event, true)
+  }
+
+  fn emit_with_sink(
+    &mut self,
+    turn_id: Option<TurnId>,
+    event: AgentEvent,
+    without_message: bool,
+  ) -> Result<EventEnvelope, TurnError> {
     let epoch = &self.epochs[self.epochs.len() - 1];
     let mut meta = EventMeta::new(self.session_id.clone(), self.trace_id.clone());
     meta.model_epoch = Some(epoch.index);
@@ -947,7 +1152,11 @@ impl<'a> TurnLoop<'a> {
       meta.turn_id = Some(turn_id);
     }
     let mut envelope = EventEnvelope::new(meta, event);
-    self.trace.emit(&mut envelope)?;
+    if without_message {
+      self.trace.emit_without_message(&mut envelope)?;
+    } else {
+      self.trace.emit(&mut envelope)?;
+    }
     self.envelopes.push(envelope.clone());
     Ok(envelope)
   }
@@ -978,19 +1187,6 @@ impl<'a> TurnLoop<'a> {
       .unwrap_or(pi_rs_core::EventSeq(0))
   }
 
-  /// The newest journal position this loop can cite, if any trace reported one.
-  fn last_cited_seq(&self) -> pi_rs_core::EventSeq {
-    self
-      .envelopes
-      .iter()
-      .filter_map(|envelope| envelope.meta.seq)
-      .max()
-      .into_iter()
-      .chain(self.history.map(|(_, last)| last))
-      .max()
-      .unwrap_or(pi_rs_core::EventSeq(0))
-  }
-
   /// Declare the journal bounds of history this loop inherited but did not emit.
   ///
   /// A resumed loop is handed messages, not envelopes; without this, a
@@ -1017,6 +1213,11 @@ impl<'a> TurnLoop<'a> {
       message: message.clone(),
     })?;
     Ok(envelope)
+  }
+
+  fn push_message(&mut self, message: Message, seq: Option<EventSeq>) {
+    self.messages.push(message);
+    self.message_seqs.push(seq);
   }
 
   fn diagnostic(
@@ -1211,11 +1412,19 @@ impl<'a> TurnLoop<'a> {
         epoch_of_attempts = self.epoch_index();
         attempts_on_model = 0;
       }
-      attempts_on_model += 1;
+      attempts_on_model = attempts_on_model
+        .checked_add(1)
+        .ok_or_else(|| TurnFailure::Sink(SinkError("model attempt count is exhausted".into())))?;
       let request = self
         .build_request(&turn_id, turn_history_start)
         .map_err(TurnFailure::from)?;
       // The turn's request budget is spent here, at the point the request exists.
+      let requests = self.requests.load(Ordering::SeqCst);
+      if requests == usize::MAX {
+        return Err(TurnFailure::Sink(SinkError(
+          "model request count is exhausted".into(),
+        )));
+      }
       self.requests.fetch_add(1, Ordering::SeqCst);
       let epoch = self.epoch_index();
       let model = self.active_model();
@@ -1227,9 +1436,15 @@ impl<'a> TurnLoop<'a> {
           AgentEvent::ModelRequestStarted(ModelRequestStarted {
             epoch,
             model: model.clone(),
-            message_count: request.messages.len() as u32,
+            message_count: u32::try_from(request.messages.len()).map_err(|_| {
+              TurnFailure::Sink(SinkError(
+                "model message count exceeds durable limit".into(),
+              ))
+            })?,
             context_tokens_est: estimate,
-            tools_exposed: request.tools.len() as u32,
+            tools_exposed: u32::try_from(request.tools.len()).map_err(|_| {
+              TurnFailure::Sink(SinkError("tool-spec count exceeds durable limit".into()))
+            })?,
           }),
         )
         .map_err(TurnFailure::from)?;
@@ -1279,14 +1494,25 @@ impl<'a> TurnLoop<'a> {
             Some(failure) => failure,
             None => {
               self.measured_input_tokens = usage.input_tokens;
-              let tool_calls = calls.len() as u32;
+              let tool_calls = u32::try_from(calls.len()).map_err(|_| {
+                TurnFailure::Sink(SinkError("tool-call count exceeds durable limit".into()))
+              })?;
               let introduced_by = self
                 .emit(
                   Some(turn_id.clone()),
                   AgentEvent::ModelRequestCompleted(ModelRequestCompleted {
                     epoch,
                     model: model.clone(),
-                    finish_reason: usage.finish_reason.clone(),
+                    finish_reason: usage.finish_reason.clone().or_else(|| {
+                      usage.is_certain().then(|| {
+                        if calls.is_empty() {
+                          "stop"
+                        } else {
+                          "tool_calls"
+                        }
+                        .into()
+                      })
+                    }),
                     input_tokens: usage.input_tokens,
                     output_tokens: usage.output_tokens,
                     duration_ms,
@@ -1329,7 +1555,9 @@ impl<'a> TurnLoop<'a> {
             input_tokens: None,
             output_tokens: None,
             duration_ms,
-            tool_calls: calls.len() as u32,
+            tool_calls: u32::try_from(calls.len()).map_err(|_| {
+              TurnFailure::Sink(SinkError("tool-call count exceeds durable limit".into()))
+            })?,
             reasoning_provenance: provenance,
             first_delta_ms,
           }),
@@ -1490,8 +1718,12 @@ impl<'a> TurnLoop<'a> {
           0
         };
         let from = self.active_model();
+        let index = self
+          .epoch_index()
+          .checked_add(1)
+          .ok_or_else(|| TurnError::Sink("model epoch space is exhausted".into()))?;
         let epoch = Epoch {
-          index: self.epoch_index() + 1,
+          index,
           model: to.clone(),
           capabilities: backup.capabilities(),
           reason: EpochReason::AutomaticFailover,
@@ -1561,7 +1793,20 @@ impl<'a> TurnLoop<'a> {
       .as_ref()
       .map(|caps| caps.context_window.saturating_sub(1_024))
       .unwrap_or(4_096);
-    self.evict_oldest(target, &turn_id, turn_history_start)
+    let checkpoint = self.checkpoint_floor.min(self.messages.len());
+    let turn_start = (*turn_history_start).min(self.messages.len());
+    let had_evictable_history = turn_start.max(checkpoint) > checkpoint;
+    let dropped = self.evict_oldest(target, &turn_id, turn_history_start)?;
+    // `safe_eviction_boundary` may refuse every candidate when the oldest
+    // retained unit is an incomplete tool lifecycle. Do not switch epochs and
+    // send a request that is known to exceed the backup budget in that case;
+    // a smaller model cannot repair an invalid history by receiving it.
+    if had_evictable_history && estimate_messages(&self.messages) > target {
+      return Err(TurnError::Sink(format!(
+        "cannot safely rebudget history below the backup context target of {target} tokens"
+      )));
+    }
+    Ok(dropped)
   }
 
   /// Drop the oldest model-visible turns until the estimate reaches `target`, and
@@ -1578,27 +1823,45 @@ impl<'a> TurnLoop<'a> {
     turn_id: &TurnId,
     turn_history_start: &mut usize,
   ) -> Result<u32, TurnError> {
+    self.normalize_message_seqs();
     let before = estimate_messages(&self.messages);
     let turn_start = (*turn_history_start).min(self.messages.len());
     // The current-turn suffix and a restored checkpoint capsule are both
     // non-evictable. The latter is a durable barrier, not ordinary history.
-    let current_turn = self.messages.len() - turn_start;
     let checkpoint = self.checkpoint_floor.min(self.messages.len());
-    let minimum_len = current_turn
-      .saturating_add(checkpoint)
-      .min(self.messages.len());
-    let mut dropped = 0usize;
-    while estimate_messages(&self.messages[dropped..]) > target
-      && self.messages.len().saturating_sub(dropped) > minimum_len
+    let evictable_start = checkpoint;
+    let evictable_end = turn_start.max(checkpoint).min(self.messages.len());
+    let max_drop = evictable_end.saturating_sub(evictable_start);
+    let mut desired = 0usize;
+    while desired < max_drop
+      && estimate_after_eviction(&self.messages, evictable_start, desired) > target
     {
-      dropped += 1;
+      desired += 1;
     }
+    // A reduction may remove only complete conversation turns. If the byte
+    // target lands inside an assistant tool-call/result pair, retain the last
+    // safe boundary instead of handing a provider an invalid protocol history.
+    let dropped = (0..=desired)
+      .rev()
+      .find(|drop| {
+        safe_eviction_boundary(
+          &self.messages,
+          evictable_start,
+          evictable_start + *drop,
+          evictable_end,
+        )
+      })
+      .unwrap_or(0);
     if dropped > 0 {
-      let visible = estimate_messages(&self.messages[dropped..]);
-      let dropped_count = dropped as u32;
-      let blob = self.trace.put_payload(
-        format!("dropped {dropped_count} oldest turns to reach {target} tokens").as_bytes(),
-      )?;
+      let visible = estimate_after_eviction(&self.messages, evictable_start, dropped);
+      let dropped_count = u32::try_from(dropped)
+        .map_err(|_| TurnError::Sink("eviction message count exceeds durable limit".into()))?;
+      let retained_count = u32::try_from(self.messages.len().saturating_sub(dropped))
+        .map_err(|_| TurnError::Sink("retained message count exceeds durable limit".into()))?;
+      let dropped_messages =
+        serde_json::to_vec(&self.messages[evictable_start..evictable_start + dropped])
+          .map_err(|error| TurnError::Sink(format!("cannot serialize reduced history: {error}")))?;
+      let blob = self.trace.put_payload(&dropped_messages)?;
       let recovery_ref = blob.as_ref().map(BlobRef::recovery_ref);
       self.emit(
         Some(turn_id.clone()),
@@ -1608,16 +1871,21 @@ impl<'a> TurnLoop<'a> {
           },
           original_bytes: before,
           visible_bytes: visible,
+          removed_messages: dropped_count,
+          retained_messages: retained_count,
           recovery_ref,
           blob,
           tool_call_id: None,
         }),
       )?;
-      self.messages.drain(..dropped);
-      if *turn_history_start > 0 {
-        *turn_history_start = (*turn_history_start)
-          .saturating_sub(dropped)
-          .max(self.checkpoint_floor.min(self.messages.len()));
+      self
+        .messages
+        .drain(evictable_start..evictable_start + dropped);
+      self
+        .message_seqs
+        .drain(evictable_start..evictable_start + dropped);
+      if *turn_history_start > evictable_start {
+        *turn_history_start = (*turn_history_start).saturating_sub(dropped);
       }
       // L0 eviction is payload/history reduction, not a compaction epoch. The
       // durable context epoch advances only when an L1/L2 summary or L3
@@ -1705,15 +1973,30 @@ impl<'a> TurnLoop<'a> {
     reason: String,
   ) -> Result<u32, TurnError> {
     let prefix_end = prefix_end.min(self.messages.len());
+    self.normalize_message_seqs();
     let protected = self.checkpoint_floor.min(self.messages.len());
     if prefix_end <= protected {
       return Ok(0);
     }
     let replaced = prefix_end - protected;
     let retained = self.messages.len() - prefix_end;
-    let replaces_from = self.first_cited_seq();
-    let replaces_through = self.last_cited_seq();
-    let next_epoch = self.context_epoch.saturating_add(1);
+    let replaced_count = u32::try_from(replaced)
+      .map_err(|_| TurnError::Sink("compacted message count exceeds durable limit".into()))?;
+    let retained_count = u32::try_from(retained)
+      .map_err(|_| TurnError::Sink("retained message count exceeds durable limit".into()))?;
+    // Canonical compaction ranges describe the messages actually replaced, not
+    // the retained suffix. Durable resume restores these sequence hints beside
+    // each message; in-memory callers retain the historical zero sentinel.
+    let replaces_from = self.message_seqs[protected..prefix_end]
+      .iter()
+      .find_map(|seq| *seq)
+      .unwrap_or_else(|| self.first_cited_seq());
+    let replaces_through = self.message_seqs[protected..prefix_end]
+      .iter()
+      .rev()
+      .find_map(|seq| *seq)
+      .unwrap_or(replaces_from);
+    let next_epoch = self.next_context_epoch()?;
 
     self.emit(
       Some(turn_id.clone()),
@@ -1725,7 +2008,7 @@ impl<'a> TurnLoop<'a> {
     // capsule at the front is an impermeable floor: only messages after it may
     // be replaced by this ordinary compaction.
     let summary_message = Message::user(summary);
-    self.emit_message(
+    let summary_envelope = self.emit_message(
       Some(turn_id.clone()),
       AgentEvent::ContextSummary,
       &summary_message,
@@ -1744,8 +2027,8 @@ impl<'a> TurnLoop<'a> {
       Some(turn_id.clone()),
       AgentEvent::ContextCompactionCompleted(ContextCompactionCompleted {
         level,
-        removed_messages: replaced as u32,
-        retained_messages: retained as u32,
+        removed_messages: replaced_count,
+        retained_messages: retained_count,
         context_epoch: next_epoch,
       }),
     )?;
@@ -1753,9 +2036,12 @@ impl<'a> TurnLoop<'a> {
     self
       .messages
       .splice(protected..prefix_end, [summary_message]);
+    self
+      .message_seqs
+      .splice(protected..prefix_end, [summary_envelope.meta.seq]);
     self.context_epoch = next_epoch;
     self.last_compaction = Some(Instant::now());
-    Ok(replaced as u32)
+    Ok(replaced_count)
   }
 
   /// Compact oldest messages using either an explicit summary or a synthesized one.
@@ -1765,11 +2051,16 @@ impl<'a> TurnLoop<'a> {
     target_tokens: u64,
     explicit_summary: Option<&str>,
   ) -> Result<u32, TurnError> {
-    if self.messages.len() <= 1 {
+    let protected = self.checkpoint_floor.min(self.messages.len());
+    let tail_len = self.messages.len().saturating_sub(protected);
+    // A checkpoint capsule plus at most one post-checkpoint message has no
+    // replaceable history. In particular, do not let the absolute prefix
+    // arithmetic below produce a slice whose end precedes the capsule floor.
+    if tail_len <= 1 {
       return Ok(0);
     }
     let mut kept = 1usize;
-    while kept < self.messages.len().saturating_sub(1) {
+    while kept < tail_len.saturating_sub(1) {
       let next_kept = kept + 1;
       let start = self.messages.len() - next_kept;
       if estimate_messages(&self.messages[start..]) > target_tokens {
@@ -1777,16 +2068,13 @@ impl<'a> TurnLoop<'a> {
       }
       kept = next_kept;
     }
-    let kept = kept.min(self.messages.len().saturating_sub(1));
-    let removed = self.messages.len() - kept;
-    if removed == 0 {
+    let prefix_end = self.messages.len().saturating_sub(kept);
+    if prefix_end <= protected {
       return Ok(0);
     }
     let summary_text = match explicit_summary {
       Some(text) => text.to_string(),
       None => {
-        let protected = self.checkpoint_floor.min(self.messages.len());
-        let prefix_end = self.messages.len().saturating_sub(kept);
         let slice = &self.messages[protected..prefix_end];
         match &self.summarizer {
           Some(custom) => custom(slice),
@@ -1954,7 +2242,12 @@ impl<'a> TurnLoop<'a> {
     turn_id: &TurnId,
     capsule: ContextCapsule,
   ) -> Result<CheckpointCreated, TurnError> {
-    let summarized_events = self.messages.len() as u64;
+    self.normalize_message_seqs();
+    let protected = self.checkpoint_floor.min(self.messages.len());
+    let removed = self.messages.len().saturating_sub(protected);
+    let summarized_events = u64::try_from(removed)
+      .map_err(|_| TurnError::Sink("checkpoint message count exceeds durable limit".into()))?;
+    let next_context_epoch = self.next_context_epoch()?;
     let (checkpoint_id, path) = match self.trace.create_checkpoint(&capsule)? {
       Some((id, p)) => (id, p),
       None => {
@@ -1963,38 +2256,46 @@ impl<'a> TurnLoop<'a> {
         (id, p)
       }
     };
+    self
+      .trace
+      .set_checkpoint_context_epoch(next_context_epoch)?;
 
     let event = CheckpointCreated {
       checkpoint_id,
       capsule_version: capsule.version,
       summarized_events,
       path,
+      context_epoch: next_context_epoch,
     };
 
     let checkpoint_envelope = self.emit(
       Some(turn_id.clone()),
       AgentEvent::CheckpointCreated(event.clone()),
     )?;
-    self.checkpoint_cited_from = checkpoint_envelope
-      .meta
-      .seq
-      .map(|seq| EventSeq(seq.0.saturating_add(1)));
+    self.checkpoint_cited_from = match checkpoint_envelope.meta.seq {
+      Some(seq) => Some(EventSeq(seq.0.checked_add(1).ok_or_else(|| {
+        TurnError::Sink("checkpoint sequence space is exhausted".into())
+      })?)),
+      None => None,
+    };
 
     // Reset visible messages: replace summarized history with the capsule's model representation
     let capsule_msg = Message::user(capsule.format_for_model());
-    let removed = self.messages.len();
     self.messages.clear();
+    self.message_seqs.clear();
     self.messages.push(capsule_msg);
+    self.message_seqs.push(None);
     self.checkpoint_floor = 1;
 
-    self.context_epoch += 1;
+    self.context_epoch = next_context_epoch;
     self.last_compaction = Some(Instant::now());
 
     self.emit(
       Some(turn_id.clone()),
       AgentEvent::ContextCompactionCompleted(ContextCompactionCompleted {
         level: ContextLevel::L3Checkpoint,
-        removed_messages: removed as u32,
+        removed_messages: u32::try_from(removed)
+          .map_err(|_| TurnError::Sink("checkpoint message count exceeds durable limit".into()))?,
         retained_messages: 1,
         context_epoch: self.context_epoch,
       }),
@@ -2012,11 +2313,15 @@ impl<'a> TurnLoop<'a> {
     capsule: ContextCapsule,
     turn_history_start: &mut usize,
   ) -> Result<Option<CheckpointCreated>, TurnError> {
+    self.normalize_message_seqs();
     let prefix_end = (*turn_history_start).min(self.messages.len());
-    if prefix_end == 0 {
+    if prefix_end == 0 || (self.checkpoint_floor > 0 && prefix_end <= 1) {
       return Ok(None);
     }
-    let summarized_events = prefix_end as u64;
+    let protected = self.checkpoint_floor.min(prefix_end);
+    let replaced = prefix_end.saturating_sub(protected);
+    let summarized_events = u64::try_from(replaced)
+      .map_err(|_| TurnError::Sink("checkpoint message count exceeds durable limit".into()))?;
     let (checkpoint_id, path) = match self.trace.create_checkpoint(&capsule)? {
       Some((id, path)) => (id, path),
       None => {
@@ -2025,40 +2330,61 @@ impl<'a> TurnLoop<'a> {
         (id, path)
       }
     };
+    let next_epoch = self.next_context_epoch()?;
+    self.trace.set_checkpoint_context_epoch(next_epoch)?;
     let event = CheckpointCreated {
       checkpoint_id,
       capsule_version: capsule.version,
       summarized_events,
       path,
+      context_epoch: next_epoch,
     };
     let checkpoint_envelope = self.emit(
       Some(turn_id.clone()),
       AgentEvent::CheckpointCreated(event.clone()),
     )?;
-    self.checkpoint_cited_from = checkpoint_envelope
-      .meta
-      .seq
-      .map(|seq| EventSeq(seq.0.saturating_add(1)));
+    self.checkpoint_cited_from = match checkpoint_envelope.meta.seq {
+      Some(seq) => Some(EventSeq(seq.0.checked_add(1).ok_or_else(|| {
+        TurnError::Sink("checkpoint sequence space is exhausted".into())
+      })?)),
+      None => None,
+    };
 
     let capsule_message = Message::user(capsule.format_for_model());
-    let retained = self.messages.len() - prefix_end;
-    let next_epoch = self.context_epoch.saturating_add(1);
+    let retained_tail = self.messages.len() - prefix_end;
+    // The durable L3 count describes the complete post-boundary working set:
+    // the protected capsule plus the untouched current-turn suffix. Full
+    // checkpoints already use this same convention with a count of one.
+    let retained = retained_tail
+      .checked_add(1)
+      .ok_or_else(|| TurnError::Sink("retained message count exceeds durable limit".into()))?;
+    let removed_count = u32::try_from(replaced)
+      .map_err(|_| TurnError::Sink("checkpoint message count exceeds durable limit".into()))?;
     self.emit(
       Some(turn_id.clone()),
       AgentEvent::ContextCompactionCompleted(ContextCompactionCompleted {
         level: ContextLevel::L3Checkpoint,
-        removed_messages: prefix_end as u32,
-        retained_messages: retained as u32,
+        removed_messages: removed_count,
+        retained_messages: u32::try_from(retained)
+          .map_err(|_| TurnError::Sink("retained message count exceeds durable limit".into()))?,
         context_epoch: next_epoch,
       }),
     )?;
 
     self.messages.splice(0..prefix_end, [capsule_message]);
+    self.message_seqs.splice(0..prefix_end, [None]);
     self.checkpoint_floor = 1;
     *turn_history_start = 1;
     self.context_epoch = next_epoch;
     self.last_compaction = Some(Instant::now());
     Ok(Some(event))
+  }
+
+  fn next_context_epoch(&self) -> Result<u32, TurnError> {
+    self
+      .context_epoch
+      .checked_add(1)
+      .ok_or_else(|| TurnError::Sink("context epoch space is exhausted".into()))
   }
 
   /// Compact only pre-turn history while a turn is active, preserving the
@@ -2233,7 +2559,7 @@ impl<'a> TurnLoop<'a> {
           read_only,
         }),
       )?;
-      self.emit(
+      self.emit_without_message(
         Some(turn_id.clone()),
         AgentEvent::ToolFailed(ToolFailed {
           call_id: call.id.clone(),
@@ -2284,7 +2610,7 @@ impl<'a> TurnLoop<'a> {
           reduced: false,
         };
         let message = Message::new(Role::Tool, vec![ContentBlock::ToolResult(block)]);
-        self.emit_message(
+        let envelope = self.emit_message(
           Some(turn_id.clone()),
           AgentEvent::ToolFailed(ToolFailed {
             call_id: call.id.clone(),
@@ -2295,7 +2621,7 @@ impl<'a> TurnLoop<'a> {
           }),
           &message,
         )?;
-        self.messages.push(message);
+        self.push_message(message, envelope.meta.seq);
         break;
       }
 
@@ -2335,12 +2661,13 @@ impl<'a> TurnLoop<'a> {
           .execute_observed(&request, &mut sink, cancel, &mut on_started)?;
         (executed, elapsed_ms(clock))
       };
-      let block = self.record_tool_outcome(turn_id.clone(), call, &executed.0, executed.1)?;
+      let (block, seq) =
+        self.record_tool_outcome(turn_id.clone(), call, &executed.0, executed.1, read_only)?;
       progress.on_tool_finished(call, &executed.0);
-      self.messages.push(Message::new(
-        Role::Tool,
-        vec![ContentBlock::ToolResult(block)],
-      ));
+      self.push_message(
+        Message::new(Role::Tool, vec![ContentBlock::ToolResult(block)]),
+        seq,
+      );
     }
     Ok(())
   }
@@ -2352,7 +2679,8 @@ impl<'a> TurnLoop<'a> {
     call: &ToolCallBlock,
     executed: &Executed,
     duration_ms: u64,
-  ) -> Result<ToolResultBlock, TurnError> {
+    read_only: bool,
+  ) -> Result<(ToolResultBlock, Option<EventSeq>), TurnError> {
     let outcome = &executed.outcome;
     let text = outcome.text.clone();
     let mut reduced = outcome.reduced;
@@ -2373,6 +2701,8 @@ impl<'a> TurnLoop<'a> {
           },
           original_bytes: full.len() as u64,
           visible_bytes: text.len() as u64,
+          removed_messages: 0,
+          retained_messages: 0,
           recovery_ref,
           blob,
           tool_call_id: Some(call.id.clone()),
@@ -2380,11 +2710,11 @@ impl<'a> TurnLoop<'a> {
       )?;
     }
 
-    let mutating = !self
-      .tools
-      .metadata_for(&call.name)
-      .map(|meta| meta.read_only)
-      .unwrap_or(true);
+    // Keep the risk classification captured alongside the request. A dynamic
+    // registry may replace or unregister the tool while it runs; consulting
+    // the current map here could claim that an uncertain side effect was
+    // read-only (or vice versa).
+    let mutating = !read_only;
 
     let event = match executed.state {
       ToolExecutionState::Succeeded => AgentEvent::ToolCompleted(ToolCompleted {
@@ -2424,13 +2754,13 @@ impl<'a> TurnLoop<'a> {
       is_error: outcome.is_error,
       reduced,
     };
-    self.emit_message(
+    let envelope = self.emit_message(
       Some(turn_id.clone()),
       event,
       &Message::new(Role::Tool, vec![ContentBlock::ToolResult(block.clone())]),
     )?;
 
-    Ok(block)
+    Ok((block, envelope.meta.seq))
   }
 }
 
@@ -2672,6 +3002,36 @@ pub fn truncate_utf8_to_bytes(text: &str, max_bytes: usize) -> &str {
 fn estimate_messages(messages: &[Message]) -> u64 {
   let bytes: usize = messages.iter().map(estimate_message_bytes).sum();
   (bytes / 4).max(1) as u64
+}
+
+fn estimate_after_eviction(messages: &[Message], start: usize, dropped: usize) -> u64 {
+  let end = start.saturating_add(dropped).min(messages.len());
+  let bytes: usize = messages[..start]
+    .iter()
+    .chain(messages[end..].iter())
+    .map(estimate_message_bytes)
+    .sum();
+  (bytes / 4).max(1) as u64
+}
+
+fn safe_eviction_boundary(messages: &[Message], start: usize, boundary: usize, end: usize) -> bool {
+  if boundary < start || boundary > end || boundary > messages.len() {
+    return false;
+  }
+  if boundary == start {
+    return true;
+  }
+  // A retained suffix must begin at a new user turn. This keeps assistant tool
+  // calls paired with their tool results and avoids retaining a result whose
+  // call was evicted with the preceding turn.
+  if boundary < messages.len() && messages[boundary].role != Role::User {
+    return false;
+  }
+  let previous = &messages[boundary - 1];
+  !previous
+    .content
+    .iter()
+    .any(|block| matches!(block, ContentBlock::ToolCall(_)))
 }
 
 fn estimate_message_bytes(message: &Message) -> usize {
@@ -3000,6 +3360,9 @@ mod tests {
       }
       let usage = if let Some(events) = self.rounds.get(served) {
         let mut usage = CompletionUsage::unknown();
+        if events.is_empty() {
+          usage.finish_reason = Some("stop".into());
+        }
         for event in events {
           match event {
             ProviderEvent::TextDelta(_) => usage.output_tokens = Some(4),
@@ -3254,6 +3617,50 @@ mod tests {
         .count(),
       1
     );
+  }
+
+  #[test]
+  fn an_empty_completed_response_commits_without_a_message_projection() {
+    let temp = pi_rs_store::TempDir::new("runtime-empty-completion");
+    let store = pi_rs_store::Store::open(temp.path(), pi_rs_store::WritePolicy::default())
+      .expect("store opens");
+    let session_id = SessionId::new();
+    let provider = Scripted::new("empty", vec![Vec::new()]);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let session = store
+      .begin(SessionHeader {
+        session_id: session_id.clone(),
+        version: pi_rs_core::session::SESSION_SCHEMA_VERSION,
+        started_at_ms: 1,
+        working_dir: "/workspace".into(),
+        model: provider.model().clone(),
+        parent_session: None,
+        branched_from_event: None,
+        imported_from: None,
+      })
+      .unwrap();
+    let mut trace = StoreTrace::new(session);
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      session_id.clone(),
+      TraceId::new(),
+    );
+    runtime
+      .run_turn("empty answer", &CancelToken::new(), &mut SilentProgress)
+      .expect("an explicit stop with no content is still a completed response");
+    drop(runtime);
+    trace.flush().unwrap();
+    drop(trace);
+    store
+      .restore(&session_id)
+      .expect("empty completion WAL is committed");
   }
 
   #[test]
@@ -4623,6 +5030,55 @@ mod tests {
   }
 
   #[test]
+  fn a_narrower_backup_refuses_an_unrecoverable_tool_boundary() {
+    let primary =
+      Scripted::new("primary", Vec::new()).always_fails(ModelFailureKind::ProviderUnavailable);
+    let mut backup = Scripted::new("backup", vec![text("must not run")]);
+    backup.capabilities.context_window = 1_100;
+    let mut assistant_with_open_call = Message::assistant("planning");
+    assistant_with_open_call
+      .content
+      .push(ContentBlock::ToolCall(ToolCallBlock {
+        id: pi_rs_core::ToolCallId::new(),
+        name: "write".into(),
+        arguments: serde_json::json!({"path":"state"}),
+      }));
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      primary.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_backup(&backup)
+    .with_messages(vec![
+      Message::user("a".repeat(20_000)),
+      assistant_with_open_call,
+      Message::user("current turn"),
+    ]);
+    let mut turn_start = 2;
+    let error = runtime
+      .rebudget(TurnId::new(), &mut turn_start)
+      .expect_err("an incomplete tool unit cannot be crossed to fit the backup");
+
+    assert!(
+      matches!(error, TurnError::Sink(ref message) if message.contains("cannot safely rebudget")),
+      "unexpected error: {error:?}"
+    );
+    assert!(
+      backup.requests().is_empty(),
+      "rebudget must not contact the backup"
+    );
+  }
+
+  #[test]
   fn a_narrower_backup_drops_older_turns_before_it_takes_over() {
     // The other side of the same line: with real history in flight, takeover into a
     // small window shortens it, says so, and records what was given up.
@@ -5136,6 +5592,187 @@ mod tests {
   }
 
   #[test]
+  fn durable_prefix_checkpoint_resume_keeps_the_current_turn_suffix() {
+    let temp = pi_rs_store::TempDir::new("runtime-resume-prefix-checkpoint");
+    let store = pi_rs_store::Store::open(temp.path(), pi_rs_store::WritePolicy::default())
+      .expect("store opens");
+    let session_id = SessionId::new();
+    let model = ModelRef::new("test", "checkpoint-prefix");
+    let session = store
+      .begin(SessionHeader {
+        session_id: session_id.clone(),
+        version: pi_rs_core::session::SESSION_SCHEMA_VERSION,
+        started_at_ms: 1,
+        working_dir: "/workspace".into(),
+        model: model.clone(),
+        parent_session: None,
+        branched_from_event: None,
+        imported_from: None,
+      })
+      .expect("session begins");
+    let provider = Scripted::new("checkpoint-prefix", vec![text("unused")]);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, 32_768);
+    let mut trace = StoreTrace::new(session);
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      session_id.clone(),
+      TraceId::new(),
+    );
+    let turn = TurnId::new();
+    for (text, is_current) in [("old history", false), ("current user", true)] {
+      let message = Message::user(text);
+      let envelope = runtime
+        .emit_message(
+          Some(turn.clone()),
+          AgentEvent::UserMessage(UserMessage {
+            text: text.into(),
+            attachments: 0,
+          }),
+          &message,
+        )
+        .expect("user projection is durable");
+      runtime.push_message(message, envelope.meta.seq);
+      if is_current {
+        // Keep the boundary at the first message of the active turn: the
+        // checkpoint must summarize only the preceding prefix.
+        assert_eq!(runtime.messages().len(), 2);
+      }
+    }
+    let mut turn_history_start = 1;
+    runtime
+      .checkpoint_turn_prefix(
+        &turn,
+        ContextCapsule::new("prefix checkpoint"),
+        &mut turn_history_start,
+      )
+      .expect("prefix checkpoint succeeds");
+    assert_eq!(
+      runtime
+        .messages()
+        .iter()
+        .map(Message::text)
+        .collect::<Vec<_>>(),
+      [
+        "[Session Checkpoint Capsule]\nobjective: prefix checkpoint\n[/Session Checkpoint Capsule]",
+        "current user"
+      ]
+    );
+    // Prove the first boundary before writing a second one. The restored
+    // projection contains the suffix but not the protected capsule message.
+    runtime.trace.flush().expect("flush first checkpoint");
+    let first = store
+      .restore(&session_id)
+      .expect("restore first checkpoint");
+    assert_eq!(first.summarized_messages, 1);
+    assert_eq!(first.messages[0].message.text(), "current user");
+    assert_eq!(first.checkpoint.unwrap().objective, "prefix checkpoint");
+
+    // A subsequent prefix checkpoint must count only semantic tail messages;
+    // the old capsule is protected in memory but absent from the session log.
+    let second = Message::user("second current user");
+    let second_envelope = runtime
+      .emit_message(
+        Some(turn.clone()),
+        AgentEvent::UserMessage(UserMessage {
+          text: "second current user".into(),
+          attachments: 0,
+        }),
+        &second,
+      )
+      .expect("second user projection is durable");
+    runtime.push_message(second, second_envelope.meta.seq);
+    let mut second_turn_start = 2;
+    runtime
+      .checkpoint_turn_prefix(
+        &turn,
+        ContextCapsule::new("second prefix checkpoint"),
+        &mut second_turn_start,
+      )
+      .expect("second prefix checkpoint succeeds");
+    drop(runtime);
+    trace.flush().expect("flush durable state");
+    drop(trace);
+
+    let restored = store
+      .restore(&session_id)
+      .expect("restore second checkpoint");
+    assert_eq!(restored.summarized_messages, 2);
+    assert_eq!(restored.messages[0].message.text(), "second current user");
+    assert_eq!(
+      restored.checkpoint.unwrap().objective,
+      "second prefix checkpoint"
+    );
+  }
+
+  #[test]
+  fn durable_l0_eviction_resume_keeps_the_same_model_visible_suffix() {
+    let temp = pi_rs_store::TempDir::new("runtime-resume-l0");
+    let store = pi_rs_store::Store::open(temp.path(), pi_rs_store::WritePolicy::default())
+      .expect("store opens");
+    let session_id = SessionId::new();
+    let model = ModelRef::new("test", "l0");
+    let session = store
+      .begin(SessionHeader {
+        session_id: session_id.clone(),
+        version: pi_rs_core::session::SESSION_SCHEMA_VERSION,
+        started_at_ms: 1,
+        working_dir: "/workspace".into(),
+        model: model.clone(),
+        parent_session: None,
+        branched_from_event: None,
+        imported_from: None,
+      })
+      .expect("session begins");
+    let provider = Scripted::new("l0", vec![text("answer 1"), text("answer 2")]);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, 32_768);
+    let mut trace = StoreTrace::new(session);
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      session_id.clone(),
+      TraceId::new(),
+    );
+    runtime
+      .run_turn("question 1", &CancelToken::new(), &mut SilentProgress)
+      .expect("first turn");
+    runtime
+      .run_turn("question 2", &CancelToken::new(), &mut SilentProgress)
+      .expect("second turn");
+    let target = estimate_messages(&runtime.messages()[2..]);
+    let mut turn_start = runtime.messages().len();
+    let removed = runtime
+      .evict_oldest(target, &TurnId::new(), &mut turn_start)
+      .expect("eviction succeeds");
+    assert_eq!(removed, 2);
+    let expected = runtime
+      .messages()
+      .iter()
+      .map(Message::text)
+      .collect::<Vec<_>>();
+    drop(runtime);
+    trace.flush().expect("flush durable state");
+    drop(trace);
+
+    let restored = store.restore(&session_id).expect("restore state");
+    assert_eq!(restored.reductions.len(), 1);
+    assert_eq!(
+      restored
+        .messages
+        .iter()
+        .map(|m| m.message.text())
+        .collect::<Vec<_>>(),
+      expected
+    );
+  }
+
+  #[test]
   fn durable_compaction_resume_reuses_the_reduced_window() {
     let temp = pi_rs_store::TempDir::new("runtime-resume-compaction");
     let store = pi_rs_store::Store::open(temp.path(), pi_rs_store::WritePolicy::default())
@@ -5180,6 +5817,7 @@ mod tests {
       .expect("compaction");
     drop(runtime);
     trace.flush().expect("flush durable state");
+    drop(trace);
 
     let restored = store.restore(&session_id).expect("restore state");
     assert_eq!(restored.context_epoch, 1);
@@ -5209,10 +5847,16 @@ mod tests {
         .iter()
         .map(|message| message.message.clone())
         .collect(),
+      message_seqs: restored
+        .messages
+        .iter()
+        .map(|message| message.seq)
+        .collect(),
       epochs: vec![resume_epoch],
       context_epoch: restored.context_epoch,
       checkpoint_floor: 0,
       cited_history: restored.last_seq.map(|last| (EventSeq(1), last)),
+      interrupted_tools: restored.interrupted_tools.clone(),
     };
     let mut resumed = TurnLoop::new(
       &resume_provider,
@@ -5232,6 +5876,197 @@ mod tests {
       "summary of the first turn"
     );
     assert_eq!(resume_provider.requests()[0].messages[1].text(), "second");
+  }
+
+  #[test]
+  fn resumed_tool_lifecycle_is_reconciled_before_the_provider_request() {
+    let temp = pi_rs_store::TempDir::new("runtime-resume-tool");
+    let target = temp.child("already-written.txt");
+    std::fs::write(&target, "committed").unwrap();
+    let provider = Scripted::new("resume-tool", vec![text("continue")]);
+    let tools = ToolRegistry::new(Workspace::new(temp.path()).unwrap())
+      .with_policy(&ToolPolicy {
+        auto_approve_mutating: true,
+        ..ToolPolicy::default()
+      })
+      .with_builtins();
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let old_turn = TurnId::new();
+    let pending = pi_rs_core::InterruptedToolCall {
+      request: pi_rs_core::ToolRequest {
+        call_id: pi_rs_core::ToolCallId::new(),
+        name: "write".into(),
+        arguments: serde_json::json!({
+          "path": "already-written.txt",
+          "contents": "committed"
+        }),
+      },
+      state: ToolExecutionState::Started,
+      read_only: false,
+      turn_id: Some(old_turn),
+      epoch: Some(0),
+      model: Some(provider.model().clone()),
+    };
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_resume_state(ResumeState {
+      messages: vec![Message::user("prior question")],
+      message_seqs: vec![None],
+      epochs: vec![ModelEpoch {
+        index: 0,
+        model: provider.model().clone(),
+        capabilities: provider.capabilities(),
+        reason: EpochReason::Initial,
+        started_by_event: None,
+      }],
+      context_epoch: 0,
+      checkpoint_floor: 0,
+      cited_history: None,
+      interrupted_tools: vec![pending],
+    })
+    .expect("resume state validates");
+
+    runtime
+      .run_turn("new question", &CancelToken::new(), &mut SilentProgress)
+      .expect("reconciled session continues");
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(trace.count("tool_completed"), 1);
+    assert!(
+      trace
+        .kinds()
+        .iter()
+        .position(|kind| kind == "tool_completed")
+        .zip(
+          trace
+            .kinds()
+            .iter()
+            .position(|kind| kind == "model_request_started")
+        )
+        .is_some_and(|(reconciled, request)| reconciled < request),
+      "reconciliation must precede the first provider request"
+    );
+  }
+
+  #[test]
+  fn resumed_manual_tool_reconciliation_blocks_provider_contact() {
+    let provider = Scripted::new("resume-manual", vec![text("must not run")]);
+    let temp = pi_rs_store::TempDir::new("runtime-resume-manual-tool");
+    let tools = ToolRegistry::new(Workspace::new(temp.path()).unwrap())
+      .with_policy(&ToolPolicy {
+        auto_approve_mutating: true,
+        ..ToolPolicy::default()
+      })
+      .with_builtins();
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_resume_state(ResumeState {
+      messages: vec![],
+      message_seqs: vec![],
+      epochs: vec![ModelEpoch {
+        index: 0,
+        model: provider.model().clone(),
+        capabilities: provider.capabilities(),
+        reason: EpochReason::Initial,
+        started_by_event: None,
+      }],
+      context_epoch: 0,
+      checkpoint_floor: 0,
+      cited_history: None,
+      interrupted_tools: vec![pi_rs_core::InterruptedToolCall {
+        request: pi_rs_core::ToolRequest {
+          call_id: pi_rs_core::ToolCallId::new(),
+          name: "exec".into(),
+          arguments: serde_json::json!({"command": "echo unsafe"}),
+        },
+        state: ToolExecutionState::Started,
+        read_only: false,
+        turn_id: Some(TurnId::new()),
+        epoch: Some(0),
+        model: Some(provider.model().clone()),
+      }],
+    })
+    .expect("resume state validates");
+    let error = runtime
+      .run_turn("new question", &CancelToken::new(), &mut SilentProgress)
+      .unwrap_err();
+    assert!(matches!(error, TurnError::Sink(message) if message.contains("manual inspection")));
+    assert!(provider.requests().is_empty());
+    let second = runtime
+      .run_turn(
+        "must still be blocked",
+        &CancelToken::new(),
+        &mut SilentProgress,
+      )
+      .unwrap_err();
+    assert!(matches!(second, TurnError::Sink(message) if message.contains("still unresolved")));
+    assert!(provider.requests().is_empty());
+  }
+
+  #[test]
+  fn a_checkpoint_can_be_restored_even_when_it_is_the_first_durable_event() {
+    let temp = pi_rs_store::TempDir::new("runtime-first-checkpoint");
+    let store = pi_rs_store::Store::open(temp.path(), pi_rs_store::WritePolicy::default())
+      .expect("store opens");
+    let session_id = SessionId::new();
+    let model = ModelRef::new("test", "checkpoint");
+    let session = store
+      .begin(SessionHeader {
+        session_id: session_id.clone(),
+        version: pi_rs_core::session::SESSION_SCHEMA_VERSION,
+        started_at_ms: 1,
+        working_dir: "/workspace".into(),
+        model: model.clone(),
+        parent_session: None,
+        branched_from_event: None,
+        imported_from: None,
+      })
+      .expect("session begins");
+    let provider = Scripted::new("checkpoint", vec![text("unused")]);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, 32_768);
+    let mut trace = StoreTrace::new(session);
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      session_id.clone(),
+      TraceId::new(),
+    );
+    runtime
+      .checkpoint(&TurnId::new(), ContextCapsule::new("first checkpoint"))
+      .expect("checkpoint succeeds");
+    drop(runtime);
+    trace.flush().expect("flush durable state");
+    drop(trace);
+
+    let restored = store.restore(&session_id).expect("restore state");
+    assert_eq!(
+      restored.checkpoint.as_ref().unwrap().objective,
+      "first checkpoint"
+    );
+    assert_eq!(restored.context_epoch, 1);
   }
 
   #[test]
@@ -5268,6 +6103,42 @@ mod tests {
     assert_eq!(runtime.messages()[1].text(), "post-checkpoint summary");
     assert_eq!(runtime.messages()[2].text(), "tail");
     assert_eq!(runtime.checkpoint_floor, 1);
+    let completions = trace.all("context_compaction_completed");
+    let completed = completions
+      .last()
+      .expect("ordinary completion recorded after the checkpoint");
+    assert_eq!(completed["retained_messages"], 1);
+    assert_eq!(completed["removed_messages"], 1);
+  }
+
+  #[test]
+  fn summary_compaction_with_only_a_checkpoint_tail_is_a_noop() {
+    let provider = Scripted::new("checkpoint-only-tail", vec![text("ok")]);
+    let tools = registry_with(Vec::new());
+    let policy = pi_rs_core::ProfilePolicy::new(pi_rs_core::ContextProfile::Balanced, 32_768);
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    );
+    runtime
+      .checkpoint(&TurnId::new(), ContextCapsule::new("checkpoint objective"))
+      .expect("checkpoint succeeds");
+    runtime
+      .messages_mut()
+      .push(Message::user("one tail message"));
+    assert_eq!(
+      runtime
+        .compact_with_summary_or(&TurnId::new(), 1, None)
+        .expect("no-op compaction succeeds"),
+      0
+    );
+    assert_eq!(runtime.messages().len(), 2);
+    assert_eq!(trace.count("context_compaction_completed"), 1);
   }
 
   #[test]
@@ -5461,12 +6332,12 @@ mod tests {
       .expect("the epoch is durable");
     assert_eq!(epoch["context_epoch"], 1);
     assert_eq!(
-      epoch["replaces_from"], 1,
-      "the summary replaces the session's first record"
+      epoch["replaces_from"], 3,
+      "the summary replaces the first model-visible message"
     );
-    // Session start, turn start, request start, request end, turn end, plus the
-    // summary: the summary event is the last record compaction replaced.
-    assert_eq!(epoch["replaces_through"], 7);
+    // The user message and assistant answer are the only model-visible records
+    // replaced; request/lifecycle events and the retained suffix are excluded.
+    assert_eq!(epoch["replaces_through"], 5);
     let summary = epoch["summary"]
       .as_object()
       .expect("the epoch carries a stored blob reference, not prose");
@@ -5481,8 +6352,8 @@ mod tests {
     assert_eq!(restored.epochs.len(), 1);
     assert_eq!(restored.epochs[0].epoch, 0);
     assert_eq!(restored.compactions.len(), 1);
-    assert_eq!(restored.compactions[0].replaces_from, Some(EventSeq(1)));
-    assert_eq!(restored.compactions[0].replaces_through, Some(EventSeq(7)));
+    assert_eq!(restored.compactions[0].replaces_from, Some(EventSeq(3)));
+    assert_eq!(restored.compactions[0].replaces_through, Some(EventSeq(5)));
     assert_eq!(restored.context_epoch, 1);
     assert_eq!(
       restored
@@ -5833,10 +6704,12 @@ mod tests {
     };
     let state = ResumeState {
       messages: vec![Message::user("durable history")],
+      message_seqs: vec![None],
       epochs: vec![primary_epoch, backup_epoch],
       context_epoch: 3,
       checkpoint_floor: 0,
       cited_history: Some((pi_rs_core::EventSeq(1), pi_rs_core::EventSeq(17))),
+      interrupted_tools: Vec::new(),
     };
 
     let mut turn_loop = TurnLoop::new(

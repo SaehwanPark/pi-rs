@@ -24,6 +24,7 @@ pub mod decode;
 pub mod deferred;
 pub mod mapping;
 pub mod openai;
+mod relay;
 pub mod sse;
 
 pub use config::{BuildError, DEFAULT_BASE_URL, MaxTokensField, ProviderConfig, ThinkingInput};

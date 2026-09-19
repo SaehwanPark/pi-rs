@@ -51,6 +51,12 @@ pub struct ModelEndpoint {
   pub capabilities: ModelCapabilities,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub max_output_tokens: Option<u64>,
+  /// Optional logical connection deadline for this HTTP endpoint.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub connect_timeout_ms: Option<u64>,
+  /// Optional logical idle deadline for this HTTP endpoint.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub read_timeout_ms: Option<u64>,
 }
 
 impl ModelEndpoint {
@@ -73,6 +79,8 @@ impl ModelEndpoint {
         ..ModelCapabilities::text_only(context_window)
       },
       max_output_tokens: None,
+      connect_timeout_ms: None,
+      read_timeout_ms: None,
     }
   }
 
@@ -100,6 +108,8 @@ impl ModelEndpoint {
         ..ModelCapabilities::text_only(context_window)
       },
       max_output_tokens: None,
+      connect_timeout_ms: None,
+      read_timeout_ms: None,
     }
   }
 
@@ -415,6 +425,17 @@ impl RuntimeConfig {
           endpoint.provider, endpoint.model
         )));
       }
+      for (name, timeout) in [
+        ("connect_timeout_ms", endpoint.connect_timeout_ms),
+        ("read_timeout_ms", endpoint.read_timeout_ms),
+      ] {
+        if timeout == Some(0) {
+          return Err(ConfigError(format!(
+            "endpoint {}/{} {name} must be greater than zero",
+            endpoint.provider, endpoint.model
+          )));
+        }
+      }
     }
     // Endpoints are optional: the CLI can configure a model directly. When the
     // user does declare endpoints, every model the runtime may use has to be
@@ -591,6 +612,19 @@ mod tests {
     assert!(parsed.tools.allow_read_outside);
     assert!(parsed.tools.allow_search_outside);
     assert!(parsed.tools.allow_write_outside);
+  }
+
+  #[test]
+  fn endpoint_timeout_overrides_round_trip_and_reject_zero() {
+    let mut config = sample_config();
+    config.endpoints[0].connect_timeout_ms = Some(750);
+    config.endpoints[0].read_timeout_ms = Some(2_500);
+    let parsed = RuntimeConfig::parse(&config.to_json_string().unwrap()).unwrap();
+    assert_eq!(parsed.endpoints[0].connect_timeout_ms, Some(750));
+    assert_eq!(parsed.endpoints[0].read_timeout_ms, Some(2_500));
+
+    config.endpoints[0].read_timeout_ms = Some(0);
+    assert!(config.validate().unwrap_err().0.contains("read_timeout_ms"));
   }
 
   #[test]

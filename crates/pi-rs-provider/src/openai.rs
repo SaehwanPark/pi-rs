@@ -3,17 +3,26 @@
 use std::{
   fmt,
   io::{self, Read},
+  sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, SyncSender, TrySendError},
+  },
+  thread,
+  time::{Duration, Instant},
 };
 
 use pi_rs_core::{
   CancelToken, CapabilityGap, FailurePhase, ModelCapabilities, ModelFailure, ModelFailureKind,
-  ModelProvider, ModelRef, ModelRequest, ProviderEventSink, provider::CompletionUsage,
+  ModelProvider, ModelRef, ModelRequest, ProviderEvent, ProviderEventSink,
+  provider::CompletionUsage,
 };
 
 use crate::{
-  config::{BuildError, ProviderConfig, agent_for},
+  config::{BuildError, ProviderConfig, agent_for, agent_for_proxy},
   decode::{self, Decoder, StreamEnd},
   mapping::request_body,
+  relay::CancellableHttpRelay,
 };
 
 /// OpenAI-compatible provider.
@@ -21,6 +30,12 @@ pub struct OpenAiCompat {
   config: ProviderConfig,
   model: pi_rs_core::ModelRef,
   agent: ureq::Agent,
+  /// A cancelled request may still be inside ureq until its socket timeout.
+  /// Quarantine this adapter so a later retry cannot overlap that request.
+  quarantined: Arc<AtomicBool>,
+  /// Per-attempt credential for the localhost cancellation relay.
+  relay_nonce: Option<String>,
+  active_request: Arc<AtomicBool>,
 }
 
 impl fmt::Debug for OpenAiCompat {
@@ -44,6 +59,9 @@ impl OpenAiCompat {
       agent: agent_for(&config),
       model,
       config,
+      quarantined: Arc::new(AtomicBool::new(false)),
+      relay_nonce: None,
+      active_request: Arc::new(AtomicBool::new(false)),
     })
   }
 
@@ -102,6 +120,9 @@ impl OpenAiCompat {
     for (name, value) in &self.config.headers {
       call = call.set(name, value);
     }
+    if let Some(nonce) = &self.relay_nonce {
+      call = call.set("x-pi-rs-relay-nonce", nonce);
+    }
     match call.send_string(body) {
       Ok(response) => Ok(response),
       Err(ureq::Error::Status(status, response)) => Err(self::http_failure_from(status, response)),
@@ -132,6 +153,8 @@ impl OpenAiCompat {
     // Which kind of end we actually observe decides whether this turn may be
     // reported as complete.
     let mut end = StreamEnd::DoneSentinel;
+    let idle_budget = Duration::from_millis(self.config.read_timeout_ms.max(1));
+    let mut last_activity = Instant::now();
     let mut stream = crate::sse::SseStream::new(response.into_reader());
     loop {
       if let Some(failure) = decode::check_cancel(cancel, decoder.emitted_output()) {
@@ -140,9 +163,19 @@ impl OpenAiCompat {
       let event = match stream.next_event() {
         Ok(event) => event,
         Err(error) if is_transient_read_timeout(&error) => {
-          // The transport uses a short socket timeout as a cancellation poll.
-          // Preserve the partially framed event in SseStream and retry after
-          // checking the token instead of turning a quiet model into failure.
+          // A socket timeout is a poll only when the logical idle budget has
+          // not elapsed. The old implementation retried forever, making a
+          // response that sent headers and then went silent immortal.
+          if last_activity.elapsed() >= idle_budget {
+            return Err(
+              ModelFailure::new(
+                ModelFailureKind::Timeout,
+                FailurePhase::WaitingForResponse,
+                "provider stream exceeded its configured idle timeout",
+              )
+              .with_partial_output(decoder.emitted_output()),
+            );
+          }
           continue;
         }
         Err(error) => {
@@ -167,6 +200,7 @@ impl OpenAiCompat {
       if event.is_done() {
         break;
       }
+      last_activity = Instant::now();
       let chunk = match decode_chunk(&event.data) {
         Ok(chunk) => chunk,
         Err(failure) => {
@@ -204,6 +238,13 @@ impl OpenAiCompat {
       read_body(response, crate::config::MAX_ERROR_BODY_BYTES as u64 * 64).map_err(|error| {
         if cancel.is_cancelled() {
           decode::cancelled(false).with_model(self.model_ref())
+        } else if is_transient_read_timeout(&error) {
+          ModelFailure::new(
+            ModelFailureKind::Timeout,
+            FailurePhase::WaitingForResponse,
+            "provider response exceeded its configured idle timeout",
+          )
+          .with_model(self.model_ref())
         } else {
           decode::stream_failure(&error, false).with_model(self.model_ref())
         }
@@ -224,6 +265,241 @@ impl OpenAiCompat {
 
   fn model_ref(&self) -> pi_rs_core::ModelRef {
     self.model.clone()
+  }
+
+  #[allow(clippy::result_large_err)]
+  fn stream_blocking(
+    &self,
+    request: &ModelRequest,
+    sink: &mut dyn ProviderEventSink,
+    cancel: &CancelToken,
+  ) -> Result<CompletionUsage, ModelFailure> {
+    let body = request_body(&self.config, request).to_string();
+    let response = match self.send(&body, cancel) {
+      Ok(response) => response,
+      Err(_failure) if cancel.is_cancelled() => {
+        return Err(decode::cancelled(false).with_model(self.model_ref()));
+      }
+      Err(failure) => return Err(failure.with_model(self.model_ref())),
+    };
+    if self.config.stream {
+      self.read_stream(response, sink, cancel)
+    } else {
+      self.read_one_shot(response, sink, cancel)
+    }
+  }
+
+  /// Run the blocking HTTP exchange behind a bounded channel. This gives the
+  /// caller a cancellation poll without ever issuing a second POST: after the
+  /// worker has sent bytes, cancellation only abandons that one in-flight
+  /// exchange and the worker observes the same token on its next socket poll.
+  #[allow(clippy::result_large_err)]
+  fn stream_worker(
+    &self,
+    request: &ModelRequest,
+    sink: &mut dyn ProviderEventSink,
+    cancel: &CancelToken,
+  ) -> Result<CompletionUsage, ModelFailure> {
+    if self.quarantined.load(Ordering::Acquire) {
+      return Err(
+        ModelFailure::new(
+          ModelFailureKind::ProviderUnavailable,
+          FailurePhase::WaitingForResponse,
+          "provider adapter is quarantined after an abandoned request",
+        )
+        .with_model(self.model_ref()),
+      );
+    }
+    if self.active_request.swap(true, Ordering::AcqRel) {
+      return Err(
+        ModelFailure::new(
+          ModelFailureKind::ProviderUnavailable,
+          FailurePhase::WaitingForResponse,
+          "provider adapter already has an in-flight request",
+        )
+        .with_model(self.model_ref()),
+      );
+    }
+    let mut relay = match CancellableHttpRelay::start(
+      &self.config.chat_completions_url(),
+      Duration::from_millis(self.config.connect_timeout_ms.max(1)),
+    ) {
+      Ok(relay) => relay,
+      Err(error) => {
+        self.active_request.store(false, Ordering::Release);
+        return Err(
+          ModelFailure::new(
+            ModelFailureKind::Transport,
+            FailurePhase::WaitingForResponse,
+            format!("provider cancellation relay failed to start: {error}"),
+          )
+          .with_model(self.model_ref()),
+        );
+      }
+    };
+    let worker_agent = match agent_for_proxy(&self.config, &relay.proxy_url(), relay.nonce()) {
+      Ok(agent) => agent,
+      Err(error) => {
+        relay.stop();
+        self.active_request.store(false, Ordering::Release);
+        return Err(
+          ModelFailure::new(
+            ModelFailureKind::Transport,
+            FailurePhase::WaitingForResponse,
+            error.to_string(),
+          )
+          .with_model(self.model_ref()),
+        );
+      }
+    };
+    let (sender, receiver) = mpsc::sync_channel(64);
+    let worker = Self {
+      config: self.config.clone(),
+      model: self.model.clone(),
+      agent: worker_agent,
+      quarantined: Arc::clone(&self.quarantined),
+      relay_nonce: Some(relay.nonce().to_string()),
+      active_request: Arc::clone(&self.active_request),
+    };
+    let active_request = Arc::clone(&self.active_request);
+    let request = request.clone();
+    let model = request.model.clone();
+    let worker_cancel = cancel.clone();
+    let worker_handle = thread::spawn(move || {
+      let mut channel_sink = ChannelSink {
+        sender: sender.clone(),
+        cancel: worker_cancel.clone(),
+      };
+      let result = worker.stream_blocking(&request, &mut channel_sink, &worker_cancel);
+      active_request.store(false, Ordering::Release);
+      let mut done = WorkerMessage::Done(result);
+      loop {
+        match sender.try_send(done) {
+          Ok(()) | Err(TrySendError::Disconnected(_)) => break,
+          Err(TrySendError::Full(next)) => {
+            if worker_cancel.is_cancelled() {
+              break;
+            }
+            done = next;
+            thread::yield_now();
+          }
+        }
+      }
+    });
+
+    let mut emitted = false;
+    let idle_budget = Duration::from_millis(self.config.read_timeout_ms.max(1));
+    let mut last_activity = Instant::now();
+    loop {
+      if cancel.is_cancelled() {
+        self.quarantined.store(true, Ordering::Release);
+        relay.stop();
+        let _ = worker_handle.join();
+        // Keep the adapter quarantined: the POST may have reached the provider
+        // before cancellation, so issuing another attempt through this adapter
+        // could duplicate an uncertain request. Recovery must choose a fresh
+        // adapter or an explicitly separate model.
+        self.active_request.store(false, Ordering::Release);
+        return Err(decode::cancelled(emitted).with_model(model));
+      }
+      match receiver.recv_timeout(Duration::from_millis(50)) {
+        Ok(WorkerMessage::Event(event)) => {
+          emitted = true;
+          last_activity = Instant::now();
+          sink.emit(&event);
+        }
+        Ok(WorkerMessage::Done(result)) => {
+          relay.stop();
+          let _ = worker_handle.join();
+          self.active_request.store(false, Ordering::Release);
+          if result.as_ref().is_err_and(|failure| {
+            matches!(
+              failure.kind,
+              ModelFailureKind::Transport | ModelFailureKind::Timeout | ModelFailureKind::Cancelled
+            )
+          }) {
+            // Socket/timeout/cancel failures are ambiguous after the POST
+            // boundary. Explicit provider responses (5xx, throttles, protocol
+            // errors) retain their normal runtime retry/failover policy.
+            self.quarantined.store(true, Ordering::Release);
+          }
+          return result.map_err(|failure| {
+            let partial = emitted || failure.partial_output_emitted;
+            failure
+              .with_model(model.clone())
+              .with_partial_output(partial)
+          });
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) if cancel.is_cancelled() => {
+          self.quarantined.store(true, Ordering::Release);
+          relay.stop();
+          let _ = worker_handle.join();
+          self.active_request.store(false, Ordering::Release);
+          return Err(decode::cancelled(emitted).with_model(model));
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) if last_activity.elapsed() >= idle_budget => {
+          self.quarantined.store(true, Ordering::Release);
+          relay.stop();
+          let _ = worker_handle.join();
+          self.active_request.store(false, Ordering::Release);
+          return Err(
+            ModelFailure::new(
+              ModelFailureKind::Timeout,
+              FailurePhase::WaitingForResponse,
+              "provider response exceeded its configured idle timeout",
+            )
+            .with_model(model)
+            .with_partial_output(emitted),
+          );
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {}
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+          relay.stop();
+          let _ = worker_handle.join();
+          self.quarantined.store(true, Ordering::Release);
+          self.active_request.store(false, Ordering::Release);
+          return Err(
+            ModelFailure::new(
+              ModelFailureKind::Protocol,
+              FailurePhase::WaitingForResponse,
+              "provider worker exited without a result",
+            )
+            .with_model(model)
+            .with_partial_output(emitted),
+          );
+        }
+      }
+    }
+  }
+}
+
+#[derive(Debug)]
+enum WorkerMessage {
+  Event(ProviderEvent),
+  Done(Result<CompletionUsage, ModelFailure>),
+}
+
+struct ChannelSink {
+  sender: SyncSender<WorkerMessage>,
+  cancel: CancelToken,
+}
+
+impl ProviderEventSink for ChannelSink {
+  fn emit(&mut self, event: &ProviderEvent) {
+    let mut message = WorkerMessage::Event(event.clone());
+    loop {
+      match self.sender.try_send(message) {
+        Ok(()) => return,
+        Err(TrySendError::Disconnected(_)) => return,
+        Err(TrySendError::Full(next)) => {
+          if self.cancel.is_cancelled() {
+            return;
+          }
+          message = next;
+          thread::yield_now();
+        }
+      }
+    }
   }
 }
 
@@ -312,6 +588,13 @@ impl ModelProvider for OpenAiCompat {
     self.config.capabilities.clone()
   }
 
+  fn reset_after_abandonment(&self) {
+    // The runtime calls this only at the beginning of a new user turn, after
+    // the abandoned worker has been joined. Reusing the adapter directly
+    // without that boundary remains refused by `stream_worker`.
+    self.quarantined.store(false, Ordering::Release);
+  }
+
   fn stream(
     &self,
     request: &ModelRequest,
@@ -329,23 +612,9 @@ impl ModelProvider for OpenAiCompat {
         .with_model(model),
       );
     }
-    let body = request_body(&self.config, request).to_string();
-    let response = match self.send(&body, cancel) {
-      Ok(response) => response,
-      Err(_failure) if cancel.is_cancelled() => {
-        return Err(decode::cancelled(false).with_model(model));
-      }
-      Err(failure) => return Err(failure.with_model(model)),
-    };
-    if self.config.stream {
-      self
-        .read_stream(response, sink, cancel)
-        .map_err(|failure| failure.with_model(model))
-    } else {
-      self
-        .read_one_shot(response, sink, cancel)
-        .map_err(|failure| failure.with_model(model))
-    }
+    self
+      .stream_worker(request, sink, cancel)
+      .map_err(|failure| failure.with_model(model))
   }
 }
 

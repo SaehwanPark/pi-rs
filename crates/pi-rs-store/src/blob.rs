@@ -144,6 +144,27 @@ impl BlobStore {
     }
   }
 
+  /// Read and verify a content-addressed payload referenced by a durable line.
+  ///
+  /// `get_relative` validates the path shape, while recovery also needs to
+  /// reject a blob whose contents were replaced in place. The hash and logical
+  /// size are part of the reference, so checking them here keeps a corrupted
+  /// trace from being turned into a plausible message.
+  pub fn get_relative_verified(&self, reference: &str) -> Result<Vec<u8>, StoreError> {
+    let bytes = self.get_relative(reference)?;
+    let filename = reference
+      .rsplit('/')
+      .next()
+      .ok_or_else(|| StoreError::Invalid(format!("not a blob reference: {reference}")))?;
+    let hash = filename.strip_suffix(".deflate").unwrap_or(filename);
+    if hash.len() != 64 || sha256_hex(&bytes) != hash {
+      return Err(StoreError::Invalid(format!(
+        "blob reference does not match its contents: {reference}"
+      )));
+    }
+    Ok(bytes)
+  }
+
   pub fn get(&self, blob: &BlobRef) -> Result<Vec<u8>, StoreError> {
     let path = self.path_for(blob);
     match fs::read(&path) {

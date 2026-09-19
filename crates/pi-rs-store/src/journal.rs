@@ -15,7 +15,11 @@
 //!   session recovers the last one from the journal tail rather than by
 //!   hydrating it.
 
-use std::{fs, path::Path};
+use std::{
+  fs::{self, File},
+  io::{Read, Seek, SeekFrom},
+  path::Path,
+};
 
 use pi_rs_core::{
   event::{AgentEvent, EventEnvelope},
@@ -28,7 +32,7 @@ use serde_json::{Value, json};
 use crate::{
   StoreError,
   blob::BlobStore,
-  jsonl::{LineWriter, ReadReport, read_jsonl, read_jsonl_tail},
+  jsonl::{LineWriter, MAX_JSONL_LINE_BYTES, ReadReport, read_jsonl, read_jsonl_tail},
   payload,
 };
 
@@ -61,6 +65,14 @@ impl TraceJournal {
         if let Some(seq) = entry.envelope.meta.seq {
           keep_max(&mut last_seq, seq);
         }
+      }
+      // The normal store path bounds every line, but the low-level journal API
+      // intentionally does not. A single valid line larger than the recovery
+      // window would otherwise be dropped as a mid-line fragment and the next
+      // append could reuse its sequence. Walk backward to the last complete
+      // decodable line without hydrating earlier history.
+      if let Some(seq) = last_valid_seq(path)? {
+        last_seq = Some(seq);
       }
     }
     Ok(Self {
@@ -128,7 +140,15 @@ impl TraceJournal {
     blobs: Option<&BlobStore>,
     budget: u64,
   ) -> Result<EventSeq, StoreError> {
-    let seq = EventSeq(self.last_seq.map(|seq| seq.0 + 1).unwrap_or(1));
+    let seq = match self.last_seq {
+      Some(last) => EventSeq(
+        last
+          .0
+          .checked_add(1)
+          .ok_or_else(|| StoreError::Invalid("trace sequence space is exhausted".into()))?,
+      ),
+      None => EventSeq(1),
+    };
     let raw_attached = raw_ref.filter(|_| self.raw_capture.is_enabled());
     let mut entry = TraceEntry {
       envelope: envelope.clone(),
@@ -162,6 +182,18 @@ impl TraceJournal {
         }
       }
     }
+    // A budget smaller than the irreducible bookkeeping envelope cannot be
+    // met without hiding identity or ordering fields. `payload::bound` has
+    // already spilled every safe candidate; keep that valid line rather than
+    // rejecting an otherwise recoverable import. The reader's hard bound still
+    // applies to every write path, including low-level callers without blobs.
+    if text.len() > MAX_JSONL_LINE_BYTES {
+      return Err(StoreError::Invalid(format!(
+        "{} trace record exceeds the {}-byte JSONL line bound",
+        self.path().display(),
+        MAX_JSONL_LINE_BYTES
+      )));
+    }
     // Streaming deltas are the high-frequency case; everything that changes
     // state is written through so that a crash cannot lose a transition.
     let durable = requires_durable_write(&entry.envelope.event);
@@ -172,8 +204,23 @@ impl TraceJournal {
 
   /// Reserve a sequence number without writing, for callers that must attach it
   /// to a session record and a journal line for the same fact.
+  ///
+  /// The checked form is the source of truth: sequence exhaustion is a durable
+  /// error, never a wrap to zero or a duplicate. The legacy infallible accessor
+  /// below returns the terminal value at exhaustion so existing callers cannot
+  /// observe wrapping; appends still fail closed through `checked_next_seq`.
+  pub fn checked_next_seq(&self) -> Result<EventSeq, StoreError> {
+    self.last_seq.map_or(Ok(EventSeq(1)), |last| {
+      last
+        .0
+        .checked_add(1)
+        .map(EventSeq)
+        .ok_or_else(|| StoreError::Invalid("trace sequence space is exhausted".into()))
+    })
+  }
+
   pub fn next_seq(&self) -> EventSeq {
-    EventSeq(self.last_seq.map(|seq| seq.0 + 1).unwrap_or(1))
+    self.checked_next_seq().unwrap_or(EventSeq(u64::MAX))
   }
 
   /// Commit buffered lines.
@@ -205,7 +252,9 @@ impl TraceJournal {
 
   /// Read events after one sequence number, in order.
   ///
-  /// This is the resumption primitive: `latest checkpoint + events after it`.
+  /// This is the projection/replay primitive: `latest checkpoint + events after it`.
+  /// Store-level resume may still scan the full canonical journal first when
+  /// validating lifecycle integrity and unresolved side effects.
   pub fn read_after(path: &Path, seq: EventSeq) -> Result<ReadReport<TraceEntry>, StoreError> {
     let mut report = Self::read(path)?;
     report.items.retain(|entry| {
@@ -258,6 +307,68 @@ pub fn requires_durable_write(event: &AgentEvent) -> bool {
     event,
     AgentEvent::ReasoningDelta(_) | AgentEvent::AssistantDelta(_)
   )
+}
+
+/// Recover the last valid sequence by scanning complete JSONL lines backward.
+///
+/// This is normally one bounded read in [`TraceJournal::open`]. The backward
+/// walk is a correctness fallback for the trace-less low-level append API, which
+/// may deliberately write a line larger than `SEQUENCE_RECOVERY_WINDOW`.
+fn last_valid_seq(path: &Path) -> Result<Option<EventSeq>, StoreError> {
+  const CHUNK: usize = 16 * 1024;
+  let mut file = File::open(path)?;
+  let mut end = file.metadata()?.len();
+  while end > 0 {
+    // Ignore line endings at the end of the candidate region. Writers always
+    // append a newline, while a crash can leave a final partial line without
+    // one; either way the preceding complete line remains discoverable.
+    while end > 0 {
+      file.seek(SeekFrom::Start(end - 1))?;
+      let mut byte = [0u8; 1];
+      file.read_exact(&mut byte)?;
+      if matches!(byte[0], b'\n' | b'\r') {
+        end -= 1;
+      } else {
+        break;
+      }
+    }
+    if end == 0 {
+      break;
+    }
+
+    let mut cursor = end;
+    let start = loop {
+      let start = cursor.saturating_sub(CHUNK as u64);
+      let length = usize::try_from(cursor - start).map_err(|_| {
+        StoreError::Invalid("trace line is too large to inspect during recovery".into())
+      })?;
+      file.seek(SeekFrom::Start(start))?;
+      let mut chunk = vec![0u8; length];
+      file.read_exact(&mut chunk)?;
+      if let Some(index) = chunk.iter().rposition(|byte| *byte == b'\n') {
+        break start + index as u64 + 1;
+      }
+      if start == 0 {
+        break 0;
+      }
+      cursor = start;
+    };
+    let length = usize::try_from(end - start).map_err(|_| {
+      StoreError::Invalid("trace line is too large to inspect during recovery".into())
+    })?;
+    file.seek(SeekFrom::Start(start))?;
+    let mut line = vec![0u8; length];
+    file.read_exact(&mut line)?;
+    if let Ok(entry) = serde_json::from_slice::<TraceEntry>(&line)
+      && let Some(seq) = entry.envelope.meta.seq
+    {
+      return Ok(Some(seq));
+    }
+    // The candidate may be a torn final line. Continue before it, preserving
+    // the latest complete sequence rather than guessing from its contents.
+    end = start;
+  }
+  Ok(None)
 }
 
 /// Keep the larger sequence number.
@@ -383,6 +494,34 @@ mod tests {
   }
 
   #[test]
+  fn reopening_recovers_a_low_level_line_larger_than_the_tail_window() {
+    let tmp = TempDir::new("journal-large-line-reopen");
+    let path = tmp.child("trace.jsonl");
+    {
+      let mut journal = TraceJournal::open(
+        &path,
+        RedactionPolicy::default(),
+        RawPayloadCapture::Disabled,
+      )
+      .unwrap();
+      journal
+        .append(&envelope(AgentEvent::AssistantDelta(AssistantDelta {
+          text: "x".repeat((SEQUENCE_RECOVERY_WINDOW as usize) + 32 * 1024),
+          chunk_index: 0,
+        })))
+        .unwrap();
+    }
+    let reopened = TraceJournal::open(
+      &path,
+      RedactionPolicy::default(),
+      RawPayloadCapture::Disabled,
+    )
+    .unwrap();
+    assert_eq!(reopened.last_seq(), Some(EventSeq(1)));
+    assert_eq!(reopened.next_seq(), EventSeq(2));
+  }
+
+  #[test]
   fn durable_writes_survive_without_a_final_flush() {
     let tmp = TempDir::new("journal-durable");
     let path = tmp.child("trace.jsonl");
@@ -491,6 +630,7 @@ mod tests {
         capsule_version: pi_rs_core::context::CAPSULE_SCHEMA_VERSION,
         summarized_events: 12,
         path: "checkpoints/x.json".into(),
+        context_epoch: 0,
       }),
       AgentEvent::TurnCompleted(TurnCompleted {
         status: pi_rs_core::event::TurnStatus::Completed,
@@ -839,6 +979,23 @@ mod tests {
     assert!(written[0].contains(&"y".repeat(1024)), "still inline");
     let entry: TraceEntry = serde_json::from_str(&written[0]).unwrap();
     assert!(entry.externalized.is_empty());
+  }
+
+  #[test]
+  fn a_low_level_append_rejects_lines_over_the_reader_bound() {
+    let tmp = TempDir::new("journal-hard-line-bound");
+    let mut journal = journal(&tmp, RedactionPolicy::default());
+    let (session, _blobs) = session_blobs(&tmp);
+    let error = journal
+      .append_bounded(
+        &huge_write_request(&session, &"q".repeat(MAX_JSONL_LINE_BYTES)),
+        None,
+        None,
+        u64::MAX,
+      )
+      .expect_err("a trace line larger than the reader bound must be refused");
+    assert!(error.to_string().contains("JSONL line bound"));
+    assert!(lines(tmp.path().join("trace.jsonl").as_path()).is_empty());
   }
 
   #[test]

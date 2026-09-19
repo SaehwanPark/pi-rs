@@ -310,6 +310,12 @@ pub trait ModelProvider: Send + Sync {
   /// failover; must not require network access.
   fn capabilities(&self) -> ModelCapabilities;
 
+  /// Re-arm an adapter for a new user turn after the previous turn abandoned
+  /// an in-flight request. The default is a no-op; adapters that quarantine an
+  /// uncertain transport may open a fresh request generation here. Runtime
+  /// retries within the same turn never call this hook.
+  fn reset_after_abandonment(&self) {}
+
   /// Stream one completion.
   ///
   /// The failure object is deliberately by-value rather than boxed: it is

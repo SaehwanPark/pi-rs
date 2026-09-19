@@ -6,7 +6,13 @@
 //! Each difference is expressed as one explicit, tested switch instead of a
 //! guess inside the request path.
 
-use std::{collections::BTreeMap, fmt, sync::OnceLock, time::Duration};
+use std::{
+  collections::BTreeMap,
+  fmt,
+  hash::{Hash, Hasher},
+  sync::{Mutex, OnceLock},
+  time::Duration,
+};
 
 use pi_rs_core::{CapabilityGap, ModelCapabilities, ModelEndpoint, ReasoningExposure};
 use serde::{Deserialize, Serialize};
@@ -16,9 +22,6 @@ pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
 /// Largest error body read from a provider.
 pub(crate) const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
-/// Bound a blocking socket read so provider cancellation is observed promptly.
-/// A quiet model stream is allowed to continue across these transient polls.
-const MAX_READ_POLL_MS: u64 = 2_000;
 
 /// Configuration for one OpenAI-compatible endpoint.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,8 +55,9 @@ pub struct ProviderConfig {
   /// gateways that corrupt SSE, not the default.
   pub stream: bool,
   pub connect_timeout_ms: u64,
-  /// Requested idle budget. Streaming adapters poll at a short bounded interval
-  /// so cancellation can be observed even when the provider is quiet.
+  /// Logical idle budget for waiting on response headers or the next body
+  /// event. The adapter's worker boundary keeps cancellation independent from
+  /// this potentially long blocking socket timeout.
   pub read_timeout_ms: u64,
 }
 
@@ -193,6 +197,12 @@ impl ProviderConfig {
       max_output_tokens: endpoint
         .max_output_tokens
         .or(endpoint.capabilities.max_output_tokens),
+      connect_timeout_ms: endpoint
+        .connect_timeout_ms
+        .unwrap_or(Self::default().connect_timeout_ms),
+      read_timeout_ms: endpoint
+        .read_timeout_ms
+        .unwrap_or(Self::default().read_timeout_ms),
       api_key: endpoint.api_key.clone(),
       api_key_env: endpoint.api_key_env.clone(),
       ..Self::default()
@@ -254,28 +264,68 @@ impl ProviderConfig {
   }
 }
 
-/// One pooled agent per timeout profile.
+/// One pooled agent per timeout and proxy-environment profile.
 ///
 /// `ureq::Agent` keeps a connection pool; rebuilding it per request would
 /// reconnect every turn, which is the largest avoidable cost in a local
-/// provider loop.
+/// provider loop. The environment fingerprint prevents a changed proxy
+/// configuration from reusing an agent bound to the old route.
+pub(crate) fn agent_for_proxy(
+  config: &ProviderConfig,
+  proxy_url: &str,
+  relay_nonce: &str,
+) -> Result<ureq::Agent, BuildError> {
+  let proxy = ureq::Proxy::new(proxy_url).map_err(|_| BuildError::Invalid("proxy URL"))?;
+  Ok(
+    ureq::builder()
+      .timeout_connect(Duration::from_millis(config.connect_timeout_ms.max(1)))
+      .timeout_read(Duration::from_millis(config.read_timeout_ms.max(1)))
+      .user_agent(&format!("pi-rs-relay/{relay_nonce}"))
+      .proxy(proxy)
+      .build(),
+  )
+}
+
+type AgentCacheKey = (u64, u64, u64);
+type AgentCache = BTreeMap<AgentCacheKey, ureq::Agent>;
+
 pub(crate) fn agent_for(config: &ProviderConfig) -> ureq::Agent {
-  static AGENTS: OnceLock<BTreeMap<(u64, u64), ureq::Agent>> = OnceLock::new();
-  let key = (config.connect_timeout_ms, config.read_timeout_ms);
-  let agents = AGENTS.get_or_init(BTreeMap::new);
+  static AGENTS: OnceLock<Mutex<AgentCache>> = OnceLock::new();
+  let key = (
+    config.connect_timeout_ms,
+    config.read_timeout_ms,
+    proxy_environment_fingerprint(),
+  );
+  let agents = AGENTS.get_or_init(|| Mutex::new(BTreeMap::new()));
+  let mut agents = agents.lock().expect("provider agent cache lock poisoned");
   if let Some(agent) = agents.get(&key) {
     return agent.clone();
   }
-  ureq::builder()
+  let agent = ureq::builder()
     .timeout_connect(Duration::from_millis(config.connect_timeout_ms.max(1)))
-    // ureq exposes a socket timeout rather than a cancellable read handle. Keep
-    // it short and let the SSE reader retry across quiet intervals, so the
-    // caller's CancelToken is never held hostage by the configured idle budget.
-    .timeout_read(Duration::from_millis(
-      config.read_timeout_ms.clamp(1, MAX_READ_POLL_MS),
-    ))
+    .timeout_read(Duration::from_millis(config.read_timeout_ms.max(1)))
     .try_proxy_from_env(true)
-    .build()
+    .build();
+  agents.insert(key, agent.clone());
+  agent
+}
+
+fn proxy_environment_fingerprint() -> u64 {
+  let mut hasher = std::collections::hash_map::DefaultHasher::new();
+  for name in [
+    "ALL_PROXY",
+    "all_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "NO_PROXY",
+    "no_proxy",
+  ] {
+    name.hash(&mut hasher);
+    std::env::var_os(name).hash(&mut hasher);
+  }
+  hasher.finish()
 }
 
 #[cfg(test)]

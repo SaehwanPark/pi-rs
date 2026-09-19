@@ -540,11 +540,62 @@ fn a_quiet_stream_retries_socket_polls_without_losing_a_partial_sse_line() {
 }
 
 #[test]
-fn a_pre_header_timeout_does_not_resubmit_the_same_post() {
-  // The response headers are deliberately later than the adapter's bounded
-  // socket poll. The original request may already be queued or generating, so
-  // the provider must return one ambiguous transport failure rather than hiding
-  // duplicate POSTs inside its own polling loop.
+fn a_quiet_stream_expires_at_the_logical_idle_timeout() {
+  let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+  let addr = listener.local_addr().expect("addr");
+  let server = thread::spawn(move || {
+    let (mut socket, _) = listener.accept().expect("accept");
+    let _ = drain_request(&mut socket);
+    socket
+      .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
+      .expect("headers");
+    socket.flush().expect("flush");
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let _ = socket.set_read_timeout(Some(Duration::from_millis(50)));
+    let mut buf = [0u8; 16];
+    while Instant::now() < deadline {
+      match socket.read(&mut buf) {
+        Ok(0) => break,
+        Ok(_) => {}
+        Err(err)
+          if err.kind() == std::io::ErrorKind::WouldBlock
+            || err.kind() == std::io::ErrorKind::TimedOut =>
+        {
+          continue;
+        }
+        Err(_) => break,
+      }
+    }
+  });
+  let mut config = ProviderConfig::local(
+    "local-vulkan",
+    "qwen3.8-flash",
+    format!("http://{addr}/v1"),
+    8_192,
+  );
+  config.read_timeout_ms = 200;
+  let adapter = OpenAiCompat::new(config).expect("adapter");
+  let started = Instant::now();
+  let (result, _) = stream(&adapter, &request("quiet timeout"));
+  let failure = result.expect_err("quiet response must time out");
+  assert_eq!(failure.kind, ModelFailureKind::Timeout);
+  assert!(started.elapsed() < Duration::from_secs(3), "{failure:?}");
+  server.join().expect("server");
+  let second = adapter.stream(
+    &request("must not retry after timeout"),
+    &mut Collector::default(),
+    &CancelToken::new(),
+  );
+  assert_eq!(
+    second.expect_err("timeout quarantines the adapter").kind,
+    ModelFailureKind::ProviderUnavailable
+  );
+}
+
+#[test]
+fn delayed_headers_use_the_logical_timeout_without_resubmitting_the_post() {
+  // Response headers may arrive after the short cancellation poll. The logical
+  // idle budget, not that poll, decides whether the one in-flight POST expires.
   let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
   let addr = listener.local_addr().expect("addr");
   listener
@@ -594,10 +645,16 @@ fn a_pre_header_timeout_does_not_resubmit_the_same_post() {
     accepted.load(Ordering::SeqCst)
   });
 
-  let adapter = adapter(&format!("http://{addr}/v1"), None);
+  let mut config = ProviderConfig::local(
+    "local-vulkan",
+    "qwen3.8-flash",
+    format!("http://{addr}/v1"),
+    8_192,
+  );
+  config.read_timeout_ms = 5_000;
+  let adapter = OpenAiCompat::new(config).expect("adapter");
   let (result, _) = stream(&adapter, &request("delayed headers"));
-  let failure = result.expect_err("a response that missed the poll is not a completion");
-  assert_eq!(failure.kind, ModelFailureKind::Timeout);
+  result.expect("headers arrived before the logical idle timeout");
   assert_eq!(
     server.join().expect("server"),
     1,
@@ -640,6 +697,17 @@ fn cancel_during_a_slow_stream_stops_promptly() {
   assert_eq!(failure.phase, FailurePhase::Streaming);
   assert!(failure.partial_output_emitted);
   assert_eq!(collector.events().len(), 1);
+
+  // The first POST is uncertain after cancellation. The same adapter must not
+  // issue a second one; callers need a fresh provider instance or failover.
+  let second = adapter.stream(
+    &request("must not retry"),
+    &mut Collector::default(),
+    &CancelToken::new(),
+  );
+  let second_failure = second.expect_err("quarantined adapter must refuse reuse");
+  assert_eq!(second_failure.kind, ModelFailureKind::ProviderUnavailable);
+  assert_eq!(second_failure.phase, FailurePhase::WaitingForResponse);
 }
 
 #[test]

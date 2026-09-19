@@ -80,6 +80,8 @@ fn write_config_exposing(
       max_output_tokens: Some(1_024),
     },
     max_output_tokens: Some(1_024),
+    connect_timeout_ms: None,
+    read_timeout_ms: None,
   });
   config.tools.auto_approve_mutating = auto_approve_mutating;
   let path = root.join("config.json");

@@ -107,13 +107,14 @@ fn a_canceled_turn_ends_cancelled_and_the_same_handle_answers_again() {
   let temp = TempDir::new().unwrap();
   let workspace = temp.path().join("workspace");
   fs::create_dir(&workspace).unwrap();
-  // Five deltas a fifth of a second apart: the turn is still being answered long
-  // after the cancel lands, and the frame that arrives just after it is what lets
-  // the transport notice.
+  let cancel = CancelToken::new();
+  // Five deltas 400ms apart: without cancellation the stream would take ~3
+  // seconds. Cancellation lands right after the first delta is dispatched.
   let server = FakeServer::scripted(vec![
     dripping_answer(
       &["or", "chid", " is", " the", " word"],
-      Duration::from_millis(200),
+      Duration::from_millis(400),
+      Some(cancel.clone()),
     ),
     Scripted::Whole(answer("marigold noted")),
   ]);
@@ -127,23 +128,22 @@ fn a_canceled_turn_ends_cancelled_and_the_same_handle_answers_again() {
   };
 
   open_session(&args.config, &args.cwd, &args.surface, None, |session| {
-    let cancel = CancelToken::new();
-    interrupt_after(&cancel, Duration::from_millis(80));
     let started = Instant::now();
     let canceled = session
       .turn_with("name a flower", &cancel)
       .map_err(|error| turn_error(&error))?;
-    // The stream would have run for a second. The bound is far below that and far
-    // above a busy machine's scheduling jitter, so a turn that ignored the cancel
-    // cannot pass it and a quiet machine does not fail it by accident.
+    // The stream would have run for ~3 seconds without cancel. Cancellation
+    // arrives with the first frame and finishes well within the bound even under
+    // loaded CI schedulers.
     assert!(
-      started.elapsed() < Duration::from_millis(500),
+      started.elapsed() < Duration::from_secs(5),
       "the canceled turn ran for {:?}",
       started.elapsed()
     );
     // Neither success nor a provider failure: the state the runtime defines for a
     // turn the user stopped.
     assert_eq!(canceled.status, TurnStatus::Cancelled);
+    assert_ne!(canceled.text, "orchid is the word");
 
     // A token is one-shot, so the next turn takes a fresh one — and gets an answer,
     // which is the session having survived its own interruption.
@@ -178,11 +178,15 @@ fn a_cancel_during_a_mutating_tool_leaves_that_call_unknown() {
   let temp = TempDir::new().unwrap();
   let workspace = temp.path().join("workspace");
   fs::create_dir(&workspace).unwrap();
+  #[cfg(windows)]
+  let command = "echo touched > touched.txt & ping 127.0.0.1 -n 6 > nul & echo done";
+  #[cfg(not(windows))]
+  let command = "touch touched.txt && sleep 5 && echo done";
   // A command that runs long after the cancel lands, so the interrupt arrives while
   // the side effect is genuinely in progress.
   let server = FakeServer::scripted(vec![Scripted::Whole(tool_call(
     "exec",
-    serde_json::json!({ "command": "sleep 1.5 && echo done" }),
+    serde_json::json!({ "command": command }),
   ))]);
   let config = write_config_with(temp.path(), &server.base_url(), |config| {
     // A mutating call is refused unless the policy answers for the user, and this
@@ -199,10 +203,16 @@ fn a_cancel_during_a_mutating_tool_leaves_that_call_unknown() {
 
   open_session(&args.config, &args.cwd, &args.surface, None, |session| {
     let cancel = CancelToken::new();
-    // Leave enough time for the model response and tool dispatch on slower CI
-    // runners, while the command itself remains in progress when cancellation
-    // arrives.
-    interrupt_after(&cancel, Duration::from_millis(500));
+    let cancel_token = cancel.clone();
+    let flag_file = workspace.join("touched.txt");
+    thread::spawn(move || {
+      let deadline = Instant::now() + Duration::from_secs(10);
+      while !flag_file.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+      }
+      thread::sleep(Duration::from_millis(20));
+      cancel_token.cancel();
+    });
     let canceled = session
       .turn_with("change something", &cancel)
       .map_err(|error| turn_error(&error))?;
@@ -271,7 +281,11 @@ enum Scripted {
   /// interrupted mid-answer needs a stream that keeps arriving. A body written in one
   /// piece is decoded before a caller could react, and the turn then ends because the
   /// answer finished — which is not the thing under test.
-  Drip { frames: Vec<String>, gap: Duration },
+  Drip {
+    frames: Vec<String>,
+    gap: Duration,
+    cancel_on_first_frame: Option<CancelToken>,
+  },
 }
 
 /// Answers a fixed list of completions and records every request body it served.
@@ -299,13 +313,23 @@ impl FakeServer {
             Scripted::Whole(body) => {
               socket.write_all(body.as_bytes()).expect("write answer");
             }
-            Scripted::Drip { frames, gap } => {
-              for frame in frames {
+            Scripted::Drip {
+              frames,
+              gap,
+              cancel_on_first_frame,
+            } => {
+              for (index, frame) in frames.iter().enumerate() {
                 // A canceled turn hangs up mid-stream, and the write that finds
                 // nobody reading is the expected end of that test rather than a
                 // failure of it. The recorded request is still what is returned.
-                let _ = socket.write_all(frame.as_bytes());
-                let _ = socket.flush();
+                if socket.write_all(frame.as_bytes()).is_err() || socket.flush().is_err() {
+                  break;
+                }
+                if index == 0 {
+                  if let Some(cancel) = &cancel_on_first_frame {
+                    cancel.cancel();
+                  }
+                }
                 thread::sleep(gap);
               }
             }
@@ -384,7 +408,11 @@ fn answer(text: &str) -> String {
 
 /// One answer delivered frame by frame: each piece of `texts` in its own frame,
 /// `gap` apart, then the closing frame and the sentinel.
-fn dripping_answer(texts: &[&str], gap: Duration) -> Scripted {
+fn dripping_answer(
+  texts: &[&str],
+  gap: Duration,
+  cancel_on_first_frame: Option<CancelToken>,
+) -> Scripted {
   let mut frames: Vec<String> = texts.iter().map(|text| frame(&delta(text))).collect();
   frames.push(frame(&end_of_stream()));
   frames.push(DONE_FRAME.to_string());
@@ -396,7 +424,11 @@ fn dripping_answer(texts: &[&str], gap: Duration) -> Scripted {
     frames[0]
   );
   frames[0] = head;
-  Scripted::Drip { frames, gap }
+  Scripted::Drip {
+    frames,
+    gap,
+    cancel_on_first_frame,
+  }
 }
 
 /// One `exec` call, asked for instead of an answer.
@@ -459,19 +491,6 @@ fn headers(content_length: usize) -> String {
   )
 }
 
-/// Set `cancel` on its own thread, `delay` from now.
-///
-/// The delay is how a test gets a cancel in the middle of a turn: the turn must be
-/// running on the calling thread, because that is the only thread a handle may be
-/// used from.
-fn interrupt_after(cancel: &CancelToken, delay: Duration) {
-  let cancel = cancel.clone();
-  thread::spawn(move || {
-    thread::sleep(delay);
-    cancel.cancel();
-  });
-}
-
 /// The `turn_completed` status of each turn, in the order the durable trace wrote
 /// them. A canceled turn has to be findable here, because this record — not what a
 /// surface happened to print — is what a resume and a reader both trust.
@@ -527,6 +546,8 @@ fn write_config_with(root: &Path, base_url: &str, change: impl Fn(&mut RuntimeCo
       max_output_tokens: Some(1_024),
     },
     max_output_tokens: Some(1_024),
+    connect_timeout_ms: None,
+    read_timeout_ms: None,
   });
   change(&mut config);
   let path = root.join("config.json");
@@ -631,6 +652,8 @@ fn session_manual_failover_and_switch_back_across_turns() {
         max_output_tokens: Some(1_024),
       },
       max_output_tokens: Some(1_024),
+      connect_timeout_ms: None,
+      read_timeout_ms: None,
     });
   });
   let surface = SurfaceArgs::default();

@@ -15,13 +15,12 @@
 
 use pi_rs_core::{ids::SessionId, trace::TraceRetention};
 
-use crate::{StateLayout, StoreError};
+use crate::{StateLayout, StoreError, lease::SessionLease};
 
 /// Sessions never deleted by retention, regardless of the configured bounds.
 ///
-/// In practice this is what protects the session the user is currently working
-/// in; the store deliberately does not track open handles, because retention
-/// must also work on a state directory no process owns.
+/// The newest sessions are a recency safeguard; active older sessions are
+/// protected separately by their nonblocking ownership lease.
 pub const DEFAULT_KEEP_NEWEST: usize = 3;
 
 const DAY_MS: u64 = 86_400_000;
@@ -39,6 +38,8 @@ pub struct RetentionReport {
   pub protected: usize,
   /// Sessions whose age could not be derived from the identifier.
   pub undated: usize,
+  /// Sessions skipped because another process currently owns their lease.
+  pub leased: usize,
 }
 
 impl RetentionReport {
@@ -61,11 +62,27 @@ pub fn apply(
   now_ms: u64,
   keep_newest: usize,
 ) -> Result<RetentionReport, StoreError> {
+  // Retention is a store-wide destructive operation; serialize passes so two
+  // processes cannot plan from the same byte total and delete different sets.
+  let _retention_lease = SessionLease::acquire(&layout.root().join(".retention.lease"))?;
   let plan = plan(layout, retention, now_ms, keep_newest)?;
-  for (id, _) in &plan.victims {
+  let mut report = plan.report;
+  for (id, bytes) in &plan.victims {
+    let lease = match SessionLease::acquire(&layout.lease_path(id)) {
+      Ok(lease) => lease,
+      Err(StoreError::Invalid(_)) => {
+        report.leased += 1;
+        report.removed.retain(|candidate| candidate.0 != *id);
+        report.freed_bytes = report.freed_bytes.saturating_sub(*bytes);
+        report.remaining_bytes = report.remaining_bytes.saturating_add(*bytes);
+        continue;
+      }
+      Err(error) => return Err(error),
+    };
     layout.remove_session(id)?;
+    drop(lease);
   }
-  Ok(plan.report)
+  Ok(report)
 }
 
 /// Report what a pass would delete, deleting nothing.
@@ -109,6 +126,10 @@ fn plan(
   let mut candidates: Vec<(u64, SessionId, u64)> = Vec::new();
   for (index, id) in ids.iter().enumerate() {
     if index < keep_newest {
+      continue;
+    }
+    if SessionLease::is_active(&layout.lease_path(id)) {
+      report.leased += 1;
       continue;
     }
     let bytes = layout.session_bytes(id)?;

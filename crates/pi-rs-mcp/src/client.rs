@@ -10,6 +10,8 @@ use pi_rs_core::ToolExecutionContext;
 use serde_json::{Value, json};
 
 const MAX_TOOL_LIST_PAGES: usize = 1_024;
+const MAX_TOOLS: usize = 4_096;
+const MAX_CURSOR_BYTES: usize = 8 * 1024;
 
 use crate::{
   error::McpError,
@@ -44,8 +46,11 @@ impl McpClient {
   pub fn initialize(&self) -> Result<InitializeResult, McpError> {
     let params = InitializeParams {
       protocol_version: LATEST_PROTOCOL_VERSION.to_string(),
+      // Roots are intentionally omitted until this client can dispatch the
+      // server-initiated `roots/list` request. Advertising an unsupported
+      // capability makes an otherwise compatible server hang on handshake.
       capabilities: ClientCapabilities {
-        roots: Some(json!({"listChanged": false})),
+        roots: None,
         sampling: None,
       },
       client_info: ClientInfo {
@@ -93,8 +98,18 @@ impl McpClient {
       let page: ListToolsResult = serde_json::from_value(res_val)
         .map_err(|e| McpError::Protocol(format!("invalid tools/list response: {e}")))?;
 
+      if all_tools.len().saturating_add(page.tools.len()) > MAX_TOOLS {
+        return Err(McpError::Protocol(format!(
+          "MCP tools/list exceeded {MAX_TOOLS} tools"
+        )));
+      }
       all_tools.extend(page.tools);
       if let Some(next) = page.next_cursor {
+        if next.len() > MAX_CURSOR_BYTES {
+          return Err(McpError::Protocol(
+            "MCP tools/list cursor is too large".into(),
+          ));
+        }
         if !next.is_empty() {
           if !seen_cursors.insert(next.clone()) {
             return Err(McpError::Protocol(format!(

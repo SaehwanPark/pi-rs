@@ -239,6 +239,7 @@ fn create_session_file(
           .append(&SessionRecord::CheckpointBarrier(SessionCheckpointRecord {
             checkpoint_id: CheckpointId::new(),
             capsule_version: CAPSULE_SCHEMA_VERSION,
+            context_epoch: 0,
             capsule_path: format!("checkpoints/cp-{turn_idx}.json"),
             capsule: ContextCapsule {
               version: CAPSULE_SCHEMA_VERSION,

@@ -10,6 +10,7 @@
 //! <state_dir>/sessions/<session-id>.trace.jsonl      high-resolution trace
 //! <state_dir>/sessions/<session-id>/blobs/<xx>/<hash> content-addressed payloads
 //! <state_dir>/sessions/<session-id>/checkpoints/<checkpoint-id>.json
+//! <state_dir>/leases/<session-id>/                                ownership lease
 //! <state_dir>/artifacts/                              cross-session artifacts
 //! ```
 //!
@@ -34,10 +35,12 @@ use crate::{StoreError, error::StoreError::Invalid};
 
 const SESSIONS_DIR: &str = "sessions";
 const ARTIFACTS_DIR: &str = "artifacts";
+const LEASES_DIR: &str = "leases";
 const BLOBS_DIR: &str = "blobs";
 const CHECKPOINTS_DIR: &str = "checkpoints";
 const SESSION_EXTENSION: &str = "jsonl";
 const TRACE_SUFFIX: &str = ".trace.jsonl";
+const WAL_SUFFIX: &str = ".wal.jsonl";
 
 /// Where durable state for one runtime lives.
 #[derive(Debug, Clone)]
@@ -61,6 +64,7 @@ impl StateLayout {
   pub fn create(&self) -> Result<(), StoreError> {
     create_private_dir(&self.root)?;
     create_private_dir(&self.sessions_dir())?;
+    create_private_dir(&self.leases_dir())?;
     create_private_dir(&self.artifacts_dir())
   }
 
@@ -70,6 +74,10 @@ impl StateLayout {
 
   pub fn artifacts_dir(&self) -> PathBuf {
     self.root.join(ARTIFACTS_DIR)
+  }
+
+  pub fn leases_dir(&self) -> PathBuf {
+    self.root.join(LEASES_DIR)
   }
 
   /// `sessions/<id>.jsonl`.
@@ -84,7 +92,13 @@ impl StateLayout {
     self.sessions_dir().join(format!("{session}{TRACE_SUFFIX}"))
   }
 
-  /// `sessions/<id>/`, holding payloads and capsules.
+  /// `sessions/<id>.wal.jsonl`, the crash-recovery intent log for semantic projections.
+  pub fn wal_path(&self, session: &SessionId) -> PathBuf {
+    self.sessions_dir().join(format!("{session}{WAL_SUFFIX}"))
+  }
+
+  /// `sessions/<id>/`, holding payloads and capsules. Ownership lives in the
+  /// sibling `leases/` directory so deleting this tree cannot remove a lock.
   pub fn session_dir(&self, session: &SessionId) -> PathBuf {
     self.sessions_dir().join(session.as_str())
   }
@@ -102,6 +116,12 @@ impl StateLayout {
   /// Directory holding a session's checkpoint capsules.
   pub fn checkpoints_dir(&self, session: &SessionId) -> PathBuf {
     self.session_dir(session).join(CHECKPOINTS_DIR)
+  }
+
+  /// Directory used as the per-session exclusive ownership lease. It is kept
+  /// outside the deletable session directory to close the remove/lease race.
+  pub fn lease_path(&self, session: &SessionId) -> PathBuf {
+    self.leases_dir().join(format!("{session}.lease"))
   }
 
   /// Durable location of one checkpoint capsule.
@@ -143,7 +163,7 @@ impl StateLayout {
       // `*.trace.jsonl` also ends in the session extension: the stem would look
       // like `<id>.trace`, so both checks are needed to keep journals out of the
       // session list.
-      if name.ends_with(TRACE_SUFFIX) || !is_session_id(stem) {
+      if name.ends_with(TRACE_SUFFIX) || name.ends_with(WAL_SUFFIX) || !is_session_id(stem) {
         continue;
       }
       ids.push(SessionId::from_string(stem.to_string()));
@@ -178,7 +198,9 @@ impl StateLayout {
 
   /// Size of one session's whole footprint.
   pub fn session_bytes(&self, session: &SessionId) -> Result<u64, StoreError> {
-    let mut total = file_size(&self.session_path(session))? + file_size(&self.trace_path(session))?;
+    let mut total = file_size(&self.session_path(session))?
+      + file_size(&self.trace_path(session))?
+      + file_size(&self.wal_path(session))?;
     let dir = self.session_dir(session);
     if dir.exists() {
       total += dir_bytes(&dir)?;
@@ -190,6 +212,7 @@ impl StateLayout {
   pub fn remove_session(&self, session: &SessionId) -> Result<(), StoreError> {
     remove_file_if_present(&self.session_path(session))?;
     remove_file_if_present(&self.trace_path(session))?;
+    remove_file_if_present(&self.wal_path(session))?;
     let dir = self.session_dir(session);
     if dir.exists() {
       fs::remove_dir_all(&dir)?;
@@ -278,6 +301,7 @@ mod tests {
     let layout = StateLayout::new(root.path());
     layout.create().unwrap();
     assert!(layout.sessions_dir().is_dir());
+    assert!(layout.leases_dir().is_dir());
     assert!(layout.artifacts_dir().is_dir());
     #[cfg(unix)]
     {
@@ -320,6 +344,10 @@ mod tests {
     assert_eq!(
       layout.checkpoint_path(&session, &CheckpointId::from_string("cp1".to_string())),
       PathBuf::from("/state/sessions/018f-session/checkpoints/cp1.json")
+    );
+    assert_eq!(
+      layout.lease_path(&session),
+      PathBuf::from("/state/leases/018f-session.lease")
     );
   }
 
@@ -386,9 +414,16 @@ mod tests {
     fs::write(&blob_path, "payload").unwrap();
     assert!(layout.session_bytes(&session).unwrap() > 0);
 
+    let lease = crate::lease::SessionLease::acquire(&layout.lease_path(&session)).unwrap();
     layout.remove_session(&session).unwrap();
     assert!(!layout.session_path(&session).exists());
     assert!(!layout.session_dir(&session).exists());
+    assert!(
+      layout.lease_path(&session).exists(),
+      "removal cannot delete ownership"
+    );
+    drop(lease);
+    assert!(!layout.lease_path(&session).exists());
     assert_eq!(layout.session_bytes(&session).unwrap(), 0);
     // Removing twice is not an error: retention races with itself harmlessly.
     layout.remove_session(&session).unwrap();

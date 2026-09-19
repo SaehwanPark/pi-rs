@@ -95,7 +95,8 @@ pub(crate) fn open_session(
   // policy application must not recreate a second, more permissive workspace.
   tool_policy.cwd = None;
   let tools = ToolRegistry::new(workspace)
-    .with_policy(&tool_policy)
+    .try_with_policy(&tool_policy)
+    .map_err(|error| format!("invalid tool policy: {error}"))?
     .with_builtins();
   // Skills are offered the way Pi offers them: a control prompt in front of every
   // request, naming what exists and telling the model to read the file. Only the
@@ -171,15 +172,6 @@ pub(crate) fn open_session(
       .apply_retention(&config.trace, now_millis(), 1)
       .map_err(|error| format!("cannot apply trace retention: {error}"))?;
   }
-  let resume_state = match &continuing {
-    Some(session_id) => Some(continue_state(
-      &store,
-      session_id,
-      &provider,
-      backup.as_ref().map(|backup| backup as &dyn ModelProvider),
-    )?),
-    None => None,
-  };
   let session_id = continuing.clone().unwrap_or_else(SessionId::new);
   let session = match &continuing {
     // The existing log is reopened and appended to: a continuation is one session file,
@@ -199,6 +191,17 @@ pub(crate) fn open_session(
         imported_from: None,
       })
       .map_err(|error| format!("cannot start durable session: {error}"))?,
+  };
+  // Recovery runs while opening the append handle, before the continuation state
+  // is reconstructed and before the first provider request can be attempted.
+  let resume_state = match &continuing {
+    Some(session_id) => Some(continue_state(
+      &store,
+      session_id,
+      &provider,
+      backup.as_ref().map(|backup| backup as &dyn ModelProvider),
+    )?),
+    None => None,
   };
 
   let options = surface_options(surface);
@@ -560,21 +563,29 @@ fn continue_state(
   let checkpoint_floor = usize::from(restored.checkpoint.is_some());
   // A compaction after a checkpoint must cite only the canonical range opened
   // after that barrier; the capsule is retained and is not an ordinary prefix.
-  let cited_first = restored
-    .checkpoint_seq
-    .map_or(EventSeq(1), |seq| EventSeq(seq.0.saturating_add(1)));
-  let mut messages = Vec::with_capacity(checkpoint_floor + restored.messages.len());
+  let cited_first = restored.checkpoint_seq.map_or(Ok(EventSeq(1)), |seq| {
+    seq.0.checked_add(1).map(EventSeq).ok_or_else(|| {
+      format!("cannot continue session {session_id}: checkpoint sequence space is exhausted")
+    })
+  })?;
+  let durable_messages = restored.messages;
+  let mut messages = Vec::with_capacity(checkpoint_floor + durable_messages.len());
+  let mut message_seqs = Vec::with_capacity(checkpoint_floor + durable_messages.len());
   if let Some(capsule) = restored.checkpoint {
     messages.push(Message::user(capsule.format_for_model()));
+    message_seqs.push(None);
   }
-  messages.extend(restored.messages.into_iter().map(|message| message.message));
+  message_seqs.extend(durable_messages.iter().map(|message| message.seq));
+  messages.extend(durable_messages.into_iter().map(|message| message.message));
 
   Ok(ResumeState {
     messages,
+    message_seqs,
     epochs,
     context_epoch: restored.context_epoch,
     checkpoint_floor,
     cited_history: restored.last_seq.map(|last| (cited_first, last)),
+    interrupted_tools: restored.interrupted_tools,
   })
 }
 
@@ -774,6 +785,14 @@ impl Trace for ReportingTrace {
     self.inner.emit(envelope)
   }
 
+  fn emit_without_message(&mut self, envelope: &mut EventEnvelope) -> Result<(), SinkError> {
+    self.inner.emit_without_message(envelope)
+  }
+
+  fn complete_without_message(&mut self, envelope: &EventEnvelope) -> Result<(), SinkError> {
+    self.inner.complete_without_message(envelope)
+  }
+
   fn record_message(&mut self, attributed: &AttributedMessage) -> Result<(), SinkError> {
     self.inner.record_message(attributed)
   }
@@ -787,6 +806,10 @@ impl Trace for ReportingTrace {
     capsule: &ContextCapsule,
   ) -> Result<Option<(CheckpointId, String)>, SinkError> {
     self.inner.create_checkpoint(capsule)
+  }
+
+  fn set_checkpoint_context_epoch(&mut self, context_epoch: u32) -> Result<(), SinkError> {
+    self.inner.set_checkpoint_context_epoch(context_epoch)
   }
 
   fn list_checkpoints(&self) -> Result<Vec<(CheckpointId, ContextCapsule)>, SinkError> {

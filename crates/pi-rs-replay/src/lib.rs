@@ -289,7 +289,7 @@ pub fn reconstruct_context(
         compaction_records.push((session_line, compaction.clone()));
         session_line = session_line.saturating_add(1);
       }
-      SessionRecord::Epoch(_) => {
+      SessionRecord::Epoch(_) | SessionRecord::Reduction(_) => {
         session_line = session_line.saturating_add(1);
       }
     }
@@ -319,6 +319,9 @@ pub fn reconstruct_context(
   if compaction_records
     .iter()
     .any(|(_, compaction)| compaction.summary_present)
+    || session_records
+      .iter()
+      .any(|record| matches!(record, SessionRecord::Reduction(_)))
   {
     // New session projections carry the exact retained-tail count. Prefer them
     // over the trace range here: an epoch range intentionally names canonical
@@ -409,6 +412,16 @@ fn projected_working_context(
         working.truncate(floor);
         working.push(summary);
         working.extend(tail);
+      }
+      SessionRecord::Reduction(reduction) => {
+        let floor = working
+          .iter()
+          .take_while(|item| matches!(item, WorkingContextItem::CheckpointCapsule { .. }))
+          .count();
+        let end = floor.saturating_add(reduction.removed_messages as usize);
+        if end > floor {
+          working.drain(floor..end.min(working.len()));
+        }
       }
       _ => {}
     }
@@ -1205,6 +1218,12 @@ fn session_records_until(
             if completed.context_epoch == compaction.context_epoch
         )
       }),
+      SessionRecord::Reduction(reduction) => bounded_trace.iter().any(|entry| {
+        entry.envelope.meta.event_id == reduction.event_id
+          && reduction
+            .seq
+            .is_none_or(|seq| entry.envelope.meta.seq == Some(seq))
+      }),
     })
     .cloned()
     .collect()
@@ -1621,6 +1640,7 @@ mod tests {
       SessionRecord::CheckpointBarrier(pi_rs_core::SessionCheckpointRecord {
         checkpoint_id: CheckpointId::from_string("checkpoint-1"),
         capsule_version: CAPSULE_SCHEMA_VERSION,
+        context_epoch: 0,
         capsule_path: "checkpoints/1.json".into(),
         capsule: capsule.clone(),
       }),
@@ -1873,6 +1893,7 @@ mod tests {
           capsule_version: CAPSULE_SCHEMA_VERSION,
           summarized_events: 6,
           path: "checkpoints/1.json".into(),
+          context_epoch: 0,
         }),
       ),
     ];
