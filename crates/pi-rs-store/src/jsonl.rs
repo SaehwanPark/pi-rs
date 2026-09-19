@@ -57,6 +57,82 @@ pub fn read_jsonl<T: DeserializeOwned>(path: &Path) -> Result<ReadReport<T>, Sto
   read_jsonl_with_limit(path, MAX_JSONL_LINE_BYTES)
 }
 
+/// Repair the only append tail that can be explained by an interrupted write.
+///
+/// JSONL is append-only, but a process can stop after the final record's bytes
+/// reach the file and before its newline does. Before a writer is opened, an
+/// unterminated tail is therefore classified as one of two cases: a complete
+/// JSON value is preserved and normalized with a durable newline; an incomplete
+/// value is discarded back to the preceding newline. Interior malformed lines
+/// are deliberately untouched and remain a fail-closed validation error.
+///
+/// This function mutates existing files and must only be called after the
+/// session lease is held. Read-only inspection uses the normal readers instead.
+pub(crate) fn recover_append_tail(path: &Path) -> Result<(), StoreError> {
+  let metadata = match fs::metadata(path) {
+    Ok(metadata) => metadata,
+    Err(error) if StoreError::is_missing(&error) => return Ok(()),
+    Err(error) => return Err(StoreError::Io(error)),
+  };
+  let size = metadata.len();
+  if size == 0 {
+    return Ok(());
+  }
+
+  let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+  file.seek(SeekFrom::Start(size - 1))?;
+  let mut last = [0u8; 1];
+  file.read_exact(&mut last)?;
+  if last[0] == b'\n' {
+    return Ok(());
+  }
+
+  let line_start = find_last_newline(&mut file, size)?.map_or(0, |offset| offset.saturating_add(1));
+  let tail_bytes = size.saturating_sub(line_start);
+  if tail_bytes > MAX_JSONL_LINE_BYTES as u64 {
+    return truncate_tail(&mut file, line_start);
+  }
+
+  let length = usize::try_from(tail_bytes)
+    .map_err(|_| StoreError::Invalid(format!("{} JSONL tail is too large", path.display())))?;
+  file.seek(SeekFrom::Start(line_start))?;
+  let mut tail = vec![0u8; length];
+  file.read_exact(&mut tail)?;
+  if serde_json::from_slice::<serde_json::Value>(&tail).is_ok() {
+    file.seek(SeekFrom::End(0))?;
+    file.write_all(b"\n")?;
+    file.flush()?;
+    file.sync_all()?;
+    return Ok(());
+  }
+
+  truncate_tail(&mut file, line_start)
+}
+
+fn truncate_tail(file: &mut File, line_start: u64) -> Result<(), StoreError> {
+  file.set_len(line_start)?;
+  file.sync_all()?;
+  Ok(())
+}
+
+fn find_last_newline(file: &mut File, end: u64) -> Result<Option<u64>, StoreError> {
+  const CHUNK: u64 = 16 * 1024;
+  let mut cursor = end;
+  while cursor > 0 {
+    let start = cursor.saturating_sub(CHUNK);
+    let length = usize::try_from(cursor - start)
+      .map_err(|_| StoreError::Invalid("JSONL tail window is too large".into()))?;
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = vec![0u8; length];
+    file.read_exact(&mut bytes)?;
+    if let Some(index) = bytes.iter().rposition(|byte| *byte == b'\n') {
+      return Ok(Some(start + index as u64));
+    }
+    cursor = start;
+  }
+  Ok(None)
+}
+
 /// Decode one JSONL file with an explicit per-line bound.
 pub(crate) fn read_jsonl_with_limit<T: DeserializeOwned>(
   path: &Path,
@@ -287,6 +363,11 @@ impl LineWriter {
     if let Some(parent) = path.parent() {
       fs::create_dir_all(parent)?;
     }
+    // This is a second line of defence for low-level callers. Store-backed
+    // callers perform the same repair after taking the session lease, before
+    // reading validation reports; doing it here also keeps direct journal/WAL
+    // construction from concatenating two valid JSON values.
+    recover_append_tail(path)?;
     let file = OpenOptions::new().append(true).create(true).open(path)?;
     Ok(Self {
       path: path.to_path_buf(),
@@ -521,6 +602,66 @@ mod tests {
     assert_eq!(read_first_line(&target).unwrap().as_deref(), Some("first"));
     fs::write(&target, "").unwrap();
     assert_eq!(read_first_line(&target).unwrap(), None);
+  }
+
+  #[test]
+  fn a_complete_unterminated_tail_is_normalized_before_append() {
+    let tmp = TempDir::new("jsonl-unterminated-valid");
+    let target = path(&tmp, "journal.jsonl");
+    fs::write(
+      &target,
+      format!("{}\n{}", line_json(1, "old"), line_json(2, "tail")),
+    )
+    .unwrap();
+
+    let mut writer = LineWriter::create(&target).unwrap();
+    writer.write_line(&line_json(3, "new"), true).unwrap();
+
+    let raw = fs::read_to_string(&target).unwrap();
+    assert_eq!(raw.lines().count(), 3);
+    assert_eq!(read_jsonl::<Line>(&target).unwrap().malformed, 0);
+  }
+
+  #[test]
+  fn an_invalid_unterminated_tail_is_discarded_before_append() {
+    let tmp = TempDir::new("jsonl-unterminated-invalid");
+    let target = path(&tmp, "journal.jsonl");
+    fs::write(
+      &target,
+      format!("{}\n{}", line_json(1, "old"), r#"{"seq":2,"text":"partial"#),
+    )
+    .unwrap();
+
+    let mut writer = LineWriter::create(&target).unwrap();
+    writer.write_line(&line_json(2, "new"), true).unwrap();
+
+    let report: ReadReport<Line> = read_jsonl(&target).unwrap();
+    assert_eq!(report.malformed, 0);
+    assert_eq!(
+      report.items.iter().map(|line| line.seq).collect::<Vec<_>>(),
+      [1, 2]
+    );
+    assert!(fs::read_to_string(&target).unwrap().contains("\"new\""));
+  }
+
+  #[test]
+  fn an_interior_malformed_line_is_not_repaired() {
+    let tmp = TempDir::new("jsonl-interior-invalid");
+    let target = path(&tmp, "journal.jsonl");
+    fs::write(
+      &target,
+      format!(
+        "{}\nnot json\n{}",
+        line_json(1, "old"),
+        line_json(2, "unterminated")
+      ),
+    )
+    .unwrap();
+
+    let _writer = LineWriter::create(&target).unwrap();
+    let report: ReadReport<Line> = read_jsonl(&target).unwrap();
+    assert_eq!(report.malformed, 1);
+    assert_eq!(report.items[0].seq, 1);
   }
 
   #[test]

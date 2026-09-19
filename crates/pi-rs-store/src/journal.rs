@@ -32,7 +32,9 @@ use serde_json::{Value, json};
 use crate::{
   StoreError,
   blob::BlobStore,
-  jsonl::{LineWriter, MAX_JSONL_LINE_BYTES, ReadReport, read_jsonl, read_jsonl_tail},
+  jsonl::{
+    LineWriter, MAX_JSONL_LINE_BYTES, ReadReport, read_jsonl, read_jsonl_tail, recover_append_tail,
+  },
   payload,
 };
 
@@ -56,6 +58,9 @@ impl TraceJournal {
     policy: RedactionPolicy,
     raw_capture: RawPayloadCapture,
   ) -> Result<Self, StoreError> {
+    // Sequence recovery and malformed-line reporting must observe the repaired
+    // append boundary, not the torn tail that preceded this writer opening.
+    recover_append_tail(path)?;
     let mut last_seq: Option<EventSeq> = None;
     let mut malformed = 0usize;
     if path.exists() {

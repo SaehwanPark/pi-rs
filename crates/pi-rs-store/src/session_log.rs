@@ -32,7 +32,9 @@ use pi_rs_core::{
 
 use crate::{
   StoreError,
-  jsonl::{LineWriter, MAX_JSONL_LINE_BYTES, ReadReport, read_first_line, read_jsonl},
+  jsonl::{
+    LineWriter, MAX_JSONL_LINE_BYTES, ReadReport, read_first_line, read_jsonl, recover_append_tail,
+  },
 };
 
 /// Bytes read from a trace tail to decide whether a session is closed.
@@ -110,6 +112,7 @@ impl SessionLog {
 
   /// Resume a session using the currently configured redaction policy for new records.
   pub fn resume_with_policy(path: &Path, redaction: RedactionPolicy) -> Result<Self, StoreError> {
+    recover_append_tail(path)?;
     // A modern writer must never append a record whose meaning its header
     // claims not to understand. Migration happens before opening the append
     // handle, while the caller still holds the session lease.
@@ -177,6 +180,7 @@ impl SessionLog {
   /// records are preserved; only the header version changes unless the active
   /// redaction policy deliberately removes sensitive values.
   pub fn migrate_to_current(path: &Path, redaction: RedactionPolicy) -> Result<bool, StoreError> {
+    recover_append_tail(path)?;
     // Current sessions are the common path. Read only the bounded header before
     // deciding that no rewrite is needed; full hydration is reserved for an
     // actual schema upgrade.
