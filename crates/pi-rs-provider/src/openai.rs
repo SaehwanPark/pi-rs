@@ -19,7 +19,7 @@ use pi_rs_core::{
 };
 
 use crate::{
-  config::{BuildError, ProviderConfig, agent_for, agent_for_proxy},
+  config::{BuildError, ProviderConfig, agent_for, agent_for_proxy, redact_url},
   decode::{self, Decoder, StreamEnd},
   mapping::request_body,
   relay::CancellableHttpRelay,
@@ -44,7 +44,7 @@ impl fmt::Debug for OpenAiCompat {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_struct("OpenAiCompat")
       .field("id", &self.config.id)
-      .field("base_url", &self.config.base_url)
+      .field("base_url", &redact_url(&self.config.base_url))
       .field("model", &self.config.model)
       .field("credential", &"[redacted]")
       .finish()
@@ -661,14 +661,22 @@ mod tests {
   }
 
   #[test]
-  fn debug_output_does_not_leak_the_credential() {
+  fn debug_output_redacts_credentials_and_signed_url_parts() {
     let with_key = OpenAiCompat::new(ProviderConfig {
       api_key: Some("sk-super-secret".into()),
-      ..ProviderConfig::local("local", "m", "http://127.0.0.1:9/v1", 1_024)
+      ..ProviderConfig::local(
+        "local",
+        "m",
+        "https://gateway.test/v1?token=url-secret#fragment-secret",
+        1_024,
+      )
     })
     .unwrap();
     let text = format!("{with_key:?}");
     assert!(!text.contains("sk-super-secret"), "{text}");
+    assert!(!text.contains("url-secret"), "{text}");
+    assert!(!text.contains("fragment-secret"), "{text}");
+    assert!(text.contains("[redacted]"), "{text}");
   }
 
   #[test]

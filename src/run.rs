@@ -390,11 +390,8 @@ impl SessionHandle<'_> {
   /// List all checkpoint capsules recorded for this session.
   pub fn list_checkpoints(
     &self,
-  ) -> Result<Vec<(pi_rs_core::CheckpointId, pi_rs_core::ContextCapsule)>, String> {
-    self
-      .runtime
-      .list_checkpoints()
-      .map_err(|e| format!("cannot list checkpoints: {e:?}"))
+  ) -> Result<Vec<(pi_rs_core::CheckpointId, pi_rs_core::ContextCapsule)>, TurnError> {
+    self.runtime.list_checkpoints()
   }
 
   /// The model currently active for generation.
@@ -422,16 +419,13 @@ impl SessionHandle<'_> {
   }
 
   /// Manually switch active generation to the backup model.
-  pub fn failover_manual(&mut self) -> Result<pi_rs_core::ModelEpoch, String> {
-    self.runtime.failover_manual().map_err(|e| format!("{e:?}"))
+  pub fn failover_manual(&mut self) -> Result<pi_rs_core::ModelEpoch, TurnError> {
+    self.runtime.failover_manual()
   }
 
   /// Manually switch active generation back to the primary model.
-  pub fn switch_back_manual(&mut self) -> Result<pi_rs_core::ModelEpoch, String> {
-    self
-      .runtime
-      .switch_back_manual()
-      .map_err(|e| format!("{e:?}"))
+  pub fn switch_back_manual(&mut self) -> Result<pi_rs_core::ModelEpoch, TurnError> {
+    self.runtime.switch_back_manual()
   }
 
   /// Flush the transcript, end the session as a user exit, and report what the
@@ -646,6 +640,7 @@ fn turn_error(error: &TurnError) -> String {
     }
     TurnError::Aborted(status) => format!("turn aborted: {status:?}"),
     TurnError::Sink(message) => format!("durable sink failure: {message}"),
+    TurnError::Refused(message) => message.clone(),
   }
 }
 

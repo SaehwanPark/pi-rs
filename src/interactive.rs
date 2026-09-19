@@ -52,8 +52,12 @@
 //! the session's [`CancelToken`], cleanly interrupting model streaming or tool execution
 //! without destroying the process or corrupting the session.
 
-use std::io::{self, Write};
 use std::ops::Range;
+use std::{
+  io::{self, Write},
+  panic,
+  sync::Arc,
+};
 
 use crossterm::{
   cursor::{MoveToColumn, MoveToPreviousLine},
@@ -420,12 +424,27 @@ fn terminal_columns(columns: usize) -> u16 {
 /// Ctrl-C, a turn that failed, an early `?`, a panic unwinding through a caller —
 /// passes through here, so the terminal is never left in a mode that nothing is
 /// driving any more.
-struct RawTerminal;
+type PanicHook = dyn for<'a> Fn(&panic::PanicHookInfo<'a>) + Send + Sync + 'static;
+
+struct RawTerminal {
+  previous_panic_hook: Option<Arc<PanicHook>>,
+}
 
 impl RawTerminal {
   fn enter() -> io::Result<Self> {
     terminal::enable_raw_mode()?;
-    Ok(Self)
+    // Release binaries use `panic = "abort"`, so unwinding `Drop` cannot be the
+    // only cleanup path. The hook restores the terminal before the abort while
+    // preserving the process's existing panic report.
+    let previous_panic_hook: Arc<PanicHook> = Arc::from(panic::take_hook());
+    let hook_for_panic = Arc::clone(&previous_panic_hook);
+    panic::set_hook(Box::new(move |info| {
+      let _ = terminal::disable_raw_mode();
+      hook_for_panic(info);
+    }));
+    Ok(Self {
+      previous_panic_hook: Some(previous_panic_hook),
+    })
   }
 }
 
@@ -436,6 +455,10 @@ impl Drop for RawTerminal {
     // either; the reason to have entered raw mode is gone, and this is the last
     // thing this program can do about it.
     let _ = terminal::disable_raw_mode();
+    if let Some(previous_panic_hook) = self.previous_panic_hook.take() {
+      let _ = panic::take_hook();
+      panic::set_hook(Box::new(move |info| previous_panic_hook(info)));
+    }
   }
 }
 
@@ -595,6 +618,14 @@ impl Loop {
           Ok(_) => {
             self.write_note(&["nothing to compact: history is already compact".to_string()])?;
           }
+          Err(TurnError::Sink(message)) => {
+            return Err(run::session_error(run::SessionError::Turn(
+              TurnError::Sink(message),
+            )));
+          }
+          Err(TurnError::Refused(message)) => {
+            self.write_note(&[format!("compaction refused: {message}")])?;
+          }
           Err(error) => {
             self.write_note(&[format!("compaction failed: {error:?}")])?;
           }
@@ -613,6 +644,14 @@ impl Loop {
             self.write_note(&[format!(
               "nothing to compact: history is already compact for phase [{phase}]"
             )])?;
+          }
+          Err(TurnError::Sink(message)) => {
+            return Err(run::session_error(run::SessionError::Turn(
+              TurnError::Sink(message),
+            )));
+          }
+          Err(TurnError::Refused(message)) => {
+            self.write_note(&[format!("phase compaction refused: {message}")])?;
           }
           Err(error) => {
             self.write_note(&[format!("phase compaction failed: {error:?}")])?;
@@ -645,8 +684,13 @@ impl Loop {
             }
             self.write_note(&lines)?;
           }
-          Err(err) => {
-            self.write_note(&[format!("cannot list checkpoints: {err}")])?;
+          Err(TurnError::Sink(message)) => {
+            return Err(run::session_error(run::SessionError::Turn(
+              TurnError::Sink(message),
+            )));
+          }
+          Err(error) => {
+            self.write_note(&[format!("cannot list checkpoints: {error:?}")])?;
           }
         }
         Ok(Submitted::Checkpoints)
@@ -659,8 +703,16 @@ impl Loop {
               epoch.model, epoch.index
             )])?;
           }
-          Err(err) => {
-            self.write_note(&[format!("failover refused: {err}")])?;
+          Err(TurnError::Sink(message)) => {
+            return Err(run::session_error(run::SessionError::Turn(
+              TurnError::Sink(message),
+            )));
+          }
+          Err(TurnError::Refused(message)) => {
+            self.write_note(&[format!("failover refused: {message}")])?;
+          }
+          Err(error) => {
+            self.write_note(&[format!("failover failed: {error:?}")])?;
           }
         }
         Ok(Submitted::Failover)
@@ -673,8 +725,16 @@ impl Loop {
               epoch.model, epoch.index
             )])?;
           }
-          Err(err) => {
-            self.write_note(&[format!("switch-back refused: {err}")])?;
+          Err(TurnError::Sink(message)) => {
+            return Err(run::session_error(run::SessionError::Turn(
+              TurnError::Sink(message),
+            )));
+          }
+          Err(TurnError::Refused(message)) => {
+            self.write_note(&[format!("switch-back refused: {message}")])?;
+          }
+          Err(error) => {
+            self.write_note(&[format!("switch-back failed: {error:?}")])?;
           }
         }
         Ok(Submitted::SwitchBack)
@@ -824,6 +884,10 @@ impl Loop {
       // The note above is the report; the frame below it goes back to saying
       // `waiting`, which is all the projection is allowed to claim.
       AfterTurn::Cancelled(_) | AfterTurn::BudgetExhausted(_) => {}
+      AfterTurn::Failed(run::SessionError::Turn(error)) => {
+        let error = session.close_after_failure(error);
+        return Err(run::session_error(run::SessionError::Turn(error)));
+      }
       AfterTurn::Failed(error) => return Err(run::session_error(error)),
     }
     self.state = TurnState::Idle;
@@ -1058,9 +1122,13 @@ pub fn execute(args: InteractiveArgs) -> Result<(), String> {
     // no trust decision to consult, so — like `pi-rs prompts` without --project —
     // they are not read.
     let templates = prompt::discover(&pi_rs_compat::scan::Discovery::new(args.cwd.clone()));
-    Loop::new(session.model().to_string(), columns)
+    let result = Loop::new(session.model().to_string(), columns)
       .with_templates(templates)
-      .run(session)
+      .run(session);
+    match result {
+      Ok(()) => session.close().map_err(run::session_error),
+      Err(error) => Err(error),
+    }
   })
 }
 
@@ -1127,7 +1195,98 @@ pub(crate) mod interrupt {
   }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) mod interrupt {
+  use pi_rs_core::CancelToken;
+  use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+
+  const CTRL_C_EVENT: u32 = 0;
+  const CTRL_BREAK_EVENT: u32 = 1;
+  type Handler = unsafe extern "system" fn(u32) -> i32;
+
+  static ACTIVE_FLAG: AtomicPtr<AtomicBool> = AtomicPtr::new(std::ptr::null_mut());
+
+  #[link(name = "Kernel32")]
+  #[allow(non_snake_case)]
+  unsafe extern "system" {
+    fn SetConsoleCtrlHandler(handler: Option<Handler>, add: i32) -> i32;
+  }
+
+  unsafe extern "system" fn console_handler(control: u32) -> i32 {
+    if !matches!(control, CTRL_C_EVENT | CTRL_BREAK_EVENT) {
+      return 0;
+    }
+    let ptr = ACTIVE_FLAG.load(Ordering::SeqCst);
+    if !ptr.is_null() {
+      // SAFETY: the guard removes this callback before releasing its token
+      // pointer, and CancelToken's raw flag is an AtomicBool for this boundary.
+      unsafe {
+        (*ptr).store(true, Ordering::SeqCst);
+      }
+      1
+    } else {
+      0
+    }
+  }
+
+  /// Installs a console handler only while a turn owns the terminal.
+  ///
+  /// Windows delivers Ctrl-C through the console control-handler thread rather
+  /// than as a crossterm key while raw mode is suspended. The callback therefore
+  /// sets the same one-shot flag the runtime polls, and the RAII drop unregisters
+  /// it before the next turn gets a fresh token.
+  pub struct TurnInterruptGuard {
+    old_flag: *mut AtomicBool,
+    installed: bool,
+  }
+
+  impl TurnInterruptGuard {
+    pub fn install(cancel: &CancelToken) -> Self {
+      let flag_ptr = cancel.raw_flag() as *const AtomicBool as *mut AtomicBool;
+      let old_flag = ACTIVE_FLAG.swap(flag_ptr, Ordering::SeqCst);
+      // SAFETY: `console_handler` has the ABI and lifetime required by the
+      // process console API; the callback is a static function.
+      let installed = unsafe { SetConsoleCtrlHandler(Some(console_handler), 1) != 0 };
+      if !installed {
+        ACTIVE_FLAG.store(old_flag, Ordering::SeqCst);
+      }
+      Self {
+        old_flag,
+        installed,
+      }
+    }
+  }
+
+  impl Drop for TurnInterruptGuard {
+    fn drop(&mut self) {
+      if self.installed {
+        // SAFETY: this unregisters the same static callback installed above.
+        unsafe {
+          SetConsoleCtrlHandler(Some(console_handler), 0);
+        }
+      }
+      ACTIVE_FLAG.store(self.old_flag, Ordering::SeqCst);
+    }
+  }
+
+  #[cfg(test)]
+  mod tests {
+    use super::*;
+
+    #[test]
+    fn console_ctrl_c_sets_the_active_cancel_flag() {
+      let cancel = CancelToken::new();
+      let flag = cancel.raw_flag() as *const AtomicBool as *mut AtomicBool;
+      let previous = ACTIVE_FLAG.swap(flag, Ordering::SeqCst);
+      // SAFETY: this directly exercises the same static callback Windows invokes.
+      assert_eq!(unsafe { console_handler(CTRL_C_EVENT) }, 1);
+      ACTIVE_FLAG.store(previous, Ordering::SeqCst);
+      assert!(cancel.is_cancelled());
+    }
+  }
+}
+
+#[cfg(all(not(unix), not(windows)))]
 pub(crate) mod interrupt {
   use pi_rs_core::CancelToken;
 

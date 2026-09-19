@@ -175,6 +175,17 @@ impl BlobStore {
     self.path_for(blob).exists()
   }
 
+  /// Remove one content-addressed payload when a transaction proves it is no
+  /// longer referenced. Callers must perform the liveness check first.
+  pub fn remove(&self, blob: &BlobRef) -> Result<(), StoreError> {
+    let path = self.path_for(blob);
+    match fs::remove_file(&path) {
+      Ok(()) => sync_parent(&path),
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+      Err(error) => Err(StoreError::Io(error)),
+    }
+  }
+
   /// Read a payload, failing rather than returning empty when it is absent.
   /// Read the logical bytes a durable reference points at.
   ///

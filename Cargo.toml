@@ -20,7 +20,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-repository = "https://github.com/saehwan/pi-rs"
+repository = "https://github.com/SaehwanPark/pi-rs"
 authors = ["pi-rs contributors"]
 
 [workspace.dependencies]
