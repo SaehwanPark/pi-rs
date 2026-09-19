@@ -12,12 +12,17 @@
 //! writer's. Every new header and semantic record is sanitized by the store's
 //! configured redaction policy immediately before serialization.
 
-use std::{collections::HashSet, path::Path};
+use std::{
+  collections::HashSet,
+  fs::{self, OpenOptions},
+  io::Write,
+  path::Path,
+};
 
 use pi_rs_core::{
   capability::ModelRef,
   event::AgentEvent,
-  ids::{EventSeq, SessionId},
+  ids::{EventSeq, SessionId, uuidv7},
   redact::RedactionPolicy,
   session::{
     SESSION_SCHEMA_VERSION, SessionHeader, SessionMessage, SessionRecord, SessionReductionRecord,
@@ -75,6 +80,13 @@ impl SessionLog {
         path.display()
       )));
     }
+    validate_header(&header, path)?;
+    if header.version != SESSION_SCHEMA_VERSION {
+      return Err(StoreError::Invalid(format!(
+        "new session logs must use schema version {SESSION_SCHEMA_VERSION}, got {}",
+        header.version
+      )));
+    }
     let sanitized = sanitize_record(&SessionRecord::Header(header), &redaction)?;
     let SessionRecord::Header(header) = sanitized else {
       unreachable!("sanitizing a header preserves its record variant")
@@ -98,6 +110,10 @@ impl SessionLog {
 
   /// Resume a session using the currently configured redaction policy for new records.
   pub fn resume_with_policy(path: &Path, redaction: RedactionPolicy) -> Result<Self, StoreError> {
+    // A modern writer must never append a record whose meaning its header
+    // claims not to understand. Migration happens before opening the append
+    // handle, while the caller still holds the session lease.
+    Self::migrate_to_current(path, redaction.clone())?;
     let header = Self::read_header(path)?;
     let report = Self::read(path)?;
     if report.malformed > 0 {
@@ -153,6 +169,80 @@ impl SessionLog {
 
   pub fn flush(&mut self) -> Result<(), StoreError> {
     self.writer.flush()
+  }
+
+  /// Migrate an older semantic session to the current schema before opening an
+  /// append handle. The complete validated semantic log is rewritten to a
+  /// sibling temporary file, synced, and atomically replaced in place. Existing
+  /// records are preserved; only the header version changes unless the active
+  /// redaction policy deliberately removes sensitive values.
+  pub fn migrate_to_current(path: &Path, redaction: RedactionPolicy) -> Result<bool, StoreError> {
+    // Current sessions are the common path. Read only the bounded header before
+    // deciding that no rewrite is needed; full hydration is reserved for an
+    // actual schema upgrade.
+    let current_header = Self::read_header(path)?;
+    if current_header.version == SESSION_SCHEMA_VERSION {
+      return Ok(false);
+    }
+    let report = read_jsonl(path)?;
+    if report.malformed > 0 {
+      return Err(StoreError::Invalid(format!(
+        "{} contains {} malformed record(s); migration requires recovery",
+        path.display(),
+        report.malformed
+      )));
+    }
+    let Some(SessionRecord::Header(mut header)) = report.items.first().cloned() else {
+      return Err(StoreError::Invalid(format!(
+        "{} has no session header; migration requires recovery",
+        path.display()
+      )));
+    };
+    validate_header(&header, path)?;
+    header.version = SESSION_SCHEMA_VERSION;
+    let sanitized_header = sanitize_record(&SessionRecord::Header(header), &redaction)?;
+    let SessionRecord::Header(header) = sanitized_header else {
+      unreachable!("sanitizing a header preserves its record variant");
+    };
+
+    let mut migrated = Vec::with_capacity(report.items.len());
+    migrated.push(SessionRecord::Header(header));
+    for record in report.items.into_iter().skip(1) {
+      migrated.push(sanitize_record(&record, &redaction)?);
+    }
+    validate_record_schema(path, &migrated)?;
+
+    let parent = path.parent().ok_or_else(|| {
+      StoreError::Invalid(format!("session path {} has no parent", path.display()))
+    })?;
+    let file_name = path
+      .file_name()
+      .and_then(|name| name.to_str())
+      .ok_or_else(|| {
+        StoreError::Invalid(format!("session path {} has no file name", path.display()))
+      })?;
+    let temporary = parent.join(format!(".{file_name}.migrate-{}.tmp", uuidv7()));
+    let result = (|| -> Result<(), StoreError> {
+      let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+      for record in &migrated {
+        let line = serde_json::to_string(record)?;
+        ensure_line_bound(path, &line)?;
+        file.write_all(line.as_bytes())?;
+        file.write_all(b"\n")?;
+      }
+      file.sync_all()?;
+      drop(file);
+      fs::rename(&temporary, path)?;
+      sync_parent(path)?;
+      Ok(())
+    })();
+    if result.is_err() {
+      let _ = fs::remove_file(&temporary);
+    }
+    result.map(|()| true)
   }
 
   /// Read and validate only the header.
@@ -247,6 +337,19 @@ impl SessionLog {
   }
 }
 
+#[cfg(not(windows))]
+fn sync_parent(path: &Path) -> Result<(), StoreError> {
+  if let Some(parent) = path.parent() {
+    std::fs::File::open(parent)?.sync_all()?;
+  }
+  Ok(())
+}
+
+#[cfg(windows)]
+fn sync_parent(_path: &Path) -> Result<(), StoreError> {
+  Ok(())
+}
+
 fn sanitize_record(
   record: &SessionRecord,
   policy: &RedactionPolicy,
@@ -298,12 +401,15 @@ fn trace_ends_the_session(trace_path: &Path) -> Result<bool, StoreError> {
   }
   let tail =
     crate::jsonl::read_jsonl_tail::<pi_rs_core::trace::TraceEntry>(trace_path, TAIL_WINDOW)?;
-  Ok(
-    tail
-      .items
-      .iter()
-      .any(|entry| matches!(entry.envelope.event, AgentEvent::SessionEnded(_))),
-  )
+  let mut latest = None;
+  for entry in &tail.items {
+    match &entry.envelope.event {
+      AgentEvent::SessionStarted(_) => latest = Some(false),
+      AgentEvent::SessionEnded(_) => latest = Some(true),
+      _ => {}
+    }
+  }
+  Ok(latest.unwrap_or(false))
 }
 
 fn preview_of(text: &str, max_chars: usize) -> Option<String> {
@@ -851,6 +957,49 @@ mod tests {
     let restored = restore(&target).expect("legacy session restores without reinterpretation");
     assert_eq!(restored.header.version, 1);
     assert_eq!(restored.messages[0].message.text(), "legacy");
+  }
+
+  #[test]
+  fn resume_migrates_version_one_before_appending_reduction_records() {
+    let tmp = TempDir::new("sessionlog-migration");
+    let (layout, id) = session(&tmp);
+    let target = path(&layout, &id);
+    let old_header = SessionRecord::Header(SessionHeader {
+      version: 1,
+      ..header(&id)
+    });
+    let reduction = SessionRecord::Reduction(SessionReductionRecord {
+      event_id: EventId::new(),
+      seq: Some(EventSeq(2)),
+      reason: pi_rs_core::context::ReductionReason::RecentTargetExceeded { target_tokens: 128 },
+      removed_messages: 1,
+      retained_messages: 0,
+    });
+    std::fs::write(
+      &target,
+      format!(
+        "{}\n{}\n{}\n",
+        serde_json::to_string(&old_header).unwrap(),
+        serde_json::to_string(&message("legacy", 1)).unwrap(),
+        serde_json::to_string(&reduction).unwrap()
+      ),
+    )
+    .unwrap();
+
+    let resumed = SessionLog::resume(&target).expect("legacy log is migrated before append");
+    assert_eq!(resumed.header().version, SESSION_SCHEMA_VERSION);
+    drop(resumed);
+    let report = SessionLog::read(&target).expect("current reader accepts migrated records");
+    assert_eq!(report.items.len(), 3);
+    assert!(matches!(
+      report.items.first(),
+      Some(SessionRecord::Header(header)) if header.version == SESSION_SCHEMA_VERSION
+    ));
+    let leftovers = std::fs::read_dir(target.parent().unwrap())
+      .unwrap()
+      .filter_map(Result::ok)
+      .any(|entry| entry.file_name().to_string_lossy().contains(".migrate-"));
+    assert!(!leftovers, "migration temporary file must be removed");
   }
 
   #[test]

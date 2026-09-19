@@ -423,7 +423,10 @@ mod tests {
       "removal cannot delete ownership"
     );
     drop(lease);
-    assert!(!layout.lease_path(&session).exists());
+    assert!(layout.lease_path(&session).exists());
+    assert!(!crate::lease::SessionLease::is_active(
+      &layout.lease_path(&session)
+    ));
     assert_eq!(layout.session_bytes(&session).unwrap(), 0);
     // Removing twice is not an error: retention races with itself harmlessly.
     layout.remove_session(&session).unwrap();

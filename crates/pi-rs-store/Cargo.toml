@@ -12,10 +12,14 @@ authors.workspace = true
 pi-rs-core.workspace = true
 serde.workspace = true
 flate2.workspace = true
+fs4.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [[bench]]
 name = "restore"

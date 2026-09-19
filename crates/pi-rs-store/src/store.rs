@@ -23,9 +23,12 @@ use std::{
 use pi_rs_core::{
   capability::ModelRef,
   context::{ContextCapsule, ExternalContextRef},
-  event::{AgentEvent, EventEnvelope},
+  event::{
+    AgentEvent, Diagnostic, DiagnosticLevel, EventEnvelope, EventMeta, ModelRequestCompleted,
+    ToolFailed,
+  },
   ids::{CheckpointId, EventId, EventSeq, SessionId, ToolCallId, TurnId},
-  message::{Message, Role},
+  message::{ContentBlock, Message, Role, ToolResultBlock},
   redact::RedactionPolicy,
   session::{
     InterruptedToolCall, SessionCheckpointRecord, SessionHeader, SessionMessage, SessionRecord,
@@ -195,6 +198,14 @@ impl Store {
     }
     self.layout.ensure_session_dirs(session)?;
     let lease = SessionLease::acquire(&self.layout.lease_path(session))?;
+    // Legacy semantic logs are upgraded while the lease is held and before any
+    // append handle exists. This prevents a v1/v2 header from claiming a file
+    // that now contains v3-only reduction or checkpoint records.
+    SessionLog::migrate_to_current(
+      &self.layout.session_path(session),
+      self.policy.redaction.clone(),
+    )?;
+    let header = SessionLog::read_header(&self.layout.session_path(session))?;
     let session_report = SessionLog::read(&self.layout.session_path(session))?;
     if session_report.malformed > 0 {
       return Err(StoreError::Invalid(format!(
@@ -216,9 +227,12 @@ impl Store {
     let wal = self.open_wal(session)?;
     let mut opened = self.session(header, log, journal, wal, lease);
     opened.recover_projection()?;
-    // Recovery may have repaired a WAL intent; validate the complete state
-    // before returning an append handle so callers cannot issue a provider
-    // request from a projection that still disagrees with canonical history.
+    opened.recover_abandoned_model_requests()?;
+    opened.recover_unstarted_tool_requests()?;
+    // Recovery may have repaired a WAL intent or normalized a safe interrupted
+    // lifecycle; validate the complete state before returning an append handle
+    // so callers cannot issue a provider request from a projection that still
+    // disagrees with canonical history.
     Store::new(self.layout.root().to_path_buf(), self.policy.clone()).restore(session)?;
     Ok(opened)
   }
@@ -910,7 +924,7 @@ impl Session {
       )));
     }
     validate_trace_integrity(&trace_report.items, self.id())?;
-    validate_model_request_lifecycles(&trace_report.items, self.id())?;
+    inspect_model_request_lifecycles(&trace_report.items, self.id())?;
     validate_compaction_lifecycles(&trace_report.items, self.id())?;
     validate_checkpoint_lifecycles(&trace_report.items, self.id())?;
     let trace = trace_report.items;
@@ -1004,6 +1018,124 @@ impl Session {
       // messages or checkpoint capsules and could recreate an oversized-WAL
       // deadlock on the next restart.
       self.wal.commit(&intent.tx_id)?;
+    }
+    Ok(())
+  }
+
+  /// Normalize a model request that was durably started but never completed.
+  ///
+  /// A provider may have received the request, so the request is never retried
+  /// automatically. Closing it as `abandoned` preserves the canonical deltas
+  /// while keeping them out of the resumed model-visible message projection.
+  fn recover_abandoned_model_requests(&mut self) -> Result<(), StoreError> {
+    let report = TraceJournal::read(self.trace_path())?;
+    if report.malformed > 0 {
+      return Err(StoreError::Invalid(format!(
+        "session {} trace contains {} malformed record(s); model recovery is unsafe",
+        self.id(),
+        report.malformed
+      )));
+    }
+    let starts = inspect_model_request_lifecycles(&report.items, self.id())?;
+    for start in starts {
+      let started = match &start.envelope.event {
+        AgentEvent::ModelRequestStarted(started) => started,
+        _ => unreachable!("lifecycle inspection returns only open request starts"),
+      };
+      let mut completion_meta =
+        EventMeta::new(self.id().clone(), start.envelope.meta.trace_id.clone());
+      completion_meta.turn_id = start.envelope.meta.turn_id.clone();
+      completion_meta.model_epoch = Some(started.epoch);
+      completion_meta.model = Some(started.model.clone());
+      completion_meta.parent_event_id = Some(start.envelope.meta.event_id.clone());
+      let mut completion = EventEnvelope::new(
+        completion_meta,
+        AgentEvent::ModelRequestCompleted(ModelRequestCompleted {
+          epoch: started.epoch,
+          model: started.model.clone(),
+          finish_reason: Some("abandoned".into()),
+          input_tokens: None,
+          output_tokens: None,
+          duration_ms: 0,
+          tool_calls: 0,
+          reasoning_provenance: None,
+          first_delta_ms: None,
+        }),
+      );
+      self.emit(&mut completion)?;
+
+      let mut diagnostic_meta =
+        EventMeta::new(self.id().clone(), start.envelope.meta.trace_id.clone());
+      diagnostic_meta.turn_id = start.envelope.meta.turn_id.clone();
+      diagnostic_meta.model_epoch = Some(started.epoch);
+      diagnostic_meta.model = Some(started.model.clone());
+      diagnostic_meta.parent_event_id = Some(completion.meta.event_id.clone());
+      let mut diagnostic = EventEnvelope::new(
+        diagnostic_meta,
+        AgentEvent::Diagnostic(Diagnostic {
+          level: DiagnosticLevel::Warn,
+          message: format!(
+            "model request {} was interrupted before completion; partial output remains canonical and was not restored into model context",
+            start.envelope.meta.event_id
+          ),
+        }),
+      );
+      self.emit(&mut diagnostic)?;
+    }
+    Ok(())
+  }
+
+  /// Close tool requests that were recorded before execution crossed the
+  /// `ToolStarted` boundary. This is provably safe: no tool code could have
+  /// run, so a protocol-completing failed result is preferable to bricking the
+  /// session or replaying an operation blindly.
+  fn recover_unstarted_tool_requests(&mut self) -> Result<(), StoreError> {
+    let report = TraceJournal::read(self.trace_path())?;
+    if report.malformed > 0 {
+      return Err(StoreError::Invalid(format!(
+        "session {} trace contains {} malformed record(s); tool recovery is unsafe",
+        self.id(),
+        report.malformed
+      )));
+    }
+    for entry in unstarted_tool_requests(&report.items, self.id())? {
+      let requested = match &entry.envelope.event {
+        AgentEvent::ToolRequested(requested) => requested,
+        _ => unreachable!("tool inspection returns only requests without starts"),
+      };
+      let details = format!(
+        "tool request '{}' was interrupted before execution; no side effect was observed",
+        requested.name
+      );
+      let mut meta = EventMeta::new(self.id().clone(), entry.envelope.meta.trace_id.clone());
+      meta.turn_id = entry.envelope.meta.turn_id.clone();
+      meta.model_epoch = entry.envelope.meta.model_epoch;
+      meta.model = entry.envelope.meta.model.clone();
+      meta.tool_call_id = Some(requested.call_id.clone());
+      meta.parent_event_id = Some(entry.envelope.meta.event_id.clone());
+      let mut envelope = EventEnvelope::new(
+        meta,
+        AgentEvent::ToolFailed(ToolFailed {
+          call_id: requested.call_id.clone(),
+          name: requested.name.clone(),
+          message: details.clone(),
+          duration_ms: 0,
+          status: None,
+        }),
+      );
+      self.emit_transaction(&mut envelope, None, true)?;
+      let message = Message::new(
+        Role::Tool,
+        vec![ContentBlock::ToolResult(ToolResultBlock {
+          id: requested.call_id.clone(),
+          name: requested.name.clone(),
+          state: ToolExecutionState::Failed,
+          text: details,
+          is_error: true,
+          reduced: false,
+        })],
+      );
+      self.complete_message(&pi_rs_core::AttributedMessage { envelope, message })?;
     }
     Ok(())
   }
@@ -1489,11 +1621,19 @@ fn validate_trace_payloads(
   Ok(())
 }
 
-fn validate_model_request_lifecycles(
+#[derive(Debug, Clone)]
+struct OpenModelRequest {
+  key: (Option<TurnId>, u32, ModelRef),
+  start: pi_rs_core::TraceEntry,
+}
+
+/// Validate request metadata and return starts that need safe crash recovery.
+/// The caller decides whether an open request is normalized or rejected.
+fn inspect_model_request_lifecycles(
   entries: &[pi_rs_core::TraceEntry],
   session: &SessionId,
-) -> Result<(), StoreError> {
-  let mut open: Vec<(Option<TurnId>, u32, ModelRef)> = Vec::new();
+) -> Result<Vec<pi_rs_core::TraceEntry>, StoreError> {
+  let mut open = Vec::<OpenModelRequest>::new();
   for entry in entries {
     match &entry.envelope.event {
       AgentEvent::ModelRequestStarted(started) => {
@@ -1523,12 +1663,15 @@ fn validate_model_request_lifecycles(
           started.epoch,
           started.model.clone(),
         );
-        if open.iter().any(|candidate| candidate == &key) {
+        if open.iter().any(|candidate| candidate.key == key) {
           return Err(StoreError::Invalid(format!(
             "session {session} has overlapping model request lifecycles; resume requires recovery"
           )));
         }
-        open.push(key);
+        open.push(OpenModelRequest {
+          key,
+          start: entry.clone(),
+        });
       }
       AgentEvent::ModelRequestCompleted(completed) => {
         if entry.envelope.meta.turn_id.is_none() {
@@ -1557,7 +1700,7 @@ fn validate_model_request_lifecycles(
           completed.epoch,
           completed.model.clone(),
         );
-        let Some(index) = open.iter().rposition(|candidate| *candidate == key) else {
+        let Some(index) = open.iter().rposition(|candidate| candidate.key == key) else {
           return Err(StoreError::Invalid(format!(
             "session {session} has a model request completion without a matching start; resume requires recovery"
           )));
@@ -1567,12 +1710,20 @@ fn validate_model_request_lifecycles(
       _ => {}
     }
   }
-  if open.is_empty() {
-    return Ok(());
+  Ok(open.into_iter().map(|request| request.start).collect())
+}
+
+fn validate_model_request_lifecycles(
+  entries: &[pi_rs_core::TraceEntry],
+  session: &SessionId,
+) -> Result<(), StoreError> {
+  if inspect_model_request_lifecycles(entries, session)?.is_empty() {
+    Ok(())
+  } else {
+    Err(StoreError::Invalid(format!(
+      "session {session} trace contains an incomplete model request lifecycle; resume requires recovery"
+    )))
   }
-  Err(StoreError::Invalid(format!(
-    "session {session} trace contains an incomplete model request lifecycle; resume requires recovery"
-  )))
 }
 
 fn validate_compaction_lifecycles(
@@ -1959,7 +2110,10 @@ fn validate_projection_alignment(
           return Err(fail(entry));
         }
       }
-      AgentEvent::ModelRequestCompleted(completed) if completed.finish_reason.is_some() => {
+      AgentEvent::ModelRequestCompleted(completed)
+        if completed.finish_reason.is_some()
+          && completed.finish_reason.as_deref() != Some("abandoned") =>
+      {
         let completion_seq = entry.envelope.meta.seq;
         let request_start = entries
           .iter()
@@ -2525,6 +2679,121 @@ fn validate_tool_result_projection(
   Ok(())
 }
 
+/// Return requests that never crossed the durable `ToolStarted` boundary.
+/// Lifecycle shape is checked here before normalization; the full validator
+/// runs again after the synthetic terminal records are appended.
+fn unstarted_tool_requests(
+  entries: &[pi_rs_core::TraceEntry],
+  session: &SessionId,
+) -> Result<Vec<pi_rs_core::TraceEntry>, StoreError> {
+  let mut pending = BTreeMap::<ToolCallId, (pi_rs_core::TraceEntry, bool)>::new();
+  let mut seen = BTreeSet::<ToolCallId>::new();
+  let mut ordered = Vec::<ToolCallId>::new();
+  for entry in entries {
+    let invalid = |detail: &str| {
+      StoreError::Invalid(format!(
+        "session {session} has an invalid tool lifecycle at {}: {detail}; resume requires recovery",
+        entry.envelope.meta.event_id
+      ))
+    };
+    match &entry.envelope.event {
+      AgentEvent::ToolRequested(requested) => {
+        if entry.envelope.meta.turn_id.is_none() || requested.call_id.as_str().is_empty() {
+          return Err(invalid("tool request has no turn or call identity"));
+        }
+        if !seen.insert(requested.call_id.clone()) {
+          return Err(invalid("duplicate tool request"));
+        }
+        pending.insert(requested.call_id.clone(), (entry.clone(), false));
+        ordered.push(requested.call_id.clone());
+      }
+      AgentEvent::ToolStarted(started) => {
+        let Some((request, already_started)) = pending.get_mut(&started.call_id) else {
+          return Err(invalid("tool started without a matching request"));
+        };
+        if *already_started {
+          return Err(invalid("duplicate tool start"));
+        }
+        let AgentEvent::ToolRequested(requested) = &request.envelope.event else {
+          unreachable!("pending tool entries are requests");
+        };
+        if started.name != requested.name
+          || request.envelope.meta.turn_id != entry.envelope.meta.turn_id
+          || request.envelope.meta.model_epoch != entry.envelope.meta.model_epoch
+          || request.envelope.meta.model != entry.envelope.meta.model
+        {
+          return Err(invalid("tool start disagrees with its request"));
+        }
+        *already_started = true;
+      }
+      AgentEvent::ToolCompleted(completed) => {
+        let Some((request, started)) = pending.remove(&completed.call_id) else {
+          return Err(invalid("tool completed without a matching request"));
+        };
+        let AgentEvent::ToolRequested(requested) = &request.envelope.event else {
+          unreachable!("pending tool entries are requests");
+        };
+        if !started {
+          return Err(invalid("tool completed before it started"));
+        }
+        if completed.name != requested.name
+          || request.envelope.meta.turn_id != entry.envelope.meta.turn_id
+          || request.envelope.meta.model_epoch != entry.envelope.meta.model_epoch
+          || request.envelope.meta.model != entry.envelope.meta.model
+        {
+          return Err(invalid("tool completion disagrees with its request"));
+        }
+      }
+      AgentEvent::ToolFailed(failed) => {
+        let Some((request, _started)) = pending.remove(&failed.call_id) else {
+          return Err(invalid("tool failed without a matching request"));
+        };
+        let AgentEvent::ToolRequested(requested) = &request.envelope.event else {
+          unreachable!("pending tool entries are requests");
+        };
+        // A failed request may be recorded before execution begins when
+        // cancellation or provider failure prevents the runtime from emitting
+        // ToolStarted. That is a safe terminal state, not an interrupted
+        // mutating operation.
+        if failed.name != requested.name
+          || request.envelope.meta.turn_id != entry.envelope.meta.turn_id
+          || request.envelope.meta.model_epoch != entry.envelope.meta.model_epoch
+          || request.envelope.meta.model != entry.envelope.meta.model
+        {
+          return Err(invalid("tool failure disagrees with its request"));
+        }
+      }
+      AgentEvent::ToolUnknown(unknown) => {
+        let Some((request, _started)) = pending.remove(&unknown.call_id) else {
+          return Err(invalid("tool became unknown without a matching request"));
+        };
+        let AgentEvent::ToolRequested(requested) = &request.envelope.event else {
+          unreachable!("pending tool entries are requests");
+        };
+        if unknown.name != requested.name
+          || unknown.mutating == requested.read_only
+          || request.envelope.meta.turn_id != entry.envelope.meta.turn_id
+          || request.envelope.meta.model_epoch != entry.envelope.meta.model_epoch
+          || request.envelope.meta.model != entry.envelope.meta.model
+        {
+          return Err(invalid("tool unknown result disagrees with its request"));
+        }
+      }
+      _ => {}
+    }
+  }
+  Ok(
+    ordered
+      .into_iter()
+      .filter_map(|call_id| {
+        pending
+          .remove(&call_id)
+          .and_then(|(entry, started)| (!started).then_some(entry))
+      })
+      .collect(),
+  )
+}
+
 fn tool_meta_matches(call: &InterruptedToolCall, entry: &pi_rs_core::TraceEntry) -> bool {
   call.turn_id == entry.envelope.meta.turn_id
     && call
@@ -2860,15 +3129,61 @@ fn recover_projection_record(
       "session {} has an interrupted external-context message that cannot be reconstructed safely",
       session.id()
     ))),
-    AgentEvent::ContextSummary
-    | AgentEvent::ToolCompleted(_)
-    | AgentEvent::ToolFailed(_)
-    | AgentEvent::ToolUnknown(_) => Err(StoreError::Invalid(format!(
+    AgentEvent::ContextSummary | AgentEvent::ToolCompleted(_) => Err(StoreError::Invalid(format!(
       "session {} has an interrupted message projection for {}; resume requires manual recovery",
       session.id(),
       trace_entry.envelope.meta.event_id
     ))),
+    AgentEvent::ToolFailed(failed) => {
+      let (turn_id, epoch, model) = message_attribution()?;
+      Ok(Some(SessionRecord::Message(SessionMessage {
+        turn_id,
+        role: Role::Tool,
+        message: Message::new(
+          Role::Tool,
+          vec![ContentBlock::ToolResult(ToolResultBlock {
+            id: failed.call_id.clone(),
+            name: failed.name.clone(),
+            state: ToolExecutionState::Failed,
+            text: failed.message.clone(),
+            is_error: true,
+            reduced: false,
+          })],
+        ),
+        epoch,
+        model,
+        event_id: trace_entry.envelope.meta.event_id.clone(),
+        seq,
+        external_context: None,
+      })))
+    }
+    AgentEvent::ToolUnknown(unknown) => {
+      let (turn_id, epoch, model) = message_attribution()?;
+      Ok(Some(SessionRecord::Message(SessionMessage {
+        turn_id,
+        role: Role::Tool,
+        message: Message::new(
+          Role::Tool,
+          vec![ContentBlock::ToolResult(ToolResultBlock {
+            id: unknown.call_id.clone(),
+            name: unknown.name.clone(),
+            state: ToolExecutionState::Unknown,
+            text: unknown.why.clone(),
+            is_error: true,
+            reduced: false,
+          })],
+        ),
+        epoch,
+        model,
+        event_id: trace_entry.envelope.meta.event_id.clone(),
+        seq,
+        external_context: None,
+      })))
+    }
     AgentEvent::ModelRequestCompleted(completed) => {
+      if completed.finish_reason.as_deref() == Some("abandoned") {
+        return Ok(None);
+      }
       if completed.finish_reason.is_none() {
         // Failed requests do not enter assistant history. Their tool failures,
         // when any, carry independent intents and will be reconciled separately.
@@ -3115,14 +3430,14 @@ fn redact_payload(policy: &RedactionPolicy, bytes: &[u8]) -> Result<Vec<u8>, Sto
 mod tests {
   use pi_rs_core::{
     capability::EpochReason,
-    context::CAPSULE_SCHEMA_VERSION,
+    context::{CAPSULE_SCHEMA_VERSION, ReductionReason},
     event::{
-      AgentEvent, CheckpointCreated, Diagnostic, DiagnosticLevel, EventMeta, SessionEndReason,
-      SessionEnded, SessionStarted, ToolCompleted, ToolRequested, ToolStarted, TurnCompleted,
-      TurnStatus, UserMessage,
+      AgentEvent, CheckpointCreated, ContextReduced, Diagnostic, DiagnosticLevel, EventMeta,
+      ModelRequestStarted, SessionEndReason, SessionEnded, SessionStarted, ToolCompleted,
+      ToolRequested, ToolStarted, TurnCompleted, TurnStatus, UserMessage,
     },
     ids::{EventId, ToolCallId, TraceId, uuidv7},
-    session::{SESSION_SCHEMA_VERSION, SessionEpochRecord},
+    session::{SESSION_SCHEMA_VERSION, SessionEpochRecord, SessionReductionRecord},
     trace::{BlobCompression, TraceRetention},
   };
 
@@ -3560,6 +3875,168 @@ mod tests {
     let restored = opened.restore(&id).unwrap();
     assert_eq!(restored.messages.len(), 1);
     assert_eq!(restored.messages[0].message.text(), text);
+  }
+
+  #[test]
+  fn resuming_a_legacy_reduction_migrates_before_the_next_append() {
+    let tmp = TempDir::new("store-legacy-reduction");
+    let opened = store(&tmp);
+    let id = SessionId::from_string(uuidv7());
+    let turn = TurnId::new();
+    {
+      let mut session = opened.begin(header(&id)).unwrap();
+      let mut user = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::UserMessage(UserMessage {
+          text: "legacy context".into(),
+          attachments: 0,
+        }),
+      );
+      session.emit(&mut user).unwrap();
+      session
+        .append_message(
+          &turn,
+          &pi_rs_core::message::Message::user("legacy context"),
+          0,
+          &ModelRef::new("local", "qwen"),
+          &user,
+        )
+        .unwrap();
+      let blob = session.put_recovery_blob(b"legacy full context").unwrap();
+      let mut reduced = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ContextReduced(ContextReduced {
+          reason: ReductionReason::RecentTargetExceeded { target_tokens: 128 },
+          original_bytes: 512,
+          visible_bytes: 128,
+          removed_messages: 1,
+          retained_messages: 0,
+          recovery_ref: Some(blob.recovery_ref()),
+          blob: Some(blob),
+          tool_call_id: None,
+        }),
+      );
+      let seq = session.emit(&mut reduced).unwrap();
+      session
+        .record(&SessionRecord::Reduction(SessionReductionRecord {
+          event_id: reduced.meta.event_id.clone(),
+          seq: Some(seq),
+          reason: ReductionReason::RecentTargetExceeded { target_tokens: 128 },
+          removed_messages: 1,
+          retained_messages: 0,
+        }))
+        .unwrap();
+      session.finish().unwrap();
+    }
+
+    let path = opened.layout().session_path(&id);
+    let mut records: Vec<SessionRecord> = std::fs::read_to_string(&path)
+      .unwrap()
+      .lines()
+      .map(|line| serde_json::from_str(line).unwrap())
+      .collect();
+    let SessionRecord::Header(header) = &mut records[0] else {
+      panic!("test session starts with a header");
+    };
+    header.version = 1;
+    let rewritten = records
+      .iter()
+      .map(|record| serde_json::to_string(record).unwrap())
+      .collect::<Vec<_>>()
+      .join("\n");
+    std::fs::write(&path, format!("{rewritten}\n")).unwrap();
+
+    let resumed = opened.resume(&id).expect("legacy projection is migrated");
+    assert_eq!(resumed.header().version, SESSION_SCHEMA_VERSION);
+    resumed.finish().unwrap();
+    let restored = opened.restore(&id).unwrap();
+    assert_eq!(restored.reductions.len(), 1);
+    assert_eq!(restored.reductions[0].removed_messages, 1);
+  }
+
+  #[test]
+  fn abandoned_model_request_is_closed_on_resume_without_retrying() {
+    let tmp = TempDir::new("store-abandoned-model");
+    let opened = store(&tmp);
+    let id = SessionId::from_string(uuidv7());
+    let turn = TurnId::new();
+    {
+      let mut session = opened.begin(header(&id)).unwrap();
+      let mut started = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ModelRequestStarted(ModelRequestStarted {
+          epoch: 0,
+          model: ModelRef::new("local", "qwen"),
+          message_count: 1,
+          context_tokens_est: 12,
+          tools_exposed: 0,
+        }),
+      );
+      session.emit(&mut started).unwrap();
+    }
+
+    let resumed = opened
+      .resume(&id)
+      .expect("an interrupted provider request is safely abandoned");
+    let trace = TraceJournal::read(resumed.trace_path()).unwrap();
+    assert!(trace.items.iter().any(|entry| {
+      matches!(
+        &entry.envelope.event,
+        AgentEvent::ModelRequestCompleted(completed)
+          if completed.finish_reason.as_deref() == Some("abandoned")
+      )
+    }));
+    assert!(trace.items.iter().any(|entry| {
+      matches!(
+        &entry.envelope.event,
+        AgentEvent::Diagnostic(diagnostic) if diagnostic.message.contains("interrupted")
+      )
+    }));
+    let restored = opened.restore(&id).unwrap();
+    assert!(restored.messages.is_empty());
+    resumed.finish().unwrap();
+  }
+
+  #[test]
+  fn unstarted_tool_request_is_closed_as_a_failed_result_on_resume() {
+    let tmp = TempDir::new("store-unstarted-tool");
+    let opened = store(&tmp);
+    let id = SessionId::from_string(uuidv7());
+    let turn = TurnId::new();
+    let call_id = ToolCallId::from_string("77777777-7777-4777-8777-777777777777");
+    {
+      let mut session = opened.begin(header(&id)).unwrap();
+      let mut requested = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ToolRequested(ToolRequested {
+          call_id: call_id.clone(),
+          name: "write".into(),
+          arguments: serde_json::json!({"path": "out.txt", "contents": "data"}),
+          read_only: false,
+        }),
+      );
+      session.emit(&mut requested).unwrap();
+    }
+
+    let resumed = opened
+      .resume(&id)
+      .expect("absence of ToolStarted proves no tool code ran");
+    let restored = opened.restore(&id).unwrap();
+    assert_eq!(restored.interrupted_tools.len(), 0);
+    assert_eq!(restored.messages.len(), 1);
+    assert_eq!(restored.messages[0].role, Role::Tool);
+    assert!(matches!(
+      restored.messages[0].message.content.first(),
+      Some(ContentBlock::ToolResult(result)) if result.text.contains("no side effect")
+    ));
+    let trace = TraceJournal::read(resumed.trace_path()).unwrap();
+    assert!(trace.items.iter().any(|entry| {
+      matches!(
+        &entry.envelope.event,
+        AgentEvent::ToolFailed(failed) if failed.call_id == call_id
+      )
+    }));
+    resumed.finish().unwrap();
   }
 
   #[test]
