@@ -1204,6 +1204,15 @@ impl<'a> TurnLoop<'a> {
     self.emit_with_sink_parent(turn_id, event, false, parent_event_id)
   }
 
+  fn emit_without_message_with_parent(
+    &mut self,
+    turn_id: Option<TurnId>,
+    event: AgentEvent,
+    parent_event_id: Option<pi_rs_core::EventId>,
+  ) -> Result<EventEnvelope, TurnError> {
+    self.emit_with_sink_parent(turn_id, event, true, parent_event_id)
+  }
+
   fn emit_with_sink(
     &mut self,
     turn_id: Option<TurnId>,
@@ -2636,7 +2645,7 @@ impl<'a> TurnLoop<'a> {
         }),
         Some(assistant_event_id.clone()),
       )?;
-      self.emit_with_parent(
+      self.emit_without_message_with_parent(
         Some(turn_id.clone()),
         AgentEvent::ToolFailed(ToolFailed {
           call_id: call.id.clone(),
@@ -4022,6 +4031,84 @@ mod tests {
     assert_eq!(trace.count("context_compaction_epoch"), 0);
     assert_eq!(trace.count("tool_requested"), 1);
     assert_eq!(trace.count("tool_failed"), 1);
+  }
+
+  #[test]
+  fn decoded_tool_call_before_stream_failure_closes_store_wal() {
+    let provider = Scripted::new(
+      "store-tool-overflow",
+      vec![tool_call("spy", serde_json::json!({"value": 1}))],
+    )
+    .fails_after_stream(ModelFailureKind::ContextOverflow);
+    let tools = registry_with(vec![Box::new(Spy(Arc::new(Mutex::new(Vec::new()))))]);
+    let policy = pi_rs_core::ProfilePolicy::new(
+      pi_rs_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let temp = pi_rs_store::TempDir::new("runtime-unexecuted-tool-wal");
+    let store = pi_rs_store::Store::open(temp.path(), pi_rs_store::WritePolicy::default()).unwrap();
+    let session_id = SessionId::new();
+    let model = provider.model().clone();
+    let session = store
+      .begin(SessionHeader {
+        session_id: session_id.clone(),
+        version: pi_rs_core::session::SESSION_SCHEMA_VERSION,
+        started_at_ms: 1,
+        working_dir: "/workspace".into(),
+        model,
+        parent_session: None,
+        branched_from_event: None,
+        imported_from: None,
+      })
+      .unwrap();
+    let mut trace = StoreTrace::new(session);
+    let trace_path = trace.session().trace_path().to_path_buf();
+    let result = {
+      let mut runtime = TurnLoop::new(
+        &provider,
+        &tools,
+        &policy,
+        &mut trace,
+        session_id.clone(),
+        TraceId::new(),
+      )
+      .with_messages(vec![Message::user("old history")]);
+      runtime.run_turn("new turn", &CancelToken::new(), &mut SilentProgress)
+    };
+    let error = result.expect_err("the incomplete provider response remains the turn outcome");
+    assert_eq!(error.kind(), Some(ModelFailureKind::ContextOverflow));
+
+    trace
+      .into_session()
+      .finish()
+      .expect("no-message tool failure closes the projection WAL");
+    let restored = store
+      .restore(&session_id)
+      .expect("the finished session restores immediately");
+    assert!(restored.interrupted_tools.is_empty());
+    assert_eq!(restored.messages.len(), 1);
+    assert!(
+      restored
+        .messages
+        .iter()
+        .all(|message| message.message.role != Role::Tool)
+    );
+
+    let journal = pi_rs_store::TraceJournal::read(&trace_path).unwrap();
+    let requested = journal
+      .items
+      .iter()
+      .find(|item| matches!(item.envelope.event, AgentEvent::ToolRequested(_)))
+      .expect("the decoded call is durably requested");
+    let failed = journal
+      .items
+      .iter()
+      .find(|item| matches!(item.envelope.event, AgentEvent::ToolFailed(_)))
+      .expect("the unexecuted call is durably failed");
+    assert_eq!(
+      failed.envelope.meta.parent_event_id,
+      Some(requested.envelope.meta.event_id.clone())
+    );
   }
 
   #[test]
