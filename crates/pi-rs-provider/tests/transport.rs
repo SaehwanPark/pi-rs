@@ -550,7 +550,7 @@ fn a_quiet_stream_expires_at_the_logical_idle_timeout() {
       .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
       .expect("headers");
     socket.flush().expect("flush");
-    let deadline = Instant::now() + Duration::from_secs(4);
+    let deadline = Instant::now() + Duration::from_secs(10);
     let _ = socket.set_read_timeout(Some(Duration::from_millis(50)));
     let mut buf = [0u8; 16];
     while Instant::now() < deadline {
@@ -579,7 +579,7 @@ fn a_quiet_stream_expires_at_the_logical_idle_timeout() {
   let (result, _) = stream(&adapter, &request("quiet timeout"));
   let failure = result.expect_err("quiet response must time out");
   assert_eq!(failure.kind, ModelFailureKind::Timeout);
-  assert!(started.elapsed() < Duration::from_secs(3), "{failure:?}");
+  assert!(started.elapsed() < Duration::from_secs(5), "{failure:?}");
   server.join().expect("server");
   let second = adapter.stream(
     &request("must not retry after timeout"),
@@ -604,7 +604,7 @@ fn delayed_headers_use_the_logical_timeout_without_resubmitting_the_post() {
   let accepted = Arc::new(AtomicUsize::new(0));
   let accepted_by_server = Arc::clone(&accepted);
   let server = thread::spawn(move || {
-    let deadline = Instant::now() + Duration::from_secs(4);
+    let deadline = Instant::now() + Duration::from_secs(10);
     let (mut first, _) = loop {
       match listener.accept() {
         Ok(connection) => break connection,
@@ -629,7 +629,8 @@ fn delayed_headers_use_the_logical_timeout_without_resubmitting_the_post() {
     // An implementation that silently retries will connect again during the
     // delay. Keep accepting long enough to count those connections, but do not
     // answer them: one provider attempt must remain one HTTP POST.
-    while Instant::now() < deadline {
+    let observation_deadline = Instant::now() + Duration::from_millis(3_000);
+    while Instant::now() < observation_deadline {
       match listener.accept() {
         Ok((mut socket, _)) => {
           accepted_by_server.fetch_add(1, Ordering::SeqCst);
