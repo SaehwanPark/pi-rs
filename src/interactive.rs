@@ -1268,6 +1268,22 @@ pub(crate) mod interrupt {
       ACTIVE_FLAG.store(self.old_flag, Ordering::SeqCst);
     }
   }
+
+  #[cfg(test)]
+  mod tests {
+    use super::*;
+
+    #[test]
+    fn console_ctrl_c_sets_the_active_cancel_flag() {
+      let cancel = CancelToken::new();
+      let flag = cancel.raw_flag() as *const AtomicBool as *mut AtomicBool;
+      let previous = ACTIVE_FLAG.swap(flag, Ordering::SeqCst);
+      // SAFETY: this directly exercises the same static callback Windows invokes.
+      assert_eq!(unsafe { console_handler(CTRL_C_EVENT) }, 1);
+      ACTIVE_FLAG.store(previous, Ordering::SeqCst);
+      assert!(cancel.is_cancelled());
+    }
+  }
 }
 
 #[cfg(all(not(unix), not(windows)))]

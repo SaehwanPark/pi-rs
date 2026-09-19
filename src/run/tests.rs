@@ -19,8 +19,9 @@ use std::{
 };
 
 use pi_rs_core::{
-  AgentEvent, ContentBlock, ModelCapabilities, ModelEndpoint, ModelRef, ReasoningExposure, Role,
-  RuntimeConfig, ToolExecutionState, TurnStatus,
+  AgentEvent, ContentBlock, FailurePhase, ModelCapabilities, ModelEndpoint, ModelFailure,
+  ModelFailureKind, ModelRef, ReasoningExposure, Role, RuntimeConfig, SessionEndReason,
+  ToolExecutionState, TurnStatus,
 };
 use pi_rs_store::{StateLayout, TraceJournal, WritePolicy};
 use tempfile::TempDir;
@@ -100,6 +101,73 @@ fn a_second_turn_on_one_handle_sends_the_first_turn_with_it() {
   let of = |role: Role| restored.messages.iter().filter(|m| m.role == role).count();
   assert_eq!(of(Role::User), 2, "both prompts recorded");
   assert_eq!(of(Role::Assistant), 2, "both answers recorded");
+}
+
+#[test]
+fn a_recoverable_fatal_error_closes_the_durable_session_before_reporting_it() {
+  let temp = TempDir::new().unwrap();
+  let workspace = temp.path().join("workspace");
+  fs::create_dir(&workspace).unwrap();
+  let server = FakeServer::answer(vec![answer("ok")]);
+  let config = write_config(temp.path(), &server.base_url());
+  let args = RunArgs {
+    config,
+    cwd: workspace.clone(),
+    prompt: String::new(),
+    resume: None,
+    surface: SurfaceArgs::default(),
+  };
+
+  let result = open_session(&args.config, &args.cwd, &args.surface, None, |session| {
+    session
+      .turn("start a session")
+      .map_err(|error| turn_error(&error))?;
+    let failure = TurnError::Unavailable(ModelFailure::new(
+      ModelFailureKind::Transport,
+      FailurePhase::WaitingForResponse,
+      "synthetic fatal turn",
+    ));
+    let failure = session.close_after_failure(failure);
+    Err(session_error(SessionError::Turn(failure)))
+  });
+  assert!(result.is_err());
+  let events = recorded_events(temp.path());
+  assert!(matches!(
+    events.last(),
+    Some(AgentEvent::SessionEnded(event))
+      if matches!(&event.reason, SessionEndReason::Fatal { .. })
+  ));
+}
+
+#[test]
+fn a_sink_error_does_not_fabricate_session_closure() {
+  let temp = TempDir::new().unwrap();
+  let workspace = temp.path().join("workspace");
+  fs::create_dir(&workspace).unwrap();
+  let server = FakeServer::answer(vec![answer("ok")]);
+  let config = write_config(temp.path(), &server.base_url());
+  let args = RunArgs {
+    config,
+    cwd: workspace.clone(),
+    prompt: String::new(),
+    resume: None,
+    surface: SurfaceArgs::default(),
+  };
+
+  let result = open_session(&args.config, &args.cwd, &args.surface, None, |session| {
+    session
+      .turn("start a session")
+      .map_err(|error| turn_error(&error))?;
+    let failure = session.close_after_failure(TurnError::Sink("durability lost".into()));
+    assert!(matches!(failure, TurnError::Sink(ref message) if message == "durability lost"));
+    Err(session_error(SessionError::Turn(failure)))
+  });
+  assert!(result.is_err());
+  assert!(
+    !recorded_events(temp.path())
+      .iter()
+      .any(|event| { matches!(event, AgentEvent::SessionEnded(_)) })
+  );
 }
 
 #[test]
