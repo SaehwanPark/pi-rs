@@ -299,7 +299,7 @@ impl ProviderConfig {
 fn redact_url(url: &str) -> String {
   let safe = if let Some((scheme, authority_and_path)) = url.split_once("://") {
     let authority_end = authority_and_path
-      .find(|character| matches!(character, '/' | '?' | '#'))
+      .find(['/', '?', '#'])
       .unwrap_or(authority_and_path.len());
     let authority = &authority_and_path[..authority_end];
     if let Some(at) = authority.rfind('@') {
