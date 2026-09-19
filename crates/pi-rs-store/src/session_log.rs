@@ -177,6 +177,13 @@ impl SessionLog {
   /// records are preserved; only the header version changes unless the active
   /// redaction policy deliberately removes sensitive values.
   pub fn migrate_to_current(path: &Path, redaction: RedactionPolicy) -> Result<bool, StoreError> {
+    // Current sessions are the common path. Read only the bounded header before
+    // deciding that no rewrite is needed; full hydration is reserved for an
+    // actual schema upgrade.
+    let current_header = Self::read_header(path)?;
+    if current_header.version == SESSION_SCHEMA_VERSION {
+      return Ok(false);
+    }
     let report = read_jsonl(path)?;
     if report.malformed > 0 {
       return Err(StoreError::Invalid(format!(
@@ -192,9 +199,6 @@ impl SessionLog {
       )));
     };
     validate_header(&header, path)?;
-    if header.version == SESSION_SCHEMA_VERSION {
-      return Ok(false);
-    }
     header.version = SESSION_SCHEMA_VERSION;
     let sanitized_header = sanitize_record(&SessionRecord::Header(header), &redaction)?;
     let SessionRecord::Header(header) = sanitized_header else {
