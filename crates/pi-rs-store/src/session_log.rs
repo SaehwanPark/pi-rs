@@ -14,7 +14,7 @@
 
 use std::{
   collections::HashSet,
-  fs::{self, File, OpenOptions},
+  fs::{self, OpenOptions},
   io::Write,
   path::Path,
 };
@@ -333,11 +333,16 @@ impl SessionLog {
   }
 }
 
+#[cfg(not(windows))]
 fn sync_parent(path: &Path) -> Result<(), StoreError> {
-  #[cfg(not(windows))]
   if let Some(parent) = path.parent() {
-    File::open(parent)?.sync_all()?;
+    std::fs::File::open(parent)?.sync_all()?;
   }
+  Ok(())
+}
+
+#[cfg(windows)]
+fn sync_parent(_path: &Path) -> Result<(), StoreError> {
   Ok(())
 }
 
