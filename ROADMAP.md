@@ -721,9 +721,10 @@ Do not begin until stable baselines exist.
 
 ## Current priorities — plan of record
 
-> Reconstructed 2026-09-08 after the full merge of the open PR series into `main`
-> (492 to 806 tests). The prose list that lived here was never committed and did not
-> survive the merge; this section rebuilds it from the merged state, phase by phase.
+> Reconstructed 2026-09-19 after the full merge of the open PR series into `main` and
+> the Round 9 audit sign-off. The prose list that lived here was never committed and did
+> not survive the merge; this section rebuilds it from the merged state, phase by phase.
+> The current release target is `v0.2.0`.
 
 ### P0 — Next
 
@@ -765,9 +766,11 @@ Do not begin until stable baselines exist.
 
 ### P2 — Later / deliberately deferred
 
-- [ ] Windows CI matrix (macOS and Linux are gated).
+- [x] Windows CI matrix (hosted CI covers Ubuntu, macOS, and Windows; benchmark execution remains non-Windows only).
 - [ ] Telemetry, metrics, and analytics surfaces: deferred; privacy and scope decision.
-- [ ] GitHub Pages site.
+- [x] GitHub Pages site (mdBook source under `book/`, deployment workflow under
+      `.github/workflows/pages.yml`; hosted deployment remains subject to repository
+      Pages configuration).
 - [x] MCP server/worker mode (Phase 9): the typed `pi-rs-mcp::worker` adapter is implemented;
       provider/runtime composition remains explicit at its `WorkerEngine` boundary. The selected
       TypeScript extension host (Phase 8) is complete above.

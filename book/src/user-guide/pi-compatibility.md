@@ -1,6 +1,6 @@
 # Pi Ecosystem Compatibility
 
-`pi-rs` is designed as a clean Rust reimplementation with drop-in behavioral compatibility for the existing Pi ecosystem.
+`pi-rs` is a clean Rust reimplementation with an explicit, tested subset of behavioral compatibility for the Pi ecosystem. Compatibility is strongest for skills, prompts, package discovery, selected extension APIs, and session migration; unsupported surfaces are reported rather than silently ignored.
 
 ---
 
@@ -67,12 +67,12 @@ Reports supported features, unsupported runtime hooks, and migration advice.
 ### Import Pi Sessions
 Convert an upstream Pi session JSONL into the native `pi-rs` event store:
 ```bash
-pi-rs import ~/.pi/agent/sessions/2026-09-01-session.jsonl
+pi-rs import-pi ~/.pi/agent/sessions/2026-09-01-session.jsonl --config config.json --write
 ```
 Non-round-trippable attributes (such as proprietary client metadata) are surfaced explicitly as warnings on `stderr`.
 
 ### Export to Pi Format
 Export a `pi-rs` session back out to a standard Pi-compatible session file:
 ```bash
-pi-rs export <session-id> --output export.jsonl
+pi-rs export <session-id> --config config.json --out export.jsonl
 ```

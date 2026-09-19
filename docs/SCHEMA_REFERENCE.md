@@ -1,12 +1,12 @@
-# Schema reference: events, session records, provenance (historical snapshot: 2026-09-08)
+# Schema reference: events, session records, provenance
 
-> **Historical snapshot.** This document describes the schemas and producer inventory as
-> audited on 2026-09-08. Later runtime producers and compatibility work make some details
-> below stale; use [`archive/proposals/COMPACT_EVENT_AUDIT.md`](archive/proposals/COMPACT_EVENT_AUDIT.md),
-> [`docs/IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md), and the source for current
-> status.
+> **Current for v0.2.0 (2026-09-19).** This document describes the serialized schemas and
+> verified production boundaries from the audited mainline. Source remains authoritative
+> when a line reference changes; release-specific history belongs in `CHANGELOG.md` and
+> `docs/archive/`.
 
-It was written from `grep` output and `Read`, not from the slice spec's recollection. Where
+It was written from the repository's source and producer inventory, not from a slice
+spec's recollection. Where
 the slice spec (`docs/archive/slices/SLICE_SCHEMAS.md`) disagreed with the repository at that time, the
 repository won and the mismatch is recorded in place.
 
@@ -29,10 +29,9 @@ repository won and the mismatch is recorded in place.
   `pub(crate) mod testutil {`, so the cut cannot drop production code.
 * `tests/`, `bench/`, and `#[cfg(test)]` code are excluded from "production".
 
-**Historical-snapshot scope.** The original audit below predated the Phase 7 external
-context schema extension. No new event variant was needed, but `ExternalContextRetrieved`,
-`SessionMessage`, and their serde-defaulted metadata/reference fields now have verified
-producers. Use the source and the Phase 7 gate fixture for current details.
+**Current scope.** External context, compaction summaries/epochs, checkpoint barriers,
+WAL recovery, and redaction-aware session projections are included. The source and focused
+fixtures remain the final authority for fields and producer call sites.
 
 ## 1. Events
 
@@ -98,14 +97,9 @@ The sequencing contract, as the module states it (`event.rs:12-15`):
 
 ### 1.2 `AgentEvent` variants
 
-Enumerated with:
-
-```sh
-awk 'NR>=163 && NR<=281 && /^  [A-Z][A-Za-z0-9_]*\(/ {print NR": "$0}' \
-  crates/pi-rs-core/src/event.rs
-```
-
-22 variants. Wire tag is the snake_case variant name (`event.rs:162`).
+Enumerated from `crates/pi-rs-core/src/event.rs`, including the unit variant
+`ContextSummary`, the current `AgentEvent` has 24 variants. Wire tags are the
+snake_case variant names (`event.rs`).
 
 #### `session_started` — `AgentEvent::SessionStarted` (`event.rs:168`), payload `event.rs:284`
 
@@ -241,6 +235,19 @@ capsule; L3 checkpoint counts include that capsule.
 Producer: `TurnLoop::compact_range`/checkpoint paths; consumed at
 `crates/pi-rs-tui/src/transcript.rs:426`. See §1.4.
 
+#### `context_summary` — `AgentEvent::ContextSummary` (`event.rs`)
+
+Purpose: attributes the summary message that replaces a compacted range. The message is
+canonical session content, while the compaction epoch records how it becomes model-visible.
+Producer: runtime L1/L2 compaction paths.
+
+#### `context_compaction_epoch` — `AgentEvent::ContextCompactionEpoch` (`event.rs`)
+
+Purpose: records the context epoch, canonical sequence range replaced, summary identity,
+and retained model-visible projection. Replay uses this marker without deleting the
+underlying trace.
+Producer: runtime L1/L2 compaction paths.
+
 #### `checkpoint_created` — `AgentEvent::CheckpointCreated` (`event.rs:263`), payload `event.rs:472`
 
 Purpose: an episode checkpoint capsule was written.
@@ -326,12 +333,12 @@ mapping — using the code that actually produces it.
 
 ### 2.2 `SessionRecord` and its discriminant mapping
 
-`SessionRecord` is documented as *"One line of `session.jsonl`."*
-(`crates/pi-rs-core/src/session.rs:29`) and declared at `session.rs:32`:
+`SessionRecord` is documented as one line of `sessions/<id>.jsonl`
+(`crates/pi-rs-core/src/session.rs`) and declared in `session.rs`:
 
 ```rust
-/// One line of `session.jsonl`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] // session.rs:30
+/// One line of the semantic session JSONL log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] // session.rs
 #[serde(rename_all = "snake_case", tag = "type")]              // session.rs:31
 pub enum SessionRecord {                                        // session.rs:32
 ```
@@ -518,19 +525,18 @@ different from each other so that a reader cannot mistake inference for emitted 
 | Variant | `as_str()` | `label()` | Producers |
 |---|---|---|---|
 | `Native` | `native` | `reasoning` | yes — `crates/pi-rs-provider/src/decode.rs:100`, on a decoded reasoning delta |
-| `ProviderSummary` | `provider_summary` | `provider summary` | **none found in production.** Constructed only in tests (`crates/pi-rs-core/src/message.rs:189`, `crates/pi-rs-tui/src/transcript.rs:846`) |
-| `Declared` | `declared` | `declared rationale` | **none found.** Consumed at `crates/pi-rs-tui/src/transcript.rs:177` → `Role::ReasoningDeclared` |
-| `Reconstructed` | `reconstructed` | `reconstructed rationale` | **none found.** `crates/pi-rs-tui/src/style.rs:87` names the style role; `crates/pi-rs-tui/src/transcript.rs:1162` builds one in a test |
+| `ProviderSummary` | `provider_summary` | `provider summary` | yes — provider decode when `capabilities.exposed_reasoning` declares a provider summary |
+| `Declared` | `declared` | `declared rationale` | yes — provider decode when the endpoint declares `declared` exposure |
+| `Reconstructed` | `reconstructed` | `reconstructed rationale` | no automatic producer; reserved for evidence-scoped analysis and covered as a typed/rendered form |
 
 `is_inferred()` (line 64) is true for `Reconstructed` **only**: `matches!(self, Self::Reconstructed)`. Its doc
 comment is explicit that *"Declared counts as authored output, not as inference"* — the runtime asked for
 it, so a reader holds the model accountable for it, even though nobody watched it being produced.
 
-**Why the `none found` rows stay.** The renderer, the style roles, and the stored field all handle all
-four variants, so nothing fails when three are never produced — the schema is ready and the emitters are
-not. That is the same shape as issue #38, which found three compaction events with zero producers, and it
-is why this section records producers per variant instead of describing the enum in the abstract. The fix
-is a separate decision (emit them, or stop advertising them); this document does not make it.
+**Why the reserved row stays.** The renderer, style roles, and stored field handle all
+four variants, but `Reconstructed` is intentionally not produced by ordinary runtime or
+import paths. Keeping it typed prevents an analysis result from being mistaken for model
+emission; the release does not claim hidden chain-of-thought recovery.
 
 The rule this table exists to enforce, quoted rather than paraphrased (`AGENTS.md:30`–`31`):
 

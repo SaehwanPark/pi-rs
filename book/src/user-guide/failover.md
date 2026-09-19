@@ -30,5 +30,5 @@ If a backup fails to initialize, it fails at the exact moment of failover, clear
 Before switching traffic to a backup model, `pi-rs` compares the backup's declared capabilities against the current in-flight requirements:
 
 1. **Tool Calling Support**: If the session is actively executing tool calls, a backup model lacking function-calling capabilities is **refused immediately by name** before sending any prompt.
-2. **Context Window Reconciliation**: If the backup provider has a smaller context window than the primary, `pi-rs` allows failover but automatically invokes the context reduction engine, logging an explicit notification in the transcript describing the compaction.
+2. **Context Window Reconciliation**: If the backup provider has a smaller context window than the primary, `pi-rs` attempts a safe context rebudget and records whether history was shortened. If the active turn or an uncertain tool boundary cannot be crossed safely, failover is refused explicitly instead of sending an oversized or replayed request.
 3. **Modalities / Vision**: If the conversation relies on image inputs and the backup does not support vision, failover is rejected with a clear error rather than crashing the provider.

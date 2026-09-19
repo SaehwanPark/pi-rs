@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/SaehwanPark/pi-rs/actions/workflows/ci.yml"><img src="https://github.com/SaehwanPark/pi-rs/actions/workflows/ci.yml/badge.svg" alt="CI Status" /></a>
   <a href="https://saehwanpark.github.io/pi-rs/"><img src="https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg" alt="Documentation" /></a>
-  <a href="https://github.com/SaehwanPark/pi-rs/releases"><img src="https://img.shields.io/badge/release-v0.1.0-green.svg" alt="Release v0.1.0" /></a>
+  <a href="https://github.com/SaehwanPark/pi-rs/releases"><img src="https://img.shields.io/badge/release-v0.2.0-green.svg" alt="Release v0.2.0" /></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.85%2B%20(2024)-orange.svg" alt="Rust 1.85+" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-purple.svg" alt="License" /></a>
 </p>
@@ -16,7 +16,9 @@
 
 > **Minimal core. Compatible ecosystem. Observable execution. Honest provenance. Recoverable state.**
 
-`pi-rs` preserves the strengths and interaction ergonomics of [Pi](https://github.com/mariozechner/pi) while delivering a zero-dependency Rust runtime with typed event sourcing, honest reasoning provenance, deterministic replay, and sub-millisecond startup times.
+**Current release:** `v0.2.0` (2026-09-19). Round 9 of the durability and recovery audit accepted the audited `main` state with no remaining P0/P1 findings.
+
+`pi-rs` preserves the strengths and interaction ergonomics of [Pi](https://github.com/mariozechner/pi) while delivering a native Rust runtime with no required Node.js or Python runtime for standard tasks, typed event sourcing, honest reasoning provenance, deterministic replay, and low-latency startup.
 
 ---
 
@@ -41,10 +43,10 @@ Streamlined CLI execution with strict stdout/stderr separation and explicit prov
 - **Honest Provenance**: Distinct attribution for `[native reasoning]`, `[provider summary]`, `[declared]`, and `[reconstructed]` rationale. Hidden chain-of-thought is never falsely claimed.
 - **Append-Only Event Store & Replay**: Complete execution timeline stored in `trace.jsonl`; inspect sessions with `pi-rs trace` or replay deterministically with `pi-rs replay` without re-running tools.
 - **Workspace Confinement**: File tools reject traversal and outward-pointing symlink components under `--cwd`; mutating tools (`write`, `edit`, `exec`) require explicit configuration approval.
-- **Pi Ecosystem Compatibility**: Drop-in discovery for Pi skills, prompt templates, packages, and bidirectional session migration (`import`/`export`).
+- **Pi Ecosystem Compatibility**: Tested behavioral compatibility for Pi skills, prompt templates, packages, selected extensions, and bidirectional session migration (`import-pi`/`export`).
 - **Resilient Model Failover**: Pre-validated backup provider failover with capability checks (tools, modalities, context limits).
 - **Lazy MCP Integration**: Stdio Model Context Protocol client initialized on-demand without startup penalties.
-- **Sub-Millisecond Startup**: Cold startup <250 ms, warm startup <1 ms.
+- **Low-Latency Startup**: Startup budgets are <250 ms cold and <100 ms warm; optional subsystems stay lazy.
 
 ---
 
@@ -85,7 +87,9 @@ Works out of the box with local models (Ollama, vLLM) and OpenAI-compatible clou
     }
   ],
   "tools": {
-    "auto_approve_mutating": true
+    "auto_approve_mutating": false,
+    "shell_timeout_ms": 120000,
+    "max_output_bytes": 8192
   }
 }
 ```
@@ -108,30 +112,30 @@ pi-rs interactive --config config.json
 | :--- | :--- | :--- |
 | `run` | `pi-rs run --config <cfg> --cwd <dir> --prompt <txt>` | Run one durable coding-agent turn |
 | `interactive` | `pi-rs interactive --config <cfg>` | Start interactive multi-turn terminal UI |
-| `trace` | `pi-rs trace <session-id>` | Read chronological event log out of store |
-| `replay` | `pi-rs replay <session-id>` | Deterministically replay session without I/O |
+| `trace` | `pi-rs trace --config <cfg> [session-id]` | Read a chronological event log from the store |
+| `replay` | `pi-rs replay <trace-or-session.jsonl>` | Inspect recorded history without providers or tools |
 | `skills` | `pi-rs skills [--project]` | List skills offered to model |
 | `prompts` | `pi-rs prompts [--project]` | List discovered prompt templates |
 | `prompt` | `pi-rs prompt <name> [args...]` | Expand prompt template with parameters |
 | `packages` | `pi-rs packages` | List discovered Pi packages and surfaces |
-| `trust` | `pi-rs trust [list\|allow\|deny]` | Manage project-level trust decisions |
+| `trust` | `pi-rs trust --store <dir> --list\|--grant\|--deny\|--clear` | Manage explicit project trust decisions |
 | `compat` | `pi-rs compat <path>` | Audit package/directory for compatibility |
-| `import` | `pi-rs import <session.jsonl>` | Import Pi session with loss diagnostics |
-| `export` | `pi-rs export <session-id>` | Export session to Pi JSONL format |
+| `import-pi` | `pi-rs import-pi <session.jsonl> [--config <cfg>] [--write]` | Import a Pi session with loss diagnostics |
+| `export` | `pi-rs export <session-id> --config <cfg> [--out <path>]` | Export a session to Pi JSONL format |
 
 ---
 
-## Performance Baselines
+## Performance Budgets
 
-Enforced in CI via automated benchmark harnesses (`bench/`):
+The benchmark harnesses (`bench/`) enforce these targets where the host supports the measurement:
 
-| Operation | Target Budget | Measured CI Baseline |
+| Operation | Target Budget | Release evidence |
 | :--- | :---: | :---: |
-| **Warm Startup** (to interactive) | < 100 ms | **0.35 ms** |
-| **Cold Startup** (fresh binary inode) | < 250 ms | **0.80 ms** |
-| **Keystroke / Render Latency** | < 16 ms (60 FPS) | **< 2.0 ms** |
-| **Slash-Command Completion** | < 50 ms | **< 1.0 ms** |
-| **Session Metadata Lookup** | < 50 ms | **< 3.0 ms** |
+| **Warm Startup** (to interactive) | < 100 ms | Verified by `bench/startup.sh` in release validation |
+| **Cold Startup** (fresh binary inode) | < 250 ms | Verified by `bench/startup.sh --cold` when the host supports it |
+| **Keystroke / Render Latency** | < 16 ms (60 FPS) | Verified by `bench/keystroke.sh` and `bench/render.sh` |
+| **Slash-Command Completion** | < 50 ms | Included in the keystroke benchmark |
+| **Session Metadata Lookup** | < 50 ms | Covered by restore benchmarks |
 
 ---
 

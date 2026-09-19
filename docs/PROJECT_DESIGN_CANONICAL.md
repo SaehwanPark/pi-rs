@@ -858,8 +858,9 @@ MCP should be a first-party interoperability subsystem.
 
 MCP capabilities should normalize into the same internal tool abstraction used by native tools and extensions.
 The client supports lazy stdio and bounded Streamable HTTP POST activation: JSON or matching
-response-SSE, session-id propagation, bounded bodies, and JSON-RPC id validation. Long-lived
-server push and cancellation-aware network reads remain optional future work.
+response-SSE, session-id propagation, bounded bodies, and JSON-RPC id validation. One-shot
+HTTP calls use bounded, cancellation-aware local relays with fail-closed interruption;
+long-lived server push remains an optional future capability.
 
 Conceptually:
 

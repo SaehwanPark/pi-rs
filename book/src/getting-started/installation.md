@@ -1,6 +1,6 @@
 # Installation
 
-`pi-rs` is built in Rust using stable toolchains. It has zero required external runtime dependencies for core agent operations (no Node.js or Python required for standard tasks).
+`pi-rs` is built in Rust using stable toolchains. Standard agent operations require no Node.js or Python runtime; those are optional integrations.
 
 ---
 
@@ -41,14 +41,14 @@ pi-rs --help
 
 ## Prebuilt Binaries (GitHub Releases)
 
-Precompiled binaries for Linux (x86_64, aarch64) and macOS (Apple Silicon, Intel) are published with every tagged release on GitHub:
+Release artifacts are published on GitHub when available. Check the release notes for the supported target, or build from source for another platform:
 
 👉 **[Download from GitHub Releases](https://github.com/SaehwanPark/pi-rs/releases)**
 
 After downloading:
 
 ```bash
-tar -xzf pi-rs-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf pi-rs-v0.2.0-x86_64-unknown-linux-gnu.tar.gz
 chmod +x pi-rs
 sudo mv pi-rs /usr/local/bin/
 ```
@@ -57,5 +57,5 @@ sudo mv pi-rs /usr/local/bin/
 
 ## Optional Subsystems
 
-- **Node.js (v20+)**: Required only if you intend to execute complex JavaScript/TypeScript Pi extensions via the optional extension host.
+- **Node.js (v22.6+)**: Required only if you intend to execute JavaScript/TypeScript Pi extensions via the optional extension host. The host is not started for ordinary sessions.
 - **MCP Servers**: Any standard Model Context Protocol server communicating over stdio.

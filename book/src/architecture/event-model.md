@@ -1,36 +1,63 @@
 # Typed Event Model
 
-Execution in `pi-rs` is recorded as a continuous stream of strongly typed events defined by the `AgentEvent` enum in `crates/pi-rs-core/src/event.rs`.
+Execution in `pi-rs` is recorded as a continuous stream of strongly typed events defined
+by the `AgentEvent` enum in `crates/pi-rs-core/src/event.rs`. The durable journal wraps
+each event in an envelope containing session/turn identity, sequence ordering, model
+attribution, and trace/span ids.
 
----
+## Event categories
 
-## Event Categories
+The current event vocabulary is:
 
-Every runtime occurrence falls into one of these canonical families:
+### Session and turn lifecycle
 
-### 1. Session Lifecycle
-- `SessionStarted`: Emitted when a session begins, capturing session ID, active model name, and initial provenance capability.
-- `SessionEnded`: Normal or abnormal session termination.
-- `TurnStarted` / `TurnCompleted`: Demarcates an autonomous turn boundary.
+- `SessionStarted`: establishes the session and initial model epoch.
+- `UserMessage`: records accepted user input in canonical history.
+- `TurnCompleted`: closes a turn as completed, cancelled, or failed.
+- `SessionEnded`: records why the session closed.
+- `Diagnostic`: records an operator-visible condition without pretending it is assistant text.
 
-### 2. Model & Generation
-- `ModelRequested`: Outgoing prompt parameters, temperature, max tokens.
-- `ModelDelta`: Streamed content chunk containing assistant prose.
-- `ReasoningDelta`: Streamed thinking chunk with tagged `ProvenanceKind`.
-- `ModelCompleted`: Completion metadata, token usage, latency metrics.
+### Model requests and recovery
 
-### 3. Tool Lifecycle
-Every tool execution produces four explicit events:
-1. `ToolRequested`: Model generated a call request with arguments.
-2. `ToolStarted`: Local runtime verified confinement and initiated execution.
-3. `ToolCompleted`: Tool returned successfully with output payload.
-4. `ToolFailed`: Execution failed or was refused (e.g. mutating action disallowed).
+- `ModelRequestStarted`: opens a provider request span.
+- `ReasoningDelta`: records reasoning-like text with explicit provenance.
+- `AssistantDelta`: records streamed assistant prose.
+- `ModelRequestCompleted`: closes the request with usage, finish, and attribution data.
+- `ModelRetry`: records a bounded retry against the same model.
+- `ModelFailover`: records an availability-driven transition to a backup model.
+- `ModelEpochStarted`: snapshots the model, provider, capabilities, and epoch reason.
 
-### 4. Context & Compaction
-- `ContextCompacted`: Context window reached threshold; working set was pruned or summarized while preserving the underlying canonical trace.
-- `CheckpointSaved`: Semantic snapshot recorded for fast session resumption.
+### Tool lifecycle
 
-### 5. Failover & Recovery
-- `FailoverAttempted`: Primary model encountered an error; evaluating backup capability.
-- `FailoverSucceeded`: Backup model took over active processing.
-- `ModelEpochSwitched`: Monotonically increasing epoch number incremented, binding subsequent turns to the new provider.
+A decoded tool call progresses through explicit states rather than an implicit
+success/failure assumption:
+
+1. `ToolRequested` — the model supplied a stable call id, name, and arguments.
+2. `ToolStarted` — execution crossed the observed start boundary.
+3. `ToolCompleted` — a result was committed; output may reference a bounded blob.
+4. `ToolFailed` — execution ended with an observed error or refusal.
+5. `ToolUnknown` — completion could not be observed. This is not a failure and is a
+   reconciliation barrier for mutating operations.
+
+### Context and external evidence
+
+- `ExternalContextRetrieved`: records cited external context and its provenance.
+- `ContextReduced`: records bounded model-visible payload reduction while preserving
+  canonical evidence.
+- `ContextCompactionStarted`: opens an L1/L2 compaction at a safe boundary.
+- `ContextSummary`: attributes the summary message that replaces a compacted range.
+- `ContextCompactionEpoch`: records the canonical range and model-visible replacement.
+- `ContextCompactionCompleted`: closes L1/L2 compaction and records retained counts.
+- `CheckpointCreated`: records a durable L3 structured capsule and checkpoint barrier.
+
+## Ordering and replay
+
+The store assigns monotonically increasing `seq` values when events are appended.
+Timestamps support human-facing timelines but do not define order. Replay consumes the
+same canonical events without starting a provider or executing a recorded tool. Context
+compaction changes only the model-visible projection; it never deletes canonical trace
+records.
+
+Every event retains the provenance and model epoch that produced it. The renderer may
+hide routine events by default, but a quiet transcript does not mean the event was not
+recorded.

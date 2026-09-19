@@ -1,8 +1,9 @@
 # Introduction to pi-rs
 
-`pi-rs` is a minimal, Pi-inspired coding-agent runtime implemented in Rust.
+`pi-rs` is a minimal, Pi-inspired coding-agent runtime implemented in Rust. The
+current public release is **v0.2.0 (2026-09-19)**.
 
-It delivers a fast, trustworthy runtime for autonomous software development that preserves the interaction ergonomics of Pi while establishing rigorous architectural boundaries for provenance, determinism, and performance.
+It delivers a fast, trustworthy runtime for coding-agent sessions that preserves the interaction ergonomics of Pi while establishing rigorous architectural boundaries for provenance, determinism, and performance.
 
 ---
 
@@ -10,7 +11,7 @@ It delivers a fast, trustworthy runtime for autonomous software development that
 
 > **Minimal core. Compatible ecosystem. Observable execution. Honest provenance. Recoverable state.**
 
-The project is a **clean reimplementation**, not a mechanical translation or fork. Rust is the implementation substrate, delivering predictable zero-cost abstractions, thread safety, and sub-millisecond startup times.
+The project is a **clean reimplementation**, not a mechanical translation or fork. Rust is the implementation substrate, delivering predictable abstractions, thread safety, and measured low-latency startup.
 
 ---
 
@@ -21,7 +22,7 @@ The project is a **clean reimplementation**, not a mechanical translation or for
 - **Honest provenance**: Never conflate raw model reasoning, provider-synthesized summaries, declared rationale, or reconstructed explanations. Never claim hidden chain-of-thought was recovered unless truly exposed.
 - **Single-model execution**: Exactly one model is active in normal operation; backup models are reserved strictly for fault recovery.
 - **Explicit mutating state**: Uncertain mutating operations (`write`, `edit`, `exec`) remain explicitly flagged and are never silently or blindly replayed.
-- **Instant before complete**: Subsystems such as MCP, Node extension hosts, and deep session hydration initialize lazily to guarantee startup latency under 1 ms warm and under 250 ms cold.
+- **Instant before complete**: Subsystems such as MCP, Node extension hosts, and deep session hydration initialize lazily to target startup budgets under 100 ms warm and under 250 ms cold.
 
 ---
 
@@ -32,10 +33,10 @@ The project is a **clean reimplementation**, not a mechanical translation or for
 | **Interactive TUI** | Keyboard-first terminal UI with multi-line editor, real-time streaming, and semantic statusline. |
 | **One-Shot CLI** | Headless runner (`pi-rs run`) streaming output directly to stdout/stderr with strict workspace confinement. |
 | **Deterministic Replay** | Replay any historical session identically without re-querying providers or re-executing mutating tools. |
-| **Pi Compatibility** | Drop-in discovery for Pi skills, prompt templates, packages, and bidirectional session import/export. |
+| **Pi Compatibility** | Tested behavioral support for Pi skills, prompt templates, packages, selected extensions, and session import/export. |
 | **Model Failover** | Automatic fallback to backup models with capability validation (tools, modalities, context limits). |
 | **MCP Integration** | Model Context Protocol client with lazy stdio initialization. |
-| **Sub-Millisecond Startup** | Cold startup <250 ms, warm startup <1 ms. |
+| **Low-Latency Startup** | Cold startup <250 ms, warm startup <100 ms budget. |
 
 ---
 

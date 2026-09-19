@@ -6,11 +6,13 @@ A foundational principle of `pi-rs` is **honest observability**: every event tha
 
 ## Canonical Trace Storage
 
-Sessions are written under the configured `state_dir` (default: `.pi-rs-state/sessions/`):
+Sessions are written under the configured `state_dir` (for example, `.pi-rs-state/`):
 
-- **`session.json`**: Session metadata (ID, timestamp, active model, token statistics).
-- **`trace.jsonl`**: Append-only sequence of `AgentEvent` JSON objects.
-- **`blobs/`**: Compressed storage for large tool inputs, outputs, and external context references.
+- **`sessions/<id>.jsonl`**: Semantic session messages used for resume.
+- **`sessions/<id>.trace.jsonl`**: Append-only canonical `AgentEvent` journal.
+- **`sessions/<id>.wal.jsonl`**: Crash-recovery projection intents; incomplete intents fail closed until repaired.
+- **`sessions/<id>/blobs/`**: Content-addressed storage for large, redacted payloads.
+- **`sessions/<id>/checkpoints/`**: Structured context capsules for reviewed reset/resume.
 
 Unlike systems where session logs are reconstructed by summarizing chat history, `pi-rs` preserves the canonical runtime trace separately from model-visible context.
 
@@ -21,7 +23,7 @@ Unlike systems where session logs are reconstructed by summarizing chat history,
 View the chronological, formatted log of events for any session:
 
 ```bash
-pi-rs trace <session-id>
+pi-rs trace --config config.json <session-id>
 ```
 
 Output includes:
@@ -38,7 +40,7 @@ Output includes:
 To inspect and verify past execution without making network calls or mutating disk files:
 
 ```bash
-pi-rs replay <session-id>
+pi-rs replay .pi-rs-state/sessions/<session-id>.trace.jsonl
 ```
 
 ![pi-rs Trace & Replay](../assets/screenshots/trace-replay.png)
@@ -59,4 +61,7 @@ To continue a previous conversation without losing conversational context:
 pi-rs run --config config.json --cwd . --resume <session-id-or-prefix> --prompt "Refactor the function we just wrote"
 ```
 
-The runtime resolves the session ID prefix, restores the context engine state, computes working context, and initiates the next turn.
+The runtime resolves the session ID prefix, restores the latest durable projection and
+checkpoint barrier when present, computes model-visible working context, and initiates
+the next turn. Historical trace remains available without being injected wholesale into
+the prompt.

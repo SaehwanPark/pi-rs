@@ -332,7 +332,7 @@ fidelity matrix and design invariants.
 Summary of metadata that cannot round-trip between Pi and `pi-rs`:
 
 1. **Reasoning provenance**: `pi-rs` models 4 distinct provenance tiers (`Native`, `ProviderSummary`,
-   `DeclaredRationale`, `ReconstructedRationale`). Pi has untyped `thinking` blocks with no
+   `Declared`, `Reconstructed`). Pi has untyped `thinking` blocks with no
    provenance concept. Export reports dropped provenance on stderr; import never invents native
    provenance for unlabelled foreign thinking.
 2. **Multi-branch DAGs vs linear turns**: Pi records branching trees (`id`/`parentId`). `pi-rs`
@@ -390,8 +390,9 @@ Provider normalization should preserve:
 
 MCP version handling should remain isolated in the MCP adapter. Stdio and the bounded
 Streamable HTTP transport are supported; HTTP responses are JSON or matching-response SSE,
-with session headers and bounded bodies. Long-lived server push and cancellation-aware HTTP
-reads remain deferred.
+with session headers and bounded bodies. One-shot HTTP calls run behind a cancellation-aware
+local relay with bounded resolution and fail-closed interruption; long-lived server push
+remains deferred.
 
 Requirements:
 

@@ -9,8 +9,8 @@ non-round-trippable metadata.
 
 ## 1. Design Principles
 
-1. **Stronger Internal Model**: `pi-rs` maintains a rigorous internal event log (`trace.jsonl`)
-   and conversation message journal (`messages.jsonl`). We never weaken internal provenance,
+1. **Stronger Internal Model**: `pi-rs` maintains a rigorous internal event log
+   (`sessions/<id>.trace.jsonl`) and semantic session journal (`sessions/<id>.jsonl`). We never weaken internal provenance,
    typed tool execution states, or crash-safety invariants to match foreign serialization quirks.
 2. **Replay Safety**: An import never executes anything. A foreign tool result records work
    already performed; `pi-rs` files it as historical record without re-execution.
@@ -25,10 +25,10 @@ non-round-trippable metadata.
 
 | Aspect | Pi Session JSONL | `pi-rs` Session Store |
 |---|---|---|
-| **Storage Shape** | Single flat `.jsonl` file | Dual store: `trace.jsonl` (events) + `messages.jsonl` (turns) + `blobs/` |
+| **Storage Shape** | Single flat `.jsonl` file | Semantic `sessions/<id>.jsonl` + canonical `sessions/<id>.trace.jsonl` + WAL, checkpoints, and per-session blobs |
 | **History Topology** | Directed entry tree (`id` / `parentId` links) | Linear conversation turn sequence + append-only trace log |
 | **Tool Execution** | Content blocks in assistant messages + `toolResult` messages | 5-state lifecycle: `Requested`, `Started`, `Completed`, `Failed`, `Unknown` |
-| **Reasoning** | Untyped `thinking` blocks | 4-tier typed provenance: `Native`, `ProviderSummary`, `DeclaredRationale`, `ReconstructedRationale` |
+| **Reasoning** | Untyped `thinking` blocks | 4-tier typed provenance: `Native`, `ProviderSummary`, `Declared`, `Reconstructed` |
 | **Large Payloads** | Stored inline or truncated with notice | Content-addressed blob store (`blobs/sha256/...`) above inline threshold (8 KiB) |
 | **Model Attribution** | Per-entry optional `provider`/`model` | Model epochs (`ModelEpochStarted`), explicit failovers, per-envelope attribution |
 | **Safety & Privacy** | Stored as emitted | Durable redaction tracking (`redactions` count per line, secret masking) |
@@ -68,7 +68,7 @@ store.
 
 ## 4. `pi-rs` -> Pi (`pi-rs export`)
 
-`pi-rs export <session-id> [--out <path>]` exports a `pi-rs` session in Pi's JSONL format.
+`pi-rs export <session-id> --config <file> [--out <path>]` exports a `pi-rs` session in Pi's JSONL format.
 
 ### 4.1 Mapped Fields
 
@@ -81,7 +81,7 @@ store.
 
 | `pi-rs` Subsystem | Metadata Dropped on Export | Rationale & Surfacing |
 |---|---|---|
-| **Reasoning Provenance** | 4-tier provenance (`Native`, `ProviderSummary`, `DeclaredRationale`, `ReconstructedRationale`) | Pi has thinking blocks but no provenance field. Emits stderr warning: `dropped: reasoning (<provenance>): <chars> chars in <chunks> chunk(s)`. |
+| **Reasoning Provenance** | 4-tier provenance (`Native`, `ProviderSummary`, `Declared`, `Reconstructed`) | Pi has thinking blocks but no provenance field. Emits stderr warning: `dropped: reasoning (<provenance>): <chars> chars in <chunks> chunk(s)`. |
 | **Tool Execution Lifecycle** | Intermediate states (`ToolStarted`, `ToolUnknown`, `ToolFailed`), duration, and `read_only` invariants | Pi records only user/assistant/toolResult messages. Tool lifecycle detail remains in `trace.jsonl`. Emits stderr count. |
 | **Model Epochs & Failovers** | `ModelEpochStarted`, `ModelFailover` reasons (timeout, rate limit, quota, context overflow), capability sets | Pi has only string `model` fields. Epoch boundaries and failover rationales stay in `trace.jsonl`. Emits stderr count. |
 | **Blob Store References** | Content-addressed `blobs/sha256/...` paths and typed `ExternalizedField` records | Pi files do not support external content-addressed blob stores. The inline preview string is exported. |

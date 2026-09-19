@@ -6,12 +6,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.0] - 2026-09-19
+
+`v0.2.0` packages the audited mainline after the Round 9 sign-off. The audit cycle
+closed with no remaining P0 or P1 findings; the release focuses on crash recovery,
+bounded transports, conservative tool state, and clearer public documentation.
+
+### Added
+
+- Durable audit evidence for the completed Round 9 review.
+- Conservative recovery across session leases, legacy-store migration, checkpoint
+  projections, and model-visible message reconstruction.
+- Explicit replay and resume boundaries for externalized payloads and uncertain tool
+  calls, preserving `Unknown` rather than guessing that a mutating operation failed or
+  succeeded.
+- Bounded and cancellable provider/MCP relay behavior, including bounded DNS worker
+  capacity and fail-closed handling for interrupted requests.
+
+### Fixed
+
+- Closed interrupted tool-failure transactions so the projection WAL cannot remain open
+  after a decoded but unexecuted call.
+- Preserved exact tool-request identities and parentage through failed provider streams
+  and immediate session restore.
+- Hardened filesystem, redaction, output-bound, cancellation, and Windows portability
+  paths covered by the audit rounds.
+
+### Documentation
+
+- Updated the workspace and lockfile to version `0.2.0`.
+- Refreshed the README, mdBook guides, CLI examples, compatibility notes, and release
+  documentation for the current command and configuration surfaces.
+
 ## [0.1.0] - 2026-09-15
 
 ### Added
 
 #### Core Runtime & Presentation
-- **Interactive TUI (`pi-rs interactive`)**: High-performance terminal user interface powered by `ratatui` and `crossterm`, featuring a multi-line editing buffer, ANSI-clean line rendering, live stream display, and real-time statusline.
+- **Interactive TUI (`pi-rs interactive`)**: High-performance terminal user interface with a terminal-native semantic renderer and `crossterm`, featuring a multi-line editing buffer, ANSI-clean line rendering, live stream display, and real-time statusline.
 - **One-Shot Runner (`pi-rs run`)**: Headless command-line runner with strict stream separation (assistant answer on `stdout`; provenance, tool lifecycle, and diagnostics on `stderr`).
 - **Workspace Confinement**: Strict realpath confinement to `--cwd` for built-in file operations (`read`, `write`, `edit`). Mutating operations require explicit `auto_approve_mutating` configuration.
 - **Durable Event Store**: Append-only event logging (`trace.jsonl`), session index, and blob storage under `.pi-rs-state`.
@@ -31,7 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resilient primary/backup failover with pre-flight capability matching (tools, modalities, context limits) and lazy adapter initialization.
 
 #### Pi Ecosystem Compatibility
-- **Skills (`pi-rs skills`)**: Drop-in discovery for user (`~/.pi/agent/skills`, `~/.agents/skills`) and project-level skills (`.pi/skills`, `.agents/skills`) guarded by explicit `--project` trust checks.
+- **Skills (`pi-rs skills`)**: Behavioral-compatible discovery for user (`~/.pi/agent/skills`, `~/.agents/skills`) and project-level skills (`.pi/skills`, `.agents/skills`) guarded by explicit `--project` trust checks.
 - **Prompt Templates (`pi-rs prompts`, `pi-rs prompt`)**: Template discovery and positional argument expansion (`$1`, `$@`, `${1:-default}`).
 - **Packages (`pi-rs packages`)**: Manifest discovery and local package installation.
 - **Session Migration (`pi-rs import`, `pi-rs export`)**: Loss-diagnostic bidirectional migration between `pi-rs` store and Pi JSONL formats.
@@ -40,7 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Integrations & Latency
 - **Model Context Protocol (MCP)**: Lazy stdio client architecture initializing servers on demand.
-- **Verified Latency Baselines**: Warm startup < 1 ms (measured 0.35 ms), cold startup < 250 ms (measured 0.80 ms), keystroke latency < 16 ms (measured < 2 ms).
+- **Verified v0.1.0 latency evidence**: Warm startup was measured at 0.35 ms, cold startup at 0.80 ms, and keystroke latency below 2 ms on the release host; current budgets and evidence commands are documented in the v0.2.0 guide.
 
 #### Documentation & Public Site
 - Comprehensive public documentation deployed via mdBook on GitHub Pages.
