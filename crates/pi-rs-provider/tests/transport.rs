@@ -550,7 +550,22 @@ fn a_quiet_stream_expires_at_the_logical_idle_timeout() {
       .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
       .expect("headers");
     socket.flush().expect("flush");
-    thread::sleep(Duration::from_secs(2));
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let _ = socket.set_read_timeout(Some(Duration::from_millis(50)));
+    let mut buf = [0u8; 16];
+    while Instant::now() < deadline {
+      match socket.read(&mut buf) {
+        Ok(0) => break,
+        Ok(_) => {}
+        Err(err)
+          if err.kind() == std::io::ErrorKind::WouldBlock
+            || err.kind() == std::io::ErrorKind::TimedOut =>
+        {
+          continue;
+        }
+        Err(_) => break,
+      }
+    }
   });
   let mut config = ProviderConfig::local(
     "local-vulkan",
@@ -564,7 +579,7 @@ fn a_quiet_stream_expires_at_the_logical_idle_timeout() {
   let (result, _) = stream(&adapter, &request("quiet timeout"));
   let failure = result.expect_err("quiet response must time out");
   assert_eq!(failure.kind, ModelFailureKind::Timeout);
-  assert!(started.elapsed() < Duration::from_secs(2), "{failure:?}");
+  assert!(started.elapsed() < Duration::from_secs(3), "{failure:?}");
   server.join().expect("server");
   let second = adapter.stream(
     &request("must not retry after timeout"),

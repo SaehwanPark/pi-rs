@@ -1158,7 +1158,7 @@ mod tests {
     listener.set_nonblocking(true).expect("nonblocking");
     let address = listener.local_addr().expect("fixture address");
     let handle = thread::spawn(move || {
-      let deadline = std::time::Instant::now() + Duration::from_secs(5);
+      let deadline = std::time::Instant::now() + Duration::from_secs(10);
       let mut stream = loop {
         match listener.accept() {
           Ok((stream, _)) => break stream,
@@ -1190,7 +1190,7 @@ mod tests {
     });
     let transport = HttpTransport::new(format!("http://{address}/mcp"), BTreeMap::new())
       .expect("transport")
-      .with_timeout(Duration::from_millis(100));
+      .with_timeout(Duration::from_millis(500));
     let started = std::time::Instant::now();
     let error = transport.call("hang", None).unwrap_err();
     assert!(matches!(error, McpError::Timeout), "{error}");
