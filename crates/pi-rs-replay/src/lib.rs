@@ -1670,6 +1670,9 @@ mod tests {
         summary_present: false,
         replaces_from: None,
         replaces_through: None,
+        aborted: false,
+        start_event_id: None,
+        summary_event_id: None,
       }),
       session_message(5, Role::User, Message::user("tail")),
     ];

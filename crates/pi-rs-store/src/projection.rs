@@ -22,7 +22,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
   StoreError,
-  jsonl::{LineWriter, read_jsonl_with_limits},
+  jsonl::{LineWriter, read_jsonl_with_limits, recover_append_tail},
 };
 
 /// Maximum serialized size of one WAL line.
@@ -175,6 +175,7 @@ impl ProjectionWal {
   }
 
   pub fn open(path: &Path, redaction: RedactionPolicy) -> Result<Self, StoreError> {
+    recover_append_tail(path)?;
     // A malformed WAL line is not treated like a cosmetic trace delta. It may
     // hide an intent that must be reconciled, so reopening fails closed.
     let _ = Self::read_pending(path)?;

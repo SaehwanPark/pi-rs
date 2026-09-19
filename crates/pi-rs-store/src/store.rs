@@ -908,13 +908,66 @@ impl Session {
       .append(&SessionRecord::CheckpointBarrier(record.clone()))
   }
 
+  /// Materialize a checkpoint barrier whose WAL projection was interrupted.
+  ///
+  /// The barrier is safe to finish before the L3 completion is synthesized: the
+  /// capsule file and canonical `CheckpointCreated` event are already durable,
+  /// and the barrier is what proves the file belongs to this session.
+  fn recover_pending_checkpoint_barriers(
+    &mut self,
+    trace: &[pi_rs_core::TraceEntry],
+    records: &mut Vec<SessionRecord>,
+  ) -> Result<(), StoreError> {
+    for intent in self.wal.pending()? {
+      let Some(trace_entry) = trace
+        .iter()
+        .find(|entry| entry.envelope.meta.event_id == intent.envelope.event_id)
+      else {
+        continue;
+      };
+      if !matches!(trace_entry.envelope.event, AgentEvent::CheckpointCreated(_)) {
+        continue;
+      }
+      let record = match intent.record {
+        Some(record) => record,
+        None => recover_projection_record(trace_entry, trace, records, self)?.ok_or_else(|| {
+          StoreError::Invalid(format!(
+            "session {} checkpoint event has no recoverable barrier projection",
+            self.id()
+          ))
+        })?,
+      };
+      let SessionRecord::CheckpointBarrier(barrier) = record else {
+        return Err(StoreError::Invalid(format!(
+          "session {} checkpoint event has a non-barrier projection",
+          self.id()
+        )));
+      };
+      if !records.iter().any(|candidate| {
+        matches!(
+          candidate,
+          SessionRecord::CheckpointBarrier(existing)
+            if existing.checkpoint_id == barrier.checkpoint_id
+        )
+      }) {
+        self
+          .log
+          .append(&SessionRecord::CheckpointBarrier(barrier.clone()))?;
+        records.push(SessionRecord::CheckpointBarrier(barrier));
+      }
+      self.wal.commit(&intent.tx_id)?;
+    }
+    Ok(())
+  }
+
   /// Reconcile uncommitted trace/session projection intents before a resumed
   /// runtime is allowed to issue a provider request.
   fn recover_projection(&mut self) -> Result<(), StoreError> {
-    let pending = self.wal.pending()?;
-    if pending.is_empty() {
-      return Ok(());
-    }
+    // Recovery may need to repair a lifecycle even when its final WAL intent
+    // was already committed: a checkpoint barrier is durable before its L3
+    // completion, and an interrupted L1/L2 summary can have committed its own
+    // message projection before the held start intent. Inspect canonical state
+    // before deciding that there is no WAL work left.
     let trace_report = TraceJournal::read(self.trace_path())?;
     if trace_report.malformed > 0 {
       return Err(StoreError::Invalid(format!(
@@ -925,11 +978,41 @@ impl Session {
     }
     validate_trace_integrity(&trace_report.items, self.id())?;
     inspect_model_request_lifecycles(&trace_report.items, self.id())?;
+    let mut records = SessionLog::read(self.path())?.items;
+    self.recover_pending_checkpoint_barriers(&trace_report.items, &mut records)?;
+    records = SessionLog::read(self.path())?.items;
+    recover_incomplete_compactions(self, &trace_report.items, &mut records)?;
+
+    let trace_report = TraceJournal::read(self.trace_path())?;
+    if trace_report.malformed > 0 {
+      return Err(StoreError::Invalid(format!(
+        "session {} trace contains {} malformed line(s); projection recovery is unsafe",
+        self.id(),
+        trace_report.malformed
+      )));
+    }
+    validate_trace_integrity(&trace_report.items, self.id())?;
+    records = SessionLog::read(self.path())?.items;
+    recover_incomplete_checkpoints(self, &trace_report.items, &records)?;
+
+    let trace_report = TraceJournal::read(self.trace_path())?;
+    if trace_report.malformed > 0 {
+      return Err(StoreError::Invalid(format!(
+        "session {} trace contains {} malformed line(s); projection recovery is unsafe",
+        self.id(),
+        trace_report.malformed
+      )));
+    }
+    validate_trace_integrity(&trace_report.items, self.id())?;
     validate_compaction_lifecycles(&trace_report.items, self.id())?;
     validate_checkpoint_lifecycles(&trace_report.items, self.id())?;
     let trace = trace_report.items;
-    let mut records = SessionLog::read(self.path())?.items;
-    let mut pending = pending;
+    records = SessionLog::read(self.path())?.items;
+    let aborted_events = aborted_compaction_event_ids(&trace);
+    let mut pending = self.wal.pending()?;
+    if pending.is_empty() {
+      return Ok(());
+    }
     pending.sort_by_key(|intent| {
       trace
         .iter()
@@ -960,6 +1043,15 @@ impl Session {
         continue;
       };
 
+      // A staged summary/epoch from an aborted L1/L2 compaction is canonical
+      // evidence but not model-visible state. Its message projection may have
+      // been interrupted at any point, so close the intent without attempting
+      // to reconstruct or append the discarded summary.
+      if aborted_events.contains(&trace_entry.envelope.meta.event_id) {
+        self.wal.commit(&intent.tx_id)?;
+        continue;
+      }
+
       if matches!(
         &intent.envelope.kind,
         crate::projection::WalEventKind::ContextCompactionStarted
@@ -977,7 +1069,10 @@ impl Session {
                 if completed.level != pi_rs_core::ContextLevel::L3Checkpoint
             )
         });
-        if !completed {
+        let aborted = trace
+          .iter()
+          .any(|entry| is_compaction_abort(entry, &trace_entry.envelope.meta.event_id));
+        if !completed && !aborted {
           return Err(StoreError::Invalid(format!(
             "session {} has an incomplete context-compaction lifecycle; resume requires recovery",
             self.id()
@@ -1286,6 +1381,465 @@ impl Session {
   pub fn finish(mut self) -> Result<(), StoreError> {
     self.flush()
   }
+}
+
+const COMPACTION_ABORT_PREFIX: &str = "recovered aborted context compaction ";
+
+fn compaction_abort_message(start: &EventId) -> String {
+  format!("{COMPACTION_ABORT_PREFIX}{start}; staged summary was not published")
+}
+
+fn is_compaction_abort(entry: &pi_rs_core::TraceEntry, start: &EventId) -> bool {
+  entry.envelope.meta.parent_event_id.as_ref() == Some(start)
+    && matches!(
+      &entry.envelope.event,
+      AgentEvent::Diagnostic(diagnostic)
+        if diagnostic.message == compaction_abort_message(start)
+    )
+}
+
+fn find_incomplete_compactions(
+  entries: &[pi_rs_core::TraceEntry],
+  session: &SessionId,
+) -> Result<Vec<(pi_rs_core::TraceEntry, Option<EventId>)>, StoreError> {
+  let mut open: Option<usize> = None;
+  let mut incomplete = Vec::new();
+  for (index, entry) in entries.iter().enumerate() {
+    match &entry.envelope.event {
+      AgentEvent::ContextCompactionStarted(started) => {
+        if !matches!(
+          started.level,
+          pi_rs_core::ContextLevel::L1Ordinary | pi_rs_core::ContextLevel::L2Phase
+        ) || open.is_some()
+        {
+          return Err(StoreError::Invalid(format!(
+            "session {session} has an ambiguous context-compaction lifecycle; resume requires recovery"
+          )));
+        }
+        open = Some(index);
+      }
+      AgentEvent::ContextCompactionCompleted(completed)
+        if completed.level != pi_rs_core::ContextLevel::L3Checkpoint =>
+      {
+        let Some(start_index) = open.take() else {
+          return Err(StoreError::Invalid(format!(
+            "session {session} has a compaction completion without a matching start; resume requires recovery"
+          )));
+        };
+        let AgentEvent::ContextCompactionStarted(started) = &entries[start_index].envelope.event
+        else {
+          unreachable!("open compaction always points to a start event")
+        };
+        if started.level != completed.level
+          || entries[start_index].envelope.meta.turn_id != entry.envelope.meta.turn_id
+        {
+          return Err(StoreError::Invalid(format!(
+            "session {session} compaction completion does not match its start; resume requires recovery"
+          )));
+        }
+      }
+      AgentEvent::Diagnostic(_) if open.is_some() => {
+        let start_index = open.expect("checked above");
+        let start_id = &entries[start_index].envelope.meta.event_id;
+        if is_compaction_abort(entry, start_id) {
+          open = None;
+        }
+      }
+      _ => {}
+    }
+  }
+
+  if let Some(start_index) = open {
+    let start = entries[start_index].clone();
+    let summary_ids: Vec<EventId> = entries
+      .iter()
+      .skip(start_index + 1)
+      .filter(|entry| {
+        entry.envelope.meta.turn_id == start.envelope.meta.turn_id
+          && matches!(entry.envelope.event, AgentEvent::ContextSummary)
+      })
+      .map(|entry| entry.envelope.meta.event_id.clone())
+      .collect();
+    if summary_ids.len() > 1 {
+      return Err(StoreError::Invalid(format!(
+        "session {session} has multiple staged compaction summaries; resume requires recovery"
+      )));
+    }
+    for entry in entries.iter().skip(start_index + 1) {
+      if entry.envelope.meta.turn_id != start.envelope.meta.turn_id {
+        continue;
+      }
+      if let AgentEvent::ContextCompactionEpoch(epoch) = &entry.envelope.event {
+        if epoch.context_epoch == 0
+          || epoch.replaces_from.0 == 0
+          || epoch.replaces_from > epoch.replaces_through
+        {
+          return Err(StoreError::Invalid(format!(
+            "session {session} has an invalid staged compaction epoch; resume requires recovery"
+          )));
+        }
+      }
+    }
+    incomplete.push((start, summary_ids.into_iter().next()));
+  }
+  Ok(incomplete)
+}
+
+fn find_aborted_compactions(
+  entries: &[pi_rs_core::TraceEntry],
+  session: &SessionId,
+) -> Result<Vec<(pi_rs_core::TraceEntry, Option<EventId>)>, StoreError> {
+  let mut aborted = Vec::new();
+  for (index, entry) in entries.iter().enumerate() {
+    let AgentEvent::Diagnostic(diagnostic) = &entry.envelope.event else {
+      continue;
+    };
+    let Some(start_id) = entry.envelope.meta.parent_event_id.as_ref() else {
+      continue;
+    };
+    if diagnostic.message != compaction_abort_message(start_id) {
+      continue;
+    }
+    let Some(start_index) = entries[..index].iter().rposition(|candidate| {
+      candidate.envelope.meta.event_id == *start_id
+        && matches!(
+          candidate.envelope.event,
+          AgentEvent::ContextCompactionStarted(_)
+        )
+    }) else {
+      return Err(StoreError::Invalid(format!(
+        "session {session} has an abort marker without a compaction start; resume requires recovery"
+      )));
+    };
+    let AgentEvent::ContextCompactionStarted(started) = &entries[start_index].envelope.event else {
+      unreachable!("aborted compaction parent search only returns starts")
+    };
+    if !matches!(
+      started.level,
+      pi_rs_core::ContextLevel::L1Ordinary | pi_rs_core::ContextLevel::L2Phase
+    ) {
+      return Err(StoreError::Invalid(format!(
+        "session {session} has an abort marker for a non-abortable compaction; resume requires recovery"
+      )));
+    }
+    if entries
+      .iter()
+      .skip(start_index + 1)
+      .take(index.saturating_sub(start_index + 1))
+      .any(|candidate| {
+        matches!(
+          candidate.envelope.event,
+          AgentEvent::ContextCompactionCompleted(ref completed)
+            if completed.level != pi_rs_core::ContextLevel::L3Checkpoint
+        )
+      })
+    {
+      return Err(StoreError::Invalid(format!(
+        "session {session} has a compaction abort after completion; resume requires recovery"
+      )));
+    }
+    let summary_ids: Vec<EventId> = entries
+      .iter()
+      .skip(start_index + 1)
+      .take(index.saturating_sub(start_index + 1))
+      .filter(|candidate| {
+        candidate.envelope.meta.turn_id == entries[start_index].envelope.meta.turn_id
+          && matches!(candidate.envelope.event, AgentEvent::ContextSummary)
+      })
+      .map(|candidate| candidate.envelope.meta.event_id.clone())
+      .collect();
+    if summary_ids.len() > 1 {
+      return Err(StoreError::Invalid(format!(
+        "session {session} has multiple staged compaction summaries; resume requires recovery"
+      )));
+    }
+    aborted.push((entries[start_index].clone(), summary_ids.into_iter().next()));
+  }
+  Ok(aborted)
+}
+
+fn aborted_compaction_event_ids(entries: &[pi_rs_core::TraceEntry]) -> BTreeSet<EventId> {
+  let mut open: Option<usize> = None;
+  let mut ignored = BTreeSet::new();
+  for (index, entry) in entries.iter().enumerate() {
+    match &entry.envelope.event {
+      AgentEvent::ContextCompactionStarted(started)
+        if matches!(
+          started.level,
+          pi_rs_core::ContextLevel::L1Ordinary | pi_rs_core::ContextLevel::L2Phase
+        ) =>
+      {
+        open = Some(index)
+      }
+      AgentEvent::Diagnostic(_) if open.is_some() => {
+        let start_index = open.expect("checked above");
+        let start_id = &entries[start_index].envelope.meta.event_id;
+        if is_compaction_abort(entry, start_id) {
+          for staged in entries
+            .iter()
+            .skip(start_index + 1)
+            .take(index - start_index - 1)
+          {
+            if matches!(
+              staged.envelope.event,
+              AgentEvent::ContextSummary | AgentEvent::ContextCompactionEpoch(_)
+            ) {
+              ignored.insert(staged.envelope.meta.event_id.clone());
+            }
+          }
+          open = None;
+        }
+      }
+      AgentEvent::ContextCompactionCompleted(completed)
+        if completed.level != pi_rs_core::ContextLevel::L3Checkpoint =>
+      {
+        open = None
+      }
+      _ => {}
+    }
+  }
+  ignored
+}
+
+#[derive(Debug, Clone)]
+struct IncompleteCheckpoint {
+  entry: pi_rs_core::TraceEntry,
+  created: pi_rs_core::CheckpointCreated,
+}
+
+fn find_incomplete_checkpoints(
+  entries: &[pi_rs_core::TraceEntry],
+  session: &SessionId,
+) -> Result<Vec<IncompleteCheckpoint>, StoreError> {
+  let mut pending: Option<IncompleteCheckpoint> = None;
+  let mut ids = BTreeSet::new();
+  let mut epochs = BTreeSet::new();
+  for entry in entries {
+    match &entry.envelope.event {
+      AgentEvent::CheckpointCreated(created) if created.context_epoch > 0 => {
+        if !ids.insert(created.checkpoint_id.clone())
+          || !epochs.insert(created.context_epoch)
+          || pending.is_some()
+        {
+          return Err(StoreError::Invalid(format!(
+            "session {session} has overlapping or duplicate checkpoint lifecycles; resume requires recovery"
+          )));
+        }
+        pending = Some(IncompleteCheckpoint {
+          entry: entry.clone(),
+          created: created.clone(),
+        });
+      }
+      AgentEvent::CheckpointCreated(created) => {
+        if !ids.insert(created.checkpoint_id.clone()) {
+          return Err(StoreError::Invalid(format!(
+            "session {session} repeats checkpoint {}; resume requires recovery",
+            created.checkpoint_id
+          )));
+        }
+      }
+      AgentEvent::ContextCompactionCompleted(completed)
+        if completed.level == pi_rs_core::ContextLevel::L3Checkpoint
+          && completed.context_epoch > 0 =>
+      {
+        let Some(boundary) = pending.take() else {
+          return Err(StoreError::Invalid(format!(
+            "session {session} checkpoint completion has no preceding checkpoint; resume requires recovery"
+          )));
+        };
+        if boundary.created.context_epoch != completed.context_epoch
+          || boundary.entry.envelope.meta.turn_id != entry.envelope.meta.turn_id
+          || u64::from(completed.removed_messages) != boundary.created.summarized_events
+        {
+          return Err(StoreError::Invalid(format!(
+            "session {session} checkpoint completion does not match its boundary; resume requires recovery"
+          )));
+        }
+      }
+      _ => {}
+    }
+  }
+  Ok(pending.into_iter().collect())
+}
+
+fn recover_incomplete_compactions(
+  session: &mut Session,
+  trace: &[pi_rs_core::TraceEntry],
+  records: &mut Vec<SessionRecord>,
+) -> Result<(), StoreError> {
+  let mut candidates = find_incomplete_compactions(trace, session.id())?;
+  let mut candidate_ids = candidates
+    .iter()
+    .map(|(start, _)| start.envelope.meta.event_id.clone())
+    .collect::<BTreeSet<_>>();
+  for candidate in find_aborted_compactions(trace, session.id())? {
+    if candidate_ids.insert(candidate.0.envelope.meta.event_id.clone()) {
+      candidates.push(candidate);
+    }
+  }
+  for (start, summary_event_id) in candidates {
+    let start_event_id = start.envelope.meta.event_id.clone();
+    let marker_present = records.iter().any(|record| {
+      matches!(
+        record,
+        SessionRecord::Compaction(compaction)
+          if compaction.aborted
+            && compaction.start_event_id.as_ref() == Some(&start_event_id)
+      )
+    });
+    if !trace
+      .iter()
+      .any(|entry| is_compaction_abort(entry, &start_event_id))
+    {
+      let mut meta = EventMeta::new(session.id().clone(), start.envelope.meta.trace_id.clone());
+      meta.turn_id = start.envelope.meta.turn_id.clone();
+      meta.model_epoch = start.envelope.meta.model_epoch;
+      meta.model = start.envelope.meta.model.clone();
+      meta.parent_event_id = Some(start_event_id.clone());
+      let mut diagnostic = EventEnvelope::new(
+        meta,
+        AgentEvent::Diagnostic(Diagnostic {
+          level: DiagnosticLevel::Warn,
+          message: compaction_abort_message(&start_event_id),
+        }),
+      );
+      session.emit(&mut diagnostic)?;
+    }
+    if !marker_present {
+      let level = match &start.envelope.event {
+        AgentEvent::ContextCompactionStarted(started) => started.level,
+        _ => unreachable!("incomplete compaction points to a start event"),
+      };
+      let marker = SessionRecord::Compaction(pi_rs_core::SessionCompactionRecord {
+        context_epoch: 0,
+        level,
+        removed_messages: 0,
+        retained_from: 0,
+        retained_messages: 0,
+        summary_present: false,
+        replaces_from: None,
+        replaces_through: None,
+        aborted: true,
+        start_event_id: Some(start_event_id.clone()),
+        summary_event_id: summary_event_id.clone(),
+      });
+      session.log.append(&marker)?;
+      records.push(marker);
+    }
+    let pending_ids = session
+      .wal
+      .pending()?
+      .into_iter()
+      .filter(|intent| {
+        intent.tx_id == start_event_id
+          || summary_event_id
+            .as_ref()
+            .is_some_and(|summary| intent.tx_id == *summary)
+      })
+      .map(|intent| intent.tx_id)
+      .collect::<Vec<_>>();
+    for tx_id in pending_ids {
+      session.wal.commit(&tx_id)?;
+    }
+  }
+  Ok(())
+}
+
+fn recover_incomplete_checkpoints(
+  session: &mut Session,
+  trace: &[pi_rs_core::TraceEntry],
+  records: &[SessionRecord],
+) -> Result<(), StoreError> {
+  let incomplete = find_incomplete_checkpoints(trace, session.id())?;
+  if incomplete.is_empty() {
+    return Ok(());
+  }
+  validate_checkpoint_capsules(&session.layout, records, session.id())?;
+  for boundary in incomplete {
+    let barrier_index = records.iter().position(|record| {
+      matches!(
+        record,
+        SessionRecord::CheckpointBarrier(barrier)
+          if barrier.checkpoint_id == boundary.created.checkpoint_id
+      )
+    });
+    let Some(barrier_index) = barrier_index else {
+      return Err(StoreError::Invalid(format!(
+        "session {} checkpoint {} has no matching barrier; resume requires recovery",
+        session.id(),
+        boundary.created.checkpoint_id
+      )));
+    };
+    // The L3 completion's retained count describes the projection immediately
+    // before the barrier, not only records appended afterward. Prefix
+    // checkpoints deliberately leave the current-turn suffix before their
+    // barrier, so reconstruct that bounded prefix projection before deriving
+    // the deterministic count.
+    let pre_barrier_report = crate::jsonl::ReadReport {
+      items: records[..barrier_index].to_vec(),
+      malformed: 0,
+      first_malformed_line: None,
+    };
+    let pre_barrier = crate::session_log::restore_from_report(session.path(), &pre_barrier_report)?;
+    let removed_messages = usize::try_from(boundary.created.summarized_events).map_err(|_| {
+      StoreError::Invalid("checkpoint summarized message count exceeds durable limit".into())
+    })?;
+    if removed_messages > pre_barrier.messages.len() {
+      return Err(StoreError::Invalid(format!(
+        "session {} checkpoint {} removes {} messages but only {} precede its barrier; resume requires recovery",
+        session.id(),
+        boundary.created.checkpoint_id,
+        removed_messages,
+        pre_barrier.messages.len()
+      )));
+    }
+    let retained_messages = u32::try_from(
+      pre_barrier
+        .messages
+        .len()
+        .saturating_sub(removed_messages)
+        .checked_add(1)
+        .ok_or_else(|| {
+          StoreError::Invalid("checkpoint retained message count is exhausted".into())
+        })?,
+    )
+    .map_err(|_| StoreError::Invalid("checkpoint retained message count is exhausted".into()))?;
+    let removed_messages = u32::try_from(removed_messages).map_err(|_| {
+      StoreError::Invalid("checkpoint summarized message count exceeds durable limit".into())
+    })?;
+    let mut meta = EventMeta::new(
+      session.id().clone(),
+      boundary.entry.envelope.meta.trace_id.clone(),
+    );
+    meta.turn_id = boundary.entry.envelope.meta.turn_id.clone();
+    meta.model_epoch = boundary.entry.envelope.meta.model_epoch;
+    meta.model = boundary.entry.envelope.meta.model.clone();
+    meta.parent_event_id = Some(boundary.entry.envelope.meta.event_id.clone());
+    let mut completion = EventEnvelope::new(
+      meta,
+      AgentEvent::ContextCompactionCompleted(pi_rs_core::ContextCompactionCompleted {
+        level: pi_rs_core::ContextLevel::L3Checkpoint,
+        removed_messages,
+        retained_messages,
+        context_epoch: boundary.created.context_epoch,
+      }),
+    );
+    let projection = SessionRecord::Compaction(pi_rs_core::SessionCompactionRecord {
+      context_epoch: boundary.created.context_epoch,
+      level: pi_rs_core::ContextLevel::L3Checkpoint,
+      removed_messages,
+      retained_from: 0,
+      retained_messages,
+      summary_present: false,
+      replaces_from: None,
+      replaces_through: None,
+      aborted: false,
+      start_event_id: None,
+      summary_event_id: None,
+    });
+    session.emit_transaction(&mut completion, Some(projection), false)?;
+  }
+  Ok(())
 }
 
 fn event_kind(event: &AgentEvent) -> &'static str {
@@ -1847,6 +2401,13 @@ fn validate_compaction_lifecycles(
           )));
         }
       }
+      AgentEvent::Diagnostic(_) if open.is_some() => {
+        let start_index = open.as_ref().expect("checked above").index;
+        let start_id = &entries[start_index].envelope.meta.event_id;
+        if is_compaction_abort(entry, start_id) {
+          open = None;
+        }
+      }
       AgentEvent::ContextCompactionCompleted(_) => {}
       _ => {}
     }
@@ -1958,7 +2519,9 @@ fn validate_projection_alignment(
     .iter()
     .filter_map(|record| match record {
       SessionRecord::Compaction(compaction)
-        if compaction.replaces_from.is_some() && compaction.replaces_through.is_some() =>
+        if !compaction.aborted
+          && compaction.replaces_from.is_some()
+          && compaction.replaces_through.is_some() =>
       {
         Some(compaction)
       }
@@ -1977,11 +2540,14 @@ fn validate_projection_alignment(
       entry.envelope.meta.event_id
     ))
   };
+  let aborted_events = aborted_compaction_event_ids(entries);
 
   for entry in entries {
     // A checkpoint changes the model-visible window, not the durable joins. All
     // message and lifecycle facts remain auditable against their projections.
     match &entry.envelope.event {
+      AgentEvent::ContextSummary | AgentEvent::ContextCompactionEpoch(_)
+        if aborted_events.contains(&entry.envelope.meta.event_id) => {}
       AgentEvent::UserMessage(_)
       | AgentEvent::ExternalContextRetrieved(_)
       | AgentEvent::ContextSummary
@@ -3373,6 +3939,9 @@ fn recover_projection_record(
           summary_present,
           replaces_from: range.map(|(from, _)| from),
           replaces_through: range.map(|(_, through)| through),
+          aborted: false,
+          start_event_id: None,
+          summary_event_id: None,
         },
       )))
     }
@@ -4784,7 +5353,7 @@ mod tests {
   }
 
   #[test]
-  fn restore_refuses_an_incomplete_compaction_lifecycle() {
+  fn resume_aborts_an_incomplete_compaction_and_keeps_the_old_context() {
     let tmp = TempDir::new("store-incomplete-compaction");
     let opened = store(&tmp);
     let session_id = SessionId::new();
@@ -4803,7 +5372,285 @@ mod tests {
 
     assert!(
       matches!(opened.restore(&session_id), Err(StoreError::Invalid(message)) if message.contains("incomplete context-compaction lifecycle")),
-      "an open compaction cannot be resumed with ambiguous history"
+      "read-only restore must not mutate an incomplete lifecycle"
+    );
+    opened
+      .resume(&session_id)
+      .expect("writer recovery aborts the incomplete compaction")
+      .finish()
+      .unwrap();
+    let restored = opened.restore(&session_id).unwrap();
+    assert!(restored.messages.is_empty(), "old context remains empty");
+    let trace = TraceJournal::read(&opened.layout().trace_path(&session_id)).unwrap();
+    assert!(trace.items.iter().any(|entry| {
+      matches!(
+        &entry.envelope.event,
+        AgentEvent::Diagnostic(diagnostic)
+          if diagnostic.message.contains("recovered aborted context compaction")
+      )
+    }));
+  }
+
+  #[test]
+  fn resume_discards_a_staged_compaction_summary_from_model_context() {
+    let tmp = TempDir::new("store-incomplete-compaction-summary");
+    let opened = store(&tmp);
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
+    let model = ModelRef::new("local", "qwen");
+    let mut session = opened.begin(header(&session_id)).unwrap();
+    let mut old = EventEnvelope::new(
+      meta(&session_id, &turn_id),
+      AgentEvent::UserMessage(UserMessage {
+        text: "old context".into(),
+        attachments: 0,
+      }),
+    );
+    session.emit(&mut old).unwrap();
+    session
+      .append_message(&turn_id, &Message::user("old context"), 0, &model, &old)
+      .unwrap();
+    let mut start = EventEnvelope::new(
+      meta(&session_id, &turn_id),
+      AgentEvent::ContextCompactionStarted(pi_rs_core::ContextCompactionStarted {
+        level: pi_rs_core::ContextLevel::L2Phase,
+        reason: "crash after summary projection".into(),
+      }),
+    );
+    session.emit(&mut start).unwrap();
+    let mut summary = EventEnvelope::new(meta(&session_id, &turn_id), AgentEvent::ContextSummary);
+    session.emit(&mut summary).unwrap();
+    session
+      .append_message(
+        &turn_id,
+        &Message::user("staged summary"),
+        0,
+        &model,
+        &summary,
+      )
+      .unwrap();
+    session.finish().unwrap();
+
+    opened
+      .resume(&session_id)
+      .expect("resume aborts the staged summary")
+      .finish()
+      .unwrap();
+    let restored = opened.restore(&session_id).unwrap();
+    assert_eq!(
+      restored.messages.len(),
+      1,
+      "the pre-compaction context remains model-visible"
+    );
+    assert_eq!(restored.messages[0].message.text(), "old context");
+  }
+
+  #[test]
+  fn resume_synthesizes_a_missing_checkpoint_completion() {
+    let tmp = TempDir::new("store-incomplete-checkpoint");
+    let opened = store(&tmp);
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
+    let mut session = opened.begin(header(&session_id)).unwrap();
+    let mut barrier = session
+      .prepare_checkpoint(&capsule("checkpoint recovery"))
+      .unwrap();
+    barrier.context_epoch = 1;
+    let created = pi_rs_core::CheckpointCreated {
+      checkpoint_id: barrier.checkpoint_id.clone(),
+      capsule_version: barrier.capsule_version,
+      summarized_events: 0,
+      path: barrier.capsule_path.clone(),
+      context_epoch: barrier.context_epoch,
+    };
+    let mut envelope = EventEnvelope::new(
+      meta(&session_id, &turn_id),
+      AgentEvent::CheckpointCreated(created),
+    );
+    session
+      .emit_transaction(
+        &mut envelope,
+        Some(SessionRecord::CheckpointBarrier(barrier)),
+        false,
+      )
+      .unwrap();
+    session.finish().unwrap();
+
+    assert!(
+      matches!(opened.restore(&session_id), Err(StoreError::Invalid(message)) if message.contains("checkpoint has no completion")),
+      "read-only restore must not synthesize a lifecycle"
+    );
+    opened
+      .resume(&session_id)
+      .expect("resume closes the deterministic checkpoint boundary")
+      .finish()
+      .unwrap();
+    let restored = opened.restore(&session_id).unwrap();
+    assert!(restored.checkpoint.is_some());
+    assert!(restored.compactions.iter().any(|compaction| {
+      compaction.level == pi_rs_core::ContextLevel::L3Checkpoint
+        && compaction.context_epoch == 1
+        && compaction.retained_messages == 1
+    }));
+  }
+
+  #[test]
+  fn resume_synthesizes_a_prefix_checkpoint_completion_with_the_live_suffix() {
+    let tmp = TempDir::new("store-prefix-checkpoint-recovery");
+    let opened = store(&tmp);
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
+    let model = ModelRef::new("local", "qwen");
+    let mut session = opened.begin(header(&session_id)).unwrap();
+
+    for text in ["old one", "old two", "current-turn suffix"] {
+      let mut event = EventEnvelope::new(
+        meta(&session_id, &turn_id),
+        AgentEvent::UserMessage(UserMessage {
+          text: text.into(),
+          attachments: 0,
+        }),
+      );
+      session.emit(&mut event).unwrap();
+      session
+        .append_message(&turn_id, &Message::user(text), 0, &model, &event)
+        .unwrap();
+    }
+
+    let mut barrier = session
+      .prepare_checkpoint(&capsule("prefix checkpoint recovery"))
+      .unwrap();
+    barrier.context_epoch = 1;
+    let created = CheckpointCreated {
+      checkpoint_id: barrier.checkpoint_id.clone(),
+      capsule_version: barrier.capsule_version,
+      summarized_events: 2,
+      path: barrier.capsule_path.clone(),
+      context_epoch: barrier.context_epoch,
+    };
+    let mut checkpoint = EventEnvelope::new(
+      meta(&session_id, &turn_id),
+      AgentEvent::CheckpointCreated(created),
+    );
+    session
+      .emit_transaction(
+        &mut checkpoint,
+        Some(SessionRecord::CheckpointBarrier(barrier)),
+        false,
+      )
+      .unwrap();
+    session.finish().unwrap();
+
+    assert!(
+      matches!(
+        opened.restore(&session_id),
+        Err(StoreError::Invalid(message)) if message.contains("checkpoint has no completion")
+      ),
+      "read-only restore must not synthesize a lifecycle"
+    );
+    opened
+      .resume(&session_id)
+      .expect("resume closes the prefix checkpoint boundary")
+      .finish()
+      .unwrap();
+
+    let restored = opened.restore(&session_id).unwrap();
+    assert_eq!(restored.messages.len(), 1);
+    assert_eq!(restored.messages[0].message.text(), "current-turn suffix");
+    assert!(restored.compactions.iter().any(|compaction| {
+      compaction.level == pi_rs_core::ContextLevel::L3Checkpoint
+        && compaction.context_epoch == 1
+        && compaction.removed_messages == 2
+        && compaction.retained_messages == 2
+    }));
+  }
+
+  #[test]
+  fn resume_reconstructs_a_checkpoint_barrier_from_a_prepare_only_wal() {
+    let tmp = TempDir::new("store-checkpoint-prepare-only");
+    let opened = store(&tmp);
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
+    let mut session = opened.begin(header(&session_id)).unwrap();
+    let mut barrier = session
+      .prepare_checkpoint(&capsule("prepare-only checkpoint"))
+      .unwrap();
+    barrier.context_epoch = 1;
+    let created = CheckpointCreated {
+      checkpoint_id: barrier.checkpoint_id.clone(),
+      capsule_version: barrier.capsule_version,
+      summarized_events: 0,
+      path: barrier.capsule_path.clone(),
+      context_epoch: barrier.context_epoch,
+    };
+    let mut checkpoint = EventEnvelope::new(
+      meta(&session_id, &turn_id),
+      AgentEvent::CheckpointCreated(created),
+    );
+    // Simulate a stop after the canonical append but before the WAL projection
+    // line: the prepare is durable, while `intent.record` remains absent.
+    session.wal.prepare(&checkpoint).unwrap();
+    session.emit(&mut checkpoint).unwrap();
+    // Drop simulates a crash: a clean finish intentionally refuses to close
+    // this prepare-only transaction because recovery must own the decision.
+    drop(session);
+
+    opened
+      .resume(&session_id)
+      .expect("resume reconstructs the missing checkpoint barrier")
+      .finish()
+      .unwrap();
+    let restored = opened.restore(&session_id).unwrap();
+    assert!(restored.checkpoint.is_some());
+    assert!(restored.compactions.iter().any(|compaction| {
+      compaction.level == pi_rs_core::ContextLevel::L3Checkpoint
+        && compaction.context_epoch == 1
+        && compaction.retained_messages == 1
+    }));
+  }
+
+  #[test]
+  fn resume_completes_a_compaction_after_its_abort_diagnostic_was_durable() {
+    let tmp = TempDir::new("store-compaction-abort-diagnostic");
+    let opened = store(&tmp);
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
+    let mut session = opened.begin(header(&session_id)).unwrap();
+    let mut start = EventEnvelope::new(
+      meta(&session_id, &turn_id),
+      AgentEvent::ContextCompactionStarted(pi_rs_core::ContextCompactionStarted {
+        level: pi_rs_core::ContextLevel::L1Ordinary,
+        reason: "crash after abort diagnostic".into(),
+      }),
+    );
+    session.emit_transaction(&mut start, None, true).unwrap();
+    let mut summary = EventEnvelope::new(meta(&session_id, &turn_id), AgentEvent::ContextSummary);
+    session.emit_transaction(&mut summary, None, true).unwrap();
+    let mut diagnostic = EventEnvelope::new(
+      meta(&session_id, &turn_id),
+      AgentEvent::Diagnostic(Diagnostic {
+        level: DiagnosticLevel::Warn,
+        message: compaction_abort_message(&start.meta.event_id),
+      }),
+    );
+    diagnostic.meta.parent_event_id = Some(start.meta.event_id.clone());
+    session.emit(&mut diagnostic).unwrap();
+    // The held compaction intent is intentionally left open; the next writer
+    // must notice the already durable abort diagnostic and add its marker.
+    drop(session);
+
+    opened
+      .resume(&session_id)
+      .expect("resume appends the missing abort projection marker")
+      .finish()
+      .unwrap();
+    let restored = opened.restore(&session_id).unwrap();
+    assert!(restored.messages.is_empty());
+    assert!(
+      restored
+        .compactions
+        .iter()
+        .any(|compaction| compaction.aborted)
     );
   }
 

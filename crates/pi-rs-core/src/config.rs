@@ -17,7 +17,7 @@ use std::{
   fmt,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 
 use crate::{
   capability::{ModelCapabilities, ModelRef, ReasoningExposure},
@@ -34,19 +34,23 @@ pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
 /// One configured model endpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelEndpoint {
   /// Provider id used in `provider/model` references.
   pub provider: String,
   pub model: String,
   /// HTTP base URL for an OpenAI-compatible endpoint, if remote.
-  #[serde(default, skip_serializing_if = "Option::is_none")]
+  #[serde(
+    default,
+    skip_serializing_if = "Option::is_none",
+    serialize_with = "serialize_optional_redacted_url"
+  )]
   pub base_url: Option<String>,
   /// Environment variable holding the credential. Preferred over `api_key`.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub api_key_env: Option<String>,
-  /// Literal credential for a local endpoint. Never serialized back out.
-  #[serde(default, skip_serializing_if = "Option::is_none")]
+  /// Literal credential for a local endpoint. Never serialized or debug-printed.
+  #[serde(default, skip_serializing)]
   pub api_key: Option<String>,
   pub capabilities: ModelCapabilities,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,6 +61,23 @@ pub struct ModelEndpoint {
   /// Optional logical idle deadline for this HTTP endpoint.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub read_timeout_ms: Option<u64>,
+}
+
+impl fmt::Debug for ModelEndpoint {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("ModelEndpoint")
+      .field("provider", &self.provider)
+      .field("model", &self.model)
+      .field("base_url", &self.base_url.as_deref().map(redact_url))
+      .field("api_key_env", &self.api_key_env)
+      .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+      .field("capabilities", &self.capabilities)
+      .field("max_output_tokens", &self.max_output_tokens)
+      .field("connect_timeout_ms", &self.connect_timeout_ms)
+      .field("read_timeout_ms", &self.read_timeout_ms)
+      .finish()
+  }
 }
 
 impl ModelEndpoint {
@@ -250,17 +271,25 @@ pub struct McpServerConfig {
   pub command: String,
   #[serde(default)]
   pub args: Vec<String>,
-  #[serde(default)]
+  #[serde(default, serialize_with = "serialize_redacted_values")]
   pub env: BTreeMap<String, String>,
   #[serde(default)]
   pub enabled: bool,
   #[serde(default)]
   pub read_only_tools: Vec<String>,
   /// Streamable HTTP endpoint. When present, no child process is spawned.
-  #[serde(default, skip_serializing_if = "Option::is_none")]
+  #[serde(
+    default,
+    skip_serializing_if = "Option::is_none",
+    serialize_with = "serialize_optional_redacted_url"
+  )]
   pub url: Option<String>,
   /// Additional HTTP headers for a network MCP endpoint.
-  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  #[serde(
+    default,
+    skip_serializing_if = "BTreeMap::is_empty",
+    serialize_with = "serialize_redacted_values"
+  )]
   pub headers: BTreeMap<String, String>,
 }
 
@@ -425,6 +454,12 @@ impl RuntimeConfig {
           endpoint.provider, endpoint.model
         )));
       }
+      if endpoint.base_url.as_deref().is_some_and(url_has_userinfo) {
+        return Err(ConfigError(format!(
+          "endpoint {}/{} URL must not contain userinfo credentials",
+          endpoint.provider, endpoint.model
+        )));
+      }
       for (name, timeout) in [
         ("connect_timeout_ms", endpoint.connect_timeout_ms),
         ("read_timeout_ms", endpoint.read_timeout_ms),
@@ -502,6 +537,30 @@ impl RuntimeConfig {
   }
 }
 
+fn serialize_optional_redacted_url<S>(
+  url: &Option<String>,
+  serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+  S: Serializer,
+{
+  url.as_deref().map(redact_url).serialize(serializer)
+}
+
+fn serialize_redacted_values<S>(
+  values: &BTreeMap<String, String>,
+  serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+  S: Serializer,
+{
+  let mut map = serializer.serialize_map(Some(values.len()))?;
+  for name in values.keys() {
+    map.serialize_entry(name, "[redacted]")?;
+  }
+  map.end()
+}
+
 fn valid_http_header_name(name: &str) -> bool {
   !name.is_empty()
     && name.bytes().all(|byte| {
@@ -540,13 +599,30 @@ fn is_protocol_header(name: &str) -> bool {
 }
 
 fn redact_url(url: &str) -> String {
-  if let Some((base, _)) = url.split_once('?') {
+  let safe = if let Some((scheme, authority_and_path)) = url.split_once("://") {
+    let authority_end = authority_and_path
+      .find(['/', '?', '#'])
+      .unwrap_or(authority_and_path.len());
+    let authority = &authority_and_path[..authority_end];
+    if let Some(at) = authority.rfind('@') {
+      format!(
+        "{scheme}://[redacted]@{}{}",
+        &authority[at + 1..],
+        &authority_and_path[authority_end..]
+      )
+    } else {
+      url.to_string()
+    }
+  } else {
+    url.to_string()
+  };
+  if let Some((base, _)) = safe.split_once('?') {
     return format!("{base}?[redacted]");
   }
-  if let Some((base, _)) = url.split_once('#') {
+  if let Some((base, _)) = safe.split_once('#') {
     return format!("{base}#[redacted]");
   }
-  url.to_string()
+  safe
 }
 
 fn url_has_userinfo(url: &str) -> bool {
@@ -628,15 +704,65 @@ mod tests {
   }
 
   #[test]
-  fn literal_credentials_are_never_written_out() {
+  fn literal_credentials_are_never_written_or_debug_printed() {
     let mut config = sample_config();
     config.endpoints[0].api_key = Some("local-debug-key".into());
+    config.redaction.literals = vec!["literal-redaction-secret".into()];
+    config.mcp_servers.push(
+      McpServerConfig::new("remote", "command")
+        .with_env(BTreeMap::from([("TOKEN".into(), "env-secret".into())]))
+        .with_headers(BTreeMap::from([(
+          "authorization".into(),
+          "Bearer mcp-secret".into(),
+        )])),
+    );
+    let json = serde_json::to_string(&config.endpoints[0]).unwrap();
+    assert!(
+      !json.contains("local-debug-key"),
+      "endpoint serialization must not carry secrets: {json}"
+    );
+    let endpoint_debug = format!("{:?}", config.endpoints[0]);
+    assert!(
+      !endpoint_debug.contains("local-debug-key"),
+      "{endpoint_debug}"
+    );
+    let runtime_debug = format!("{config:?}");
+    assert!(
+      !runtime_debug.contains("local-debug-key"),
+      "{runtime_debug}"
+    );
+    assert!(
+      !runtime_debug.contains("literal-redaction-secret"),
+      "{runtime_debug}"
+    );
+    assert!(!runtime_debug.contains("env-secret"), "{runtime_debug}");
+    assert!(
+      !runtime_debug.contains("Bearer mcp-secret"),
+      "{runtime_debug}"
+    );
+    let direct_json = serde_json::to_string(&config).unwrap();
+    assert!(
+      !direct_json.contains("literal-redaction-secret"),
+      "{direct_json}"
+    );
+    assert!(!direct_json.contains("env-secret"), "{direct_json}");
+    assert!(!direct_json.contains("Bearer mcp-secret"), "{direct_json}");
     let json = config.to_json_string().unwrap();
     assert!(
       !json.contains("local-debug-key"),
       "config output must not carry secrets: {json}"
     );
     assert!(json.contains("http://127.0.0.1:8080/v1"));
+    assert!(!json.contains("literal-redaction-secret"), "{json}");
+    assert!(!json.contains("env-secret"), "{json}");
+    assert!(!json.contains("Bearer mcp-secret"), "{json}");
+  }
+
+  #[test]
+  fn endpoint_userinfo_credentials_are_rejected() {
+    let mut config = sample_config();
+    config.endpoints[0].base_url = Some("https://user:secret@example.test/v1".into());
+    assert!(config.validate().unwrap_err().0.contains("userinfo"));
   }
 
   #[test]

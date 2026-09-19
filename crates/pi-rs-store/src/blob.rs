@@ -8,13 +8,18 @@
 //! object would be a permanent, silent lie.
 
 use std::{
-  fs,
+  fs::{self, OpenOptions},
   io::{Read, Write},
   path::{Path, PathBuf},
 };
 
 use flate2::{Compression as FlateCompression, read::DeflateDecoder, write::DeflateEncoder};
-use pi_rs_core::{BlobCompression, hash::sha256_hex, ids::SessionId, trace::BlobRef};
+use pi_rs_core::{
+  BlobCompression,
+  hash::sha256_hex,
+  ids::{SessionId, uuidv7},
+  trace::BlobRef,
+};
 
 use crate::{StateLayout, StoreError};
 
@@ -85,30 +90,75 @@ impl BlobStore {
     let encoded = encode(bytes, blob.compression)?;
     let final_path = self.path_for(&blob);
     if final_path.exists() && self.verify(&blob)? {
+      // Even a pre-existing valid object must have its directory entry synced
+      // before a caller can durably publish a reference to it. This covers a
+      // concurrent writer whose rename completed but whose directory sync has
+      // not yet happened, as well as objects left by an older writer.
+      sync_parent(&final_path)?;
       return Ok(blob);
     }
     if let Some(parent) = final_path.parent() {
       fs::create_dir_all(parent)?;
     }
-    // The suffix is per-write, so concurrent writers of the same content do
-    // not truncate each other's temporary file before the rename.
-    let temp = final_path.with_extension(format!("part-{}", std::process::id()));
+    // The suffix is write-scoped, and create_new makes a collision a retryable
+    // local error rather than allowing concurrent writers in one process to
+    // truncate each other's temporary file before the rename.
+    let temp = final_path.with_extension(format!("part-{}", uuidv7()));
     {
-      let mut file = fs::File::create(&temp)?;
+      let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
       file.write_all(&encoded)?;
       file.flush()?;
+      // Returning a reference before this sync would let a durable journal line
+      // outlive the blob bytes after a power loss.
+      file.sync_all()?;
     }
     verify_file(&temp, &blob)?;
     match fs::rename(&temp, &final_path) {
-      Ok(()) => Ok(blob),
+      Ok(()) => {
+        // The rename itself is atomic, but its directory entry is not durable
+        // until the containing directory is synced where the platform supports
+        // directory fsync.
+        sync_parent(&final_path)?;
+        Ok(blob)
+      }
       Err(error) => {
-        let _ = fs::remove_file(&temp);
-        // Another writer won the race for the same content: that is success.
+        // Another writer may have won the race. Never accept that path merely
+        // because it exists: verify the winner's decoded bytes before returning
+        // a reference that may immediately become durable elsewhere.
         if final_path.exists() {
-          Ok(blob)
-        } else {
-          Err(StoreError::Io(error))
+          if self.verify(&blob)? {
+            sync_parent(&final_path)?;
+            let _ = fs::remove_file(&temp);
+            return Ok(blob);
+          }
+          // Windows does not replace an existing destination on rename. A
+          // disagreeing object is safe to replace here because this writer's
+          // content-addressed bytes are the same reference being repaired; if
+          // another writer published the valid winner between the check and
+          // removal, the final verification below still gates success.
+          if fs::remove_file(&final_path).is_ok() {
+            match fs::rename(&temp, &final_path) {
+              Ok(()) if self.verify(&blob)? => {
+                sync_parent(&final_path)?;
+                return Ok(blob);
+              }
+              Ok(()) => {}
+              Err(rename_error) => {
+                let _ = fs::remove_file(&temp);
+                if final_path.exists() && self.verify(&blob)? {
+                  sync_parent(&final_path)?;
+                  return Ok(blob);
+                }
+                return Err(StoreError::Io(rename_error));
+              }
+            }
+          }
         }
+        let _ = fs::remove_file(&temp);
+        Err(StoreError::Io(error))
       }
     }
   }
@@ -265,6 +315,19 @@ impl BlobStore {
     }
     Ok(total)
   }
+}
+
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> Result<(), StoreError> {
+  if let Some(parent) = path.parent() {
+    fs::File::open(parent)?.sync_all()?;
+  }
+  Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> Result<(), StoreError> {
+  Ok(())
 }
 
 fn verify_file(path: &Path, blob: &BlobRef) -> Result<(), StoreError> {

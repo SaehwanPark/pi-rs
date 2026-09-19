@@ -96,6 +96,9 @@ impl Trace for StoreTrace {
           summary_present: has_summary,
           replaces_from: range.map(|(from, _)| from),
           replaces_through: range.map(|(_, through)| through),
+          aborted: false,
+          start_event_id: None,
+          summary_event_id: None,
         }))
       }
       AgentEvent::ContextReduced(reduced) if reduced.removed_messages > 0 => {
