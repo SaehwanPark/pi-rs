@@ -9,9 +9,8 @@
 //! It is intentionally single-use and lives only for one provider attempt.
 
 use std::{
-  fs,
   io::{self, Read, Write},
-  net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket},
+  net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
   sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -353,224 +352,35 @@ fn resolve_target(
   if let Ok(address) = host.parse::<IpAddr>() {
     return Some(vec![SocketAddr::new(address, port)]);
   }
-  if let Some(addresses) = hosts_file_addresses(host, port) {
-    return Some(addresses);
-  }
-  let nameservers = resolver_addresses();
-  let mut addresses = Vec::new();
-  for query_type in [1u16, 28u16] {
-    for nameserver in &nameservers {
-      if stop.load(Ordering::Acquire) || Instant::now() >= deadline {
-        return None;
-      }
-      addresses.extend(query_dns(host, *nameserver, query_type, deadline, stop));
-    }
-  }
-  addresses.sort_unstable();
-  addresses.dedup();
-  (!addresses.is_empty()).then_some(
-    addresses
-      .into_iter()
-      .map(|address| SocketAddr::new(address, port))
-      .collect(),
-  )
-}
 
-fn hosts_file_addresses(host: &str, port: u16) -> Option<Vec<SocketAddr>> {
-  let path = if cfg!(windows) {
-    std::env::var_os("SystemRoot")
-      .map(std::path::PathBuf::from)
-      .map(|root| root.join("System32\\drivers\\etc\\hosts"))?
-  } else {
-    std::path::PathBuf::from("/etc/hosts")
-  };
-  let text = fs::read_to_string(path).ok()?;
-  let mut addresses = Vec::new();
-  for line in text.lines() {
-    let fields: Vec<&str> = line.split('#').next()?.split_whitespace().collect();
-    let Some((address, names)) = fields.split_first() else {
-      continue;
-    };
-    if names.iter().any(|name| name.eq_ignore_ascii_case(host))
-      && let Ok(address) = address.parse::<IpAddr>()
-    {
-      addresses.push(SocketAddr::new(address, port));
-    }
-  }
-  (!addresses.is_empty()).then_some(addresses)
-}
-
-fn resolver_addresses() -> Vec<SocketAddr> {
-  let mut addresses = Vec::new();
-  #[cfg(not(windows))]
-  if let Ok(text) = fs::read_to_string("/etc/resolv.conf") {
-    for line in text.lines() {
-      let Some(value) = line.split('#').next().and_then(|line| {
-        let mut fields = line.split_whitespace();
-        (fields.next() == Some("nameserver"))
-          .then(|| fields.next())
-          .flatten()
-      }) else {
-        continue;
-      };
-      if let Ok(address) = value.parse::<IpAddr>() {
-        addresses.push(SocketAddr::new(address, 53));
-      }
-    }
-  }
-  if addresses.is_empty() {
-    addresses.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 53));
-  }
-  addresses
-}
-
-fn query_dns(
-  host: &str,
-  nameserver: SocketAddr,
-  query_type: u16,
-  deadline: Instant,
-  stop: &Arc<AtomicBool>,
-) -> Vec<IpAddr> {
-  let Some(query) = dns_query(host, query_type) else {
-    return Vec::new();
-  };
-  let bind = match nameserver {
-    SocketAddr::V4(_) => "0.0.0.0:0",
-    SocketAddr::V6(_) => "[::]:0",
-  };
-  let Ok(socket) = UdpSocket::bind(bind) else {
-    return Vec::new();
-  };
-  if socket.set_nonblocking(true).is_err() || socket.send_to(&query, nameserver).is_err() {
-    return Vec::new();
-  }
-  let query_id = u16::from_be_bytes([query[0], query[1]]);
-  let mut response = [0u8; 4096];
-  while !stop.load(Ordering::Acquire) {
-    if Instant::now() >= deadline {
-      break;
-    }
-    match socket.recv_from(&mut response) {
-      Ok((length, source)) if source.ip() == nameserver.ip() => {
-        return dns_answers(&response[..length], query_id, query_type);
-      }
-      Ok(_) => {}
-      Err(error) if error.kind() == io::ErrorKind::WouldBlock => thread::sleep(POLL),
-      Err(_) => break,
-    }
-  }
-  Vec::new()
-}
-
-fn dns_query(host: &str, query_type: u16) -> Option<Vec<u8>> {
-  let labels: Vec<&str> = host.trim_end_matches('.').split('.').collect();
-  if labels.is_empty()
-    || labels
-      .iter()
-      .any(|label| label.is_empty() || label.len() > 63)
-  {
-    return None;
-  }
-  let total: usize = labels.iter().map(|label| label.len() + 1).sum::<usize>() + 1;
-  if total > 255 {
-    return None;
-  }
-  let id = (std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .unwrap_or_default()
-    .subsec_nanos() as u16)
-    ^ (std::process::id() as u16);
-  let mut query = Vec::with_capacity(12 + total + 4);
-  query.extend_from_slice(&id.to_be_bytes());
-  query.extend_from_slice(&0x0100u16.to_be_bytes());
-  query.extend_from_slice(&1u16.to_be_bytes());
-  query.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
-  for label in labels {
-    query.push(label.len() as u8);
-    query.extend_from_slice(label.as_bytes());
-  }
-  query.push(0);
-  query.extend_from_slice(&query_type.to_be_bytes());
-  query.extend_from_slice(&1u16.to_be_bytes());
-  Some(query)
-}
-
-fn dns_answers(response: &[u8], query_id: u16, query_type: u16) -> Vec<IpAddr> {
-  if response.len() < 12
-    || u16::from_be_bytes([response[0], response[1]]) != query_id
-    || u16::from_be_bytes([response[2], response[3]]) & 0x8000 == 0
-  {
-    return Vec::new();
-  }
-  let questions = u16::from_be_bytes([response[4], response[5]]) as usize;
-  let answers = u16::from_be_bytes([response[6], response[7]]) as usize;
-  let authorities = u16::from_be_bytes([response[8], response[9]]) as usize;
-  let additionals = u16::from_be_bytes([response[10], response[11]]) as usize;
-  let mut offset = 12;
-  for _ in 0..questions {
-    let Some(next) = skip_dns_name(response, offset) else {
-      return Vec::new();
-    };
-    if next + 4 > response.len() {
-      return Vec::new();
-    }
-    offset = next + 4;
-  }
-  let mut found = Vec::new();
-  for index in 0..answers + authorities + additionals {
-    let Some(next) = skip_dns_name(response, offset) else {
-      return found;
-    };
-    if next + 10 > response.len() {
-      return found;
-    }
-    let record_type = u16::from_be_bytes([response[next], response[next + 1]]);
-    let class = u16::from_be_bytes([response[next + 2], response[next + 3]]);
-    let length = u16::from_be_bytes([response[next + 8], response[next + 9]]) as usize;
-    let data = next + 10;
-    let end = data.saturating_add(length);
-    if end > response.len() {
-      return found;
-    }
-    if index < answers && class == 1 && record_type == query_type {
-      match (record_type, length) {
-        (1, 4) => found.push(IpAddr::V4(Ipv4Addr::new(
-          response[data],
-          response[data + 1],
-          response[data + 2],
-          response[data + 3],
-        ))),
-        (28, 16) => {
-          let mut octets = [0u8; 16];
-          octets.copy_from_slice(&response[data..end]);
-          found.push(IpAddr::V6(Ipv6Addr::from(octets)));
-        }
-        _ => {}
-      }
-    }
-    offset = end;
-  }
-  found
-}
-
-fn skip_dns_name(bytes: &[u8], mut offset: usize) -> Option<usize> {
-  for _ in 0..128 {
-    let length = *bytes.get(offset)?;
-    if length & 0xc0 == 0xc0 {
-      return (offset + 2 <= bytes.len()).then_some(offset + 2);
-    }
-    if length == 0 {
-      return Some(offset + 1);
-    }
-    if length & 0xc0 != 0 || length > 63 {
+  // Delegate name resolution to the platform resolver. It preserves Windows
+  // DNS policy, macOS scoped/VPN resolvers, search domains, and enterprise
+  // split-DNS rules instead of sending private names to a public fallback.
+  // `ToSocketAddrs` may block inside the OS, so keep it off the relay worker
+  // and poll the result for the request deadline/cancellation boundary.
+  let host = host.to_owned();
+  let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+  thread::spawn(move || {
+    let result = (host.as_str(), port)
+      .to_socket_addrs()
+      .map(|addresses| addresses.collect::<Vec<_>>());
+    let _ = sender.send(result);
+  });
+  loop {
+    if stop.load(Ordering::Acquire) {
       return None;
     }
-    offset = offset.checked_add(length as usize + 1)?;
-    if offset > bytes.len() {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
       return None;
     }
+    match receiver.recv_timeout(remaining.min(POLL)) {
+      Ok(Ok(addresses)) if !addresses.is_empty() => return Some(addresses),
+      Ok(Ok(_)) | Ok(Err(_)) => return None,
+      Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+      Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+    }
   }
-  None
 }
 
 fn origin_form(request: &[u8], header_end: usize) -> Vec<u8> {
@@ -962,6 +772,19 @@ mod tests {
     assert_eq!(&echoed, b"pong");
     relay.stop();
     target.join().expect("target thread");
+  }
+
+  #[test]
+  fn resolver_delegates_to_the_platform_for_local_names() {
+    let stop = Arc::new(AtomicBool::new(false));
+    let addresses = resolve_target(
+      "localhost",
+      80,
+      Instant::now() + Duration::from_secs(1),
+      &stop,
+    )
+    .expect("platform resolver resolves localhost");
+    assert!(!addresses.is_empty());
   }
 
   #[test]
