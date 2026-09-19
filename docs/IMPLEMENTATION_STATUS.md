@@ -4,13 +4,17 @@ Working status for the `pi-rs` runtime. Roadmap intent lives in [`ROADMAP.md`](.
 this document records **what exists, what is proven, and what is deliberately deferred or not
 yet exercised**.
 
-Verification for everything marked *done* below:
+Verification for everything marked *done* below is rerun for the v0.2.0 release
+(`2026-09-19`); the release PR records the exact host output and any platform-specific
+limitations:
 
 ```
-cargo test --workspace --all-features      # all workspace tests pass (2026-09-14)
-cargo clippy --workspace --all-targets --all-features   # 0 warnings
 cargo fmt --all --check
-cargo doc --workspace --no-deps      # 0 warnings
+cargo check -p pi-rs-core --all-features
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo doc --workspace --no-deps
+mdbook build book
 ```
 
 ## Layer status
@@ -211,8 +215,8 @@ The following items are not blockers for the canonical initial MVP, but remain e
    sink-failure seam directly proves cancellation and terminal failure.
 5. Approved `exec` is intentionally not an OS sandbox, and outward-pointing symlinks require
    operating-system isolation when they are in scope. Platform-specific primitives and
-   integration commands are guarded for supported platforms; a full Windows CI matrix
-   remains tracked.
+   integration commands are guarded for supported platforms; hosted CI covers Ubuntu,
+   macOS, and Windows, while the startup benchmark runs only on non-Windows runners.
 6. A temporal terminal-streaming benchmark is deferred beyond deterministic multi-chunk
    ordering tests.
 7. A resumed imported session has not been exercised against a live provider; store-level
@@ -232,7 +236,9 @@ The following items are not blockers for the canonical initial MVP, but remain e
     implemented in `pi-rs-mcp::worker` with an injected headless engine, asynchronous
     run/cancel handles, coarse `session://` resources, and stdio JSON-RPC fixtures;
     read-only replay/history analysis is implemented in `pi-rs-replay`; adaptive
-    optimization, telemetry, and GitHub Pages remain deferred.
+    optimization and telemetry remain deferred. GitHub Pages deployment is configured
+    in `.github/workflows/pages.yml` and remains a hosted-site operational concern, not
+    a runtime dependency.
 
 ## Real-endpoint verification
 

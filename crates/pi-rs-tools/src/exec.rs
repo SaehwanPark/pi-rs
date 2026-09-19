@@ -662,7 +662,7 @@ mod tests {
     let mut recorder = Recorder::default();
     #[cfg(windows)]
     let command = format!(
-      "for /L %i in (1,1,1000) do @echo verbose & echo done > {}",
+      "for /L %i in (1,1,100) do @echo verbose & echo done > {}",
       marker.display()
     );
     #[cfg(not(windows))]

@@ -3,14 +3,15 @@
 Welcome to the `pi-rs` documentation. This directory and repository contain the
 specifications, architectural contracts, user guides, and historical development
 records for `pi-rs`—a minimal, Pi-inspired coding-agent runtime implemented in
-Rust.
+Rust. The current public release is **v0.2.0 (2026-09-19)**.
 
 ---
 
 ## 1. Public-Facing Documentation & Guides
 
 For end users and system integrators, the primary documentation is published via
-**GitHub Pages** (built with mdBook):
+**GitHub Pages** (built with mdBook; deployment is validated from `book/` on pushes to
+`main`):
 
 - **Online Documentation:** [https://saehwanpark.github.io/pi-rs/](https://saehwanpark.github.io/pi-rs/)
 - **Source Files:** [`book/src/`](../book/src/)
@@ -36,7 +37,7 @@ These documents serve as the authoritative sources of truth for the codebase:
 | [`docs/PROJECT_DESIGN_CANONICAL.md`](PROJECT_DESIGN_CANONICAL.md) | **Canonical design authority.** Explains system thesis, core contracts, lifecycle, and component invariants. |
 | [`ARCHITECTURE.md`](../ARCHITECTURE.md) | Runtime boundaries, subsystem contracts, crate breakdown, and concurrency invariants. |
 | [`COMPATIBILITY.md`](../COMPATIBILITY.md) | Upstream Pi behavioral compatibility targets, coverage status, and regression fixtures. |
-| [`docs/SCHEMA_REFERENCE.md`](SCHEMA_REFERENCE.md) | Authoritative reference for event payloads, session logs, and serialized structures. |
+| [`docs/SCHEMA_REFERENCE.md`](SCHEMA_REFERENCE.md) | Current v0.2.0 reference for event payloads, session logs, and serialized structures; source remains authoritative. |
 | [`docs/SESSION_COMPATIBILITY.md`](SESSION_COMPATIBILITY.md) | Bidirectional mapping between Pi session JSONL and pi-rs store schemas. |
 | [`docs/IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) | Implementation inventory, verified capabilities, and phase deliverables. |
 

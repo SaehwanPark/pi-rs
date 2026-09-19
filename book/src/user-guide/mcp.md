@@ -1,6 +1,6 @@
 # Model Context Protocol (MCP)
 
-`pi-rs` includes built-in client support for Anthropic's **Model Context Protocol (MCP)**, allowing agents to discover and invoke tools provided by external processes.
+`pi-rs` includes a built-in client for the **Model Context Protocol (MCP)**, allowing agents to discover and invoke tools provided by external processes. Stdio and bounded Streamable HTTP POST transports are supported; long-lived server push remains outside this release.
 
 ---
 
@@ -8,30 +8,39 @@
 
 Many agent runtimes eagerly spin up every declared MCP server at process launch, which degrades cold startup times.
 
-`pi-rs` strictly maintains a **lazy stdio architecture**:
-- MCP process handles are spawned only when an external tool is first referenced or explicitly queried.
-- Startup latency remains under 1 ms even when complex servers (PostgreSQL, filesystem, browser servers) are configured.
+`pi-rs` keeps MCP activation lazy:
+- Stdio child processes and HTTP connections are created only when a server is explicitly enabled.
+- Constructing configuration does not connect to every server or delay the basic startup path.
+- Activation discovers that server's tools, which can then participate in the normal tool lifecycle and trace.
 
 ---
 
 ## MCP Server Configuration
 
-Configure MCP servers in your `config.json` under `mcp_servers`:
+Configure MCP servers in your `config.json` as an array under `mcp_servers`:
 
 ```json
 {
-  "mcp_servers": {
-    "sqlite": {
+  "mcp_servers": [
+    {
+      "name": "sqlite",
       "command": "uvx",
-      "args": ["mcp-server-sqlite", "--db-path", "app.db"]
+      "args": ["mcp-server-sqlite", "--db-path", "app.db"],
+      "enabled": false,
+      "read_only_tools": ["query"]
     },
-    "git": {
+    {
+      "name": "git",
       "command": "mcp-server-git",
-      "args": ["--repository", "."]
+      "args": ["--repository", "."],
+      "enabled": false
     }
-  }
+  ]
 }
 ```
+
+A network server uses `url` instead of `command`, with optional `headers`. Header values
+are redacted when configuration is serialized.
 
 ---
 
@@ -39,4 +48,15 @@ Configure MCP servers in your `config.json` under `mcp_servers`:
 
 Tools exposed by MCP servers are automatically mapped into `pi-rs` tool definitions with distinct namespaces (e.g. `sqlite:query`).
 
-`pi-rs` actively avoids dumping exhaustive tool schemas into the model prompt on turn 1. External tool definitions are exposed cleanly and efficiently to preserve model context headroom.
+Configured servers are not activated merely because they appear in the file. In an
+interactive session, inspect and activate one explicitly:
+
+```text
+/mcp
+/mcp enable sqlite
+/mcp disable sqlite
+```
+
+Activation runs `initialize` and `tools/list`; the resulting tools are namespaced and
+participate in the same lifecycle, approval, output-reduction, and trace rules as native
+tools. This avoids dumping every configured catalog into the model context.

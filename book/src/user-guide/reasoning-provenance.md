@@ -14,15 +14,15 @@ Treating all of these as identical "thinking" misleads users and corrupts sessio
 
 | Provenance Label | Meaning | When Used |
 | :--- | :--- | :--- |
-| `[native reasoning]` | Authentic model reasoning tokens | Provider streams true model tokens from an endpoint configured with `reasoning_kind: "native"` (e.g. DeepSeek-R1). |
-| `[provider summary]` | Provider-synthesized explanation | Provider returns a summarized distillation of thinking while concealing the actual chain-of-thought (`reasoning_kind: "provider_summary"`). |
+| `[native reasoning]` | Authentic model reasoning tokens | Provider streams true model tokens from an endpoint configured with `capabilities.exposed_reasoning: "native"` (e.g. a local reasoning model). |
+| `[provider summary]` | Provider-synthesized explanation | Provider returns a summarized distillation of thinking while concealing the actual chain-of-thought (`capabilities.exposed_reasoning: "provider_summary"`). |
 | `[declared]` | Declared rationale | Rationale explicitly declared by the model or tool caller within structured response fields. |
-| `[reconstructed]` | Post-hoc reconstructed reasoning | Rationale inferred or reconstructed during import/export or session migration. Never conflated with live reasoning. |
+| `[reconstructed]` | Post-hoc reconstructed reasoning | A reserved typed/display form for evidence-scoped analysis. The current runtime does not produce it automatically and never infers hidden reasoning during import/export. |
 
 ---
 
 ## Architectural Invariants
 
-1. **Declared Capability Wins**: The response field name alone cannot prove whether native tokens or a provider summary arrived. The endpoint declaration in the configuration decides the label. An endpoint declaring `provider_summary` is labeled `[provider summary]`, never `[native reasoning]`.
+1. **Declared Capability Wins**: The response field name alone cannot prove whether native tokens or a provider summary arrived. The endpoint's `capabilities.exposed_reasoning` declaration decides the label. An endpoint declaring `provider_summary` is labeled `[provider summary]`, never `[native reasoning]`.
 2. **Never Claim Hidden CoT Was Recovered**: When migrating sessions or importing from upstream Pi, hidden chain-of-thought is never fabricated or claimed to exist if it was omitted.
 3. **No Provenance Bleeding**: Within a single reasoning turn, text fragments with different provenance boundaries are partitioned into distinct, unmerged spans.

@@ -43,20 +43,27 @@ pi-rs interactive --config <file> [--cwd <workspace>]
 ---
 
 ### `trace`
-Read a session's canonical event log out of the store in chronological order.
+Read a session's canonical event log out of the configured store in chronological order.
 
 ```bash
-pi-rs trace <session-id>
+pi-rs trace --config <file> [session-id] [options]
 ```
+
+The session id may be omitted to read the newest session. Additional selectors include
+`--tools`, `--reasoning`, `--epoch <n>`, and `--sequence`; presentation flags include
+`--color`, `--width`, `--no-reasoning`, `--verbose`, `--quiet`, and `--silent`.
 
 ---
 
 ### `replay`
-Deterministically re-render a recorded session without executing tools or making network requests.
+Inspect a trace or session JSONL file without starting a provider or executing tools.
 
 ```bash
-pi-rs replay <session-id>
+pi-rs replay <trace-or-session.jsonl> [options]
 ```
+
+Use `--until`, `--tools`, `--reasoning`, `--timing`, `--context-at`, `--branch`,
+`--compare`, `--json`, `--export`, and `--sequence` for deterministic analysis.
 
 ---
 
@@ -73,37 +80,40 @@ pi-rs skills [--project] [--trust-store <dir>]
 List prompt templates discovered across configured paths.
 
 ```bash
-pi-rs prompts [--project]
+pi-rs prompts [--project] [--trust-store <dir>] [--prompt-template <path>] [--no-prompt-templates]
 ```
 
 ---
 
 ### `prompt`
-Expand a single prompt template with positional parameters.
+Expand a single prompt template with positional parameters. This command only prints
+text; it does not send a model request.
 
 ```bash
-pi-rs prompt <name> [arg1] [arg2] ...
+pi-rs prompt [--project] [--trust-store <dir>] <name> [arg1] [arg2] ...
 ```
 
 ---
 
 ### `packages`
-List discovered Pi packages and their contained surface definitions.
+List discovered Pi packages, inspect one package, or install an explicit local package.
 
 ```bash
-pi-rs packages
-pi-rs packages install <local-directory>
+pi-rs packages [--project] [--trust-store <dir>] [--show <name>]
+pi-rs packages install [--project] <local-directory>
 ```
 
 ---
 
 ### `trust`
-Record or inspect explicit project-level trust decisions.
+Record or inspect explicit project-level trust decisions. The store is supplied by the
+caller and is never inferred from the project being trusted.
 
 ```bash
-pi-rs trust list
-pi-rs trust allow <path>
-pi-rs trust deny <path>
+pi-rs trust --store <dir> --list
+pi-rs trust --store <dir> --project <path> --grant
+pi-rs trust --store <dir> --project <path> --deny
+pi-rs trust --store <dir> --project <path> --clear
 ```
 
 ---
@@ -118,17 +128,19 @@ pi-rs compat <path>
 ---
 
 ### `import`
-Import an upstream Pi session JSONL file into the native `pi-rs` store, reporting any non-round-trippable attributes.
+Plan or write an upstream Pi session JSONL file (or a directory of files) into the
+native `pi-rs` store. Nothing is executed; use `--write` to persist the import.
 
 ```bash
-pi-rs import <session-path>
+pi-rs import-pi <session-path> [--config <file> | --store <dir>] [--write]
 ```
 
 ---
 
 ### `export`
-Export a `pi-rs` session to an upstream Pi-compatible session JSONL format.
+Export a `pi-rs` session to an upstream Pi-compatible session JSONL format. Dropped
+metadata is reported on stderr rather than silently relabelled.
 
 ```bash
-pi-rs export <session-id> --output <file>
+pi-rs export <session-id> --config <file> [--out <file>]
 ```

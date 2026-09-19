@@ -530,7 +530,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pi-rs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossterm",
  "libc",
@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "pi-rs-compat"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "tempfile",
@@ -561,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "pi-rs-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "getrandom 0.3.4",
  "serde",
@@ -570,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "pi-rs-experiments"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pi-rs-core",
  "serde",
@@ -579,7 +579,7 @@ dependencies = [
 
 [[package]]
 name = "pi-rs-extension"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pi-rs-core",
  "serde",
@@ -589,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "pi-rs-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pi-rs-core",
  "pi-rs-tools",
@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "pi-rs-provider"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pi-rs-core",
  "serde",
@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "pi-rs-replay"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pi-rs-core",
  "serde",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "pi-rs-rkb"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pi-rs-core",
  "pi-rs-mcp",
@@ -630,7 +630,7 @@ dependencies = [
 
 [[package]]
 name = "pi-rs-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pi-rs-core",
  "pi-rs-provider",
@@ -641,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "pi-rs-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "fs4",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "pi-rs-tools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "pi-rs-core",
@@ -665,7 +665,7 @@ dependencies = [
 
 [[package]]
 name = "pi-rs-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossterm",
  "pi-rs-core",

@@ -1,6 +1,8 @@
 # Interactive TUI
 
-`pi-rs interactive` provides a high-efficiency terminal interface inspired by Pi, built natively with `ratatui` and `crossterm`.
+`pi-rs interactive` provides a high-efficiency terminal interface inspired by Pi, built
+with a terminal-native semantic renderer and `crossterm`. The renderer stays separate
+from runtime state and does not start optional providers.
 
 ```bash
 pi-rs interactive --config config.json
@@ -34,15 +36,15 @@ The terminal interface consists of three distinct visual zones:
 | Key / Shortcut | Action |
 | :--- | :--- |
 | `Enter` | Submit current prompt to the agent |
-| `Shift-Enter` / `Ctrl-J` | Insert newline in multi-line buffer |
+| `Ctrl-J` / `Ctrl-M` | Insert newline in multi-line buffer |
 | `Left` / `Right` | Move cursor left/right by character |
 | `Up` / `Down` | Move cursor up/down across lines in buffer |
 | `Home` / `End` | Jump to start / end of current line |
 | `Backspace` / `Delete` | Delete character before / under cursor |
 | `Ctrl-W` | Delete word backwards |
 | `Ctrl-U` | Clear line backwards to cursor |
-| `Tab` | Cycle slash-command completions (`/help`, `/skills`, etc.) |
-| `Ctrl-C` | Cancel in-flight model response or interrupt running tool |
+| `Tab` | Cycle slash-command and prompt-template completions |
+| `Ctrl-C` | Cancel an in-flight turn; on an empty idle draft, exit |
 | `Ctrl-D` / `/exit` | Exit interactive session |
 
 ---
@@ -56,3 +58,13 @@ The terminal interface consists of three distinct visual zones:
 - **Mutating Operations**: Highlighted warning badge for mutating operations (`write`, `edit`, `exec`).
 - **Success / Failure**: Green checkmarks for successful tool completions; prominent red callouts for failures and refusals.
 - **Monochrome Support**: Full fidelity in non-color terminals without escape sequence bleeding.
+
+## Built-in slash commands
+
+- `/help` — show commands.
+- `/compact [notes]` — summarize earlier context at an idle boundary.
+- `/compact-phase [phase] [--force]` — compact at a semantic phase boundary.
+- `/checkpoints` — list durable checkpoint capsules.
+- `/failover` and `/switch-back` — manually change between configured models.
+- `/mcp [list|enable <name>|disable <name>]` — inspect or lazily activate MCP servers.
+- `/quit` or `/exit` — end the session.

@@ -1,6 +1,6 @@
 # Tools & Sandbox Safety
 
-`pi-rs` includes four core built-in tools for agent coding tasks, designed around strict confinement and approval contracts.
+`pi-rs` includes five core built-in tools for agent coding tasks, designed around strict confinement, bounded output, and approval contracts.
 
 ---
 
@@ -21,7 +21,12 @@
 - **Parameters**: `path`, `old_text`, `new_text`.
 - **Classification**: **Mutating**. Ensures atomic replacement without unexpected collateral drift.
 
-### 4. `exec`
+### 4. `grep`
+- **Purpose**: Search workspace text with bounded results.
+- **Parameters**: Search pattern and path/options.
+- **Classification**: **Read-only by default**; search-directory expansion is separately policy-controlled.
+
+### 5. `exec`
 - **Purpose**: Execute shell commands within the workspace directory.
 - **Parameters**: `command`.
 - **Classification**: **Mutating**.
@@ -31,7 +36,9 @@
 ## Safety Guarantees
 
 ### Workspace Confinement Root
-At startup, the `--cwd` directory is canonicalized. All path operations are checked with realpath resolution to ensure symbolic links cannot escape the directory tree. Reading or writing paths outside the tree is blocked.
+At startup, the `--cwd` directory is canonicalized. File operations are checked with
+realpath resolution so traversal and outward-pointing symlink components cannot escape
+the workspace. Explicit policy flags are required to widen read, search, or write scope.
 
 ### Mutating Tool Guard
 Mutating tools (`write`, `edit`, `exec`) cannot run automatically unless explicitly permitted in your configuration:
@@ -44,7 +51,9 @@ Mutating tools (`write`, `edit`, `exec`) cannot run automatically unless explici
 }
 ```
 
-If `auto_approve_mutating` is `false` (default for untrusted runs), mutating requests return an explicit refusal event, preventing unintended side effects.
+If `auto_approve_mutating` is `false` (the default), mutating requests return an
+explicit refusal event, preventing unintended side effects. Enable it only for a
+trusted workspace.
 
 ### The Shell Escape Hatch
 `exec` intentionally spawns a shell process (`sh -c` on Unix) to enable compiler builds, test suites, and git operations. It is not an OS-level sandbox. If running untrusted agent code, execute `pi-rs` within Docker, a VM, or an isolated container sandbox.
