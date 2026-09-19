@@ -12,10 +12,8 @@ model-backed subagent solely to monitor usage.
 
 Use the highest relevant used percentage reported for the active provider.
 
-- **Below 85%:** normal bounded work may continue.
-- **98-99% (soft stop):** do not begin another substantive slice or spawn new model-backed workers. Finish the current bounded action, run necessary verification, push durable state, and prepare a concise resumable handoff.
-- **99% or higher (hard stop):** finish only the immediate safe action, stop ongoing delegated work gracefully, persist current state, and generate a handoff. Do not start additional implementation or review turns.
-- If usage rises by 20 or more percentage points between adjacent loop-boundary checks, treat the budget as rapidly draining: disable new delegation and finish the current slice even if usage remains below 85%.
+- **Below 98%:** normal bounded work may continue.
+- **98% or higher:** if 5-hour usage percentage is higher, check when their limit is reset, then wait until the 5-hour limit is reset (use `sleep <seconds>`). Wait two more minutes before resuming work. The same rule applied to weekly usage/limit. You should **not** check the usage/limit when you are waiting (to save tokens).
 
 Check at these points rather than running a dedicated monitor:
 
@@ -46,6 +44,9 @@ codexbar --provider codex --json-only | jq '.[0].usage.primary.resetDescription'
 
 # Weekly only results
 codexbar --provider codex --json-only | jq '.[0].usage.secondary.usedPercent'
+
+# When weekly limit is reset? (may be reset time point or remaining timedelta)
+codexbar --provider codex --json-only | jq '.[0].usage.secondary.resetDescription'
 ```
 
 For handoffs, record both percentages and the reset description so the next
