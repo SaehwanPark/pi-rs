@@ -1384,16 +1384,15 @@ impl Session {
             call.id
           )));
         }
-        let requests: Vec<_> = trace_report
-          .items
-          .iter()
-          .filter(|entry| {
-            matches!(
-              &entry.envelope.event,
-              AgentEvent::ToolRequested(requested) if requested.call_id == call.id
-            )
-          })
-          .collect();
+        let mut requests = Vec::new();
+        for entry in &trace_report.items {
+          let event = restore_externalized_event(entry, self)?;
+          if let AgentEvent::ToolRequested(requested) = event
+            && requested.call_id == call.id
+          {
+            requests.push((entry, requested));
+          }
+        }
         if requests.len() > 1 {
           return Err(StoreError::Invalid(format!(
             "session {} assistant tool call {} has duplicate canonical requests; resume requires recovery",
@@ -1401,15 +1400,29 @@ impl Session {
             call.id
           )));
         }
-        let exact = requests.first().is_some_and(|entry| {
-          let AgentEvent::ToolRequested(requested) = &entry.envelope.event else {
-            unreachable!("request filter only matches ToolRequested")
-          };
+        // Pi imports may omit model metadata on tool events; an explicit
+        // mismatch remains corruption, while absent metadata stays compatible.
+        let exact = requests.first().is_some_and(|(entry, requested)| {
           requested.name == call.name
             && requested.arguments == call.arguments
             && entry.envelope.meta.turn_id == Some(record.turn_id.clone())
-            && entry.envelope.meta.model_epoch == Some(record.epoch)
-            && entry.envelope.meta.model.as_ref() == Some(&record.model)
+            && entry
+              .envelope
+              .meta
+              .model_epoch
+              .is_none_or(|epoch| epoch == record.epoch)
+            && entry
+              .envelope
+              .meta
+              .model
+              .as_ref()
+              .is_none_or(|model| model == &record.model)
+            && entry
+              .envelope
+              .meta
+              .seq
+              .zip(assistant.envelope.meta.seq)
+              .is_some_and(|(request_seq, assistant_seq)| request_seq > assistant_seq)
         });
         if requests.len() == 1 && !exact {
           return Err(StoreError::Invalid(format!(
@@ -3048,16 +3061,36 @@ fn validate_projection_alignment(
         _ => None,
       })
     {
-      let requested = entries.iter().any(|entry| {
-        matches!(
-          &entry.envelope.event,
-          AgentEvent::ToolRequested(requested)
-            if requested.call_id == call.id
-              && requested.name == call.name
-              && requested.arguments == call.arguments
-              && entry.envelope.meta.turn_id == Some(message.turn_id.clone())
-        )
-      });
+      let mut requested = false;
+      for entry in entries {
+        let event = restore_externalized_event_from_blobs(entry, blobs, session)?;
+        if let AgentEvent::ToolRequested(candidate) = event
+          && candidate.call_id == call.id
+          && candidate.name == call.name
+          && candidate.arguments == call.arguments
+          && entry.envelope.meta.turn_id == Some(message.turn_id.clone())
+          && entry
+            .envelope
+            .meta
+            .model_epoch
+            .is_none_or(|epoch| epoch == message.epoch)
+          && entry
+            .envelope
+            .meta
+            .model
+            .as_ref()
+            .is_none_or(|model| model == &message.model)
+          && entry
+            .envelope
+            .meta
+            .seq
+            .zip(message.seq)
+            .is_some_and(|(request_seq, assistant_seq)| request_seq > assistant_seq)
+        {
+          requested = true;
+          break;
+        }
+      }
       if !requested {
         return Err(StoreError::Invalid(format!(
           "session {session} assistant tool call {} has no canonical ToolRequested event; resume requires recovery",
@@ -5453,6 +5486,84 @@ mod tests {
         if result.id == call_id
           && result.text == "not executed: process stopped before execution boundary"
     ));
+    resumed.finish().unwrap();
+  }
+
+  #[test]
+  fn assistant_tool_matching_restores_externalized_request_arguments() {
+    let tmp = TempDir::new("store-assistant-externalized-request");
+    let opened = store(&tmp);
+    let id = SessionId::from_string(uuidv7());
+    let turn = TurnId::new();
+    let call_id = ToolCallId::from_string("88888888-8888-4888-8888-888888888886");
+    let arguments = serde_json::json!({"payload": "x".repeat(20_000)});
+    {
+      let mut session = opened.begin(header(&id)).unwrap();
+      let mut started = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ModelRequestStarted(ModelRequestStarted {
+          epoch: 0,
+          model: ModelRef::new("local", "qwen"),
+          message_count: 1,
+          context_tokens_est: 12,
+          tools_exposed: 1,
+        }),
+      );
+      session.emit(&mut started).unwrap();
+      let assistant = Message::new(
+        Role::Assistant,
+        vec![ContentBlock::ToolCall(ToolCallBlock {
+          id: call_id.clone(),
+          name: "read".into(),
+          arguments: arguments.clone(),
+        })],
+      );
+      let mut completion = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ModelRequestCompleted(ModelRequestCompleted {
+          epoch: 0,
+          model: ModelRef::new("local", "qwen"),
+          finish_reason: Some("tool_calls".into()),
+          input_tokens: Some(12),
+          output_tokens: Some(4),
+          duration_ms: 1,
+          tool_calls: 1,
+          reasoning_provenance: None,
+          first_delta_ms: Some(0),
+        }),
+      );
+      session.emit_message(&mut completion, &assistant).unwrap();
+      let mut requested = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ToolRequested(ToolRequested {
+          call_id,
+          name: "read".into(),
+          arguments,
+          read_only: true,
+        }),
+      );
+      session.emit(&mut requested).unwrap();
+    }
+
+    let resumed = opened
+      .resume(&id)
+      .expect("externalized request arguments must compare after blob restoration");
+    let trace = TraceJournal::read(resumed.trace_path()).unwrap();
+    assert_eq!(
+      trace
+        .items
+        .iter()
+        .filter(|entry| matches!(entry.envelope.event, AgentEvent::ToolRequested(_)))
+        .count(),
+      1,
+      "matching externalized request is not synthesized a second time"
+    );
+    assert!(
+      trace
+        .items
+        .iter()
+        .any(|entry| { matches!(entry.envelope.event, AgentEvent::ToolFailed(_)) })
+    );
     resumed.finish().unwrap();
   }
 
