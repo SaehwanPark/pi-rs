@@ -16,7 +16,7 @@
 //! No regex crate is introduced for this: the patterns are token-shaped, and a
 //! bounded token scan is cheaper on the startup path and easier to audit.
 
-use std::sync::OnceLock;
+use std::{fmt, sync::OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -76,7 +76,7 @@ impl Redacted {
 }
 
 /// Redaction policy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedactionPolicy {
   /// `false` disables redaction. Disabling is an explicit config choice, never
   /// inferred, because it has a security consequence.
@@ -85,10 +85,23 @@ pub struct RedactionPolicy {
   /// not mangle ordinary prose.
   pub min_secret_len: usize,
   /// Additional literal values to redact, for example a project token.
-  #[serde(default)]
+  #[serde(default, skip_serializing)]
   pub literals: Vec<String>,
   /// Scan for process environment values that look like credentials.
   pub scan_environment: bool,
+}
+
+impl fmt::Debug for RedactionPolicy {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let literals = self.literals.iter().map(|_| MARKER).collect::<Vec<_>>();
+    formatter
+      .debug_struct("RedactionPolicy")
+      .field("enabled", &self.enabled)
+      .field("min_secret_len", &self.min_secret_len)
+      .field("literals", &literals)
+      .field("scan_environment", &self.scan_environment)
+      .finish()
+  }
 }
 
 impl Default for RedactionPolicy {

@@ -17,7 +17,7 @@ use std::{
   fmt,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 
 use crate::{
   capability::{ModelCapabilities, ModelRef, ReasoningExposure},
@@ -40,7 +40,11 @@ pub struct ModelEndpoint {
   pub provider: String,
   pub model: String,
   /// HTTP base URL for an OpenAI-compatible endpoint, if remote.
-  #[serde(default, skip_serializing_if = "Option::is_none")]
+  #[serde(
+    default,
+    skip_serializing_if = "Option::is_none",
+    serialize_with = "serialize_optional_redacted_url"
+  )]
   pub base_url: Option<String>,
   /// Environment variable holding the credential. Preferred over `api_key`.
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,7 +69,7 @@ impl fmt::Debug for ModelEndpoint {
       .debug_struct("ModelEndpoint")
       .field("provider", &self.provider)
       .field("model", &self.model)
-      .field("base_url", &self.base_url)
+      .field("base_url", &self.base_url.as_deref().map(redact_url))
       .field("api_key_env", &self.api_key_env)
       .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
       .field("capabilities", &self.capabilities)
@@ -267,17 +271,25 @@ pub struct McpServerConfig {
   pub command: String,
   #[serde(default)]
   pub args: Vec<String>,
-  #[serde(default)]
+  #[serde(default, serialize_with = "serialize_redacted_values")]
   pub env: BTreeMap<String, String>,
   #[serde(default)]
   pub enabled: bool,
   #[serde(default)]
   pub read_only_tools: Vec<String>,
   /// Streamable HTTP endpoint. When present, no child process is spawned.
-  #[serde(default, skip_serializing_if = "Option::is_none")]
+  #[serde(
+    default,
+    skip_serializing_if = "Option::is_none",
+    serialize_with = "serialize_optional_redacted_url"
+  )]
   pub url: Option<String>,
   /// Additional HTTP headers for a network MCP endpoint.
-  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  #[serde(
+    default,
+    skip_serializing_if = "BTreeMap::is_empty",
+    serialize_with = "serialize_redacted_values"
+  )]
   pub headers: BTreeMap<String, String>,
 }
 
@@ -525,6 +537,30 @@ impl RuntimeConfig {
   }
 }
 
+fn serialize_optional_redacted_url<S>(
+  url: &Option<String>,
+  serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+  S: Serializer,
+{
+  url.as_deref().map(redact_url).serialize(serializer)
+}
+
+fn serialize_redacted_values<S>(
+  values: &BTreeMap<String, String>,
+  serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+  S: Serializer,
+{
+  let mut map = serializer.serialize_map(Some(values.len()))?;
+  for name in values.keys() {
+    map.serialize_entry(name, "[redacted]")?;
+  }
+  map.end()
+}
+
 fn valid_http_header_name(name: &str) -> bool {
   !name.is_empty()
     && name.bytes().all(|byte| {
@@ -563,13 +599,30 @@ fn is_protocol_header(name: &str) -> bool {
 }
 
 fn redact_url(url: &str) -> String {
-  if let Some((base, _)) = url.split_once('?') {
+  let safe = if let Some((scheme, authority_and_path)) = url.split_once("://") {
+    let authority_end = authority_and_path
+      .find(|character| matches!(character, '/' | '?' | '#'))
+      .unwrap_or(authority_and_path.len());
+    let authority = &authority_and_path[..authority_end];
+    if let Some(at) = authority.rfind('@') {
+      format!(
+        "{scheme}://[redacted]@{}{}",
+        &authority[at + 1..],
+        &authority_and_path[authority_end..]
+      )
+    } else {
+      url.to_string()
+    }
+  } else {
+    url.to_string()
+  };
+  if let Some((base, _)) = safe.split_once('?') {
     return format!("{base}?[redacted]");
   }
-  if let Some((base, _)) = url.split_once('#') {
+  if let Some((base, _)) = safe.split_once('#') {
     return format!("{base}#[redacted]");
   }
-  url.to_string()
+  safe
 }
 
 fn url_has_userinfo(url: &str) -> bool {
@@ -654,6 +707,15 @@ mod tests {
   fn literal_credentials_are_never_written_or_debug_printed() {
     let mut config = sample_config();
     config.endpoints[0].api_key = Some("local-debug-key".into());
+    config.redaction.literals = vec!["literal-redaction-secret".into()];
+    config.mcp_servers.push(
+      McpServerConfig::new("remote", "command")
+        .with_env(BTreeMap::from([("TOKEN".into(), "env-secret".into())]))
+        .with_headers(BTreeMap::from([(
+          "authorization".into(),
+          "Bearer mcp-secret".into(),
+        )])),
+    );
     let json = serde_json::to_string(&config.endpoints[0]).unwrap();
     assert!(
       !json.contains("local-debug-key"),
@@ -669,12 +731,31 @@ mod tests {
       !runtime_debug.contains("local-debug-key"),
       "{runtime_debug}"
     );
+    assert!(
+      !runtime_debug.contains("literal-redaction-secret"),
+      "{runtime_debug}"
+    );
+    assert!(!runtime_debug.contains("env-secret"), "{runtime_debug}");
+    assert!(
+      !runtime_debug.contains("Bearer mcp-secret"),
+      "{runtime_debug}"
+    );
+    let direct_json = serde_json::to_string(&config).unwrap();
+    assert!(
+      !direct_json.contains("literal-redaction-secret"),
+      "{direct_json}"
+    );
+    assert!(!direct_json.contains("env-secret"), "{direct_json}");
+    assert!(!direct_json.contains("Bearer mcp-secret"), "{direct_json}");
     let json = config.to_json_string().unwrap();
     assert!(
       !json.contains("local-debug-key"),
       "config output must not carry secrets: {json}"
     );
     assert!(json.contains("http://127.0.0.1:8080/v1"));
+    assert!(!json.contains("literal-redaction-secret"), "{json}");
+    assert!(!json.contains("env-secret"), "{json}");
+    assert!(!json.contains("Bearer mcp-secret"), "{json}");
   }
 
   #[test]

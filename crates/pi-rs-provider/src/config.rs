@@ -15,7 +15,7 @@ use std::{
 };
 
 use pi_rs_core::{CapabilityGap, ModelCapabilities, ModelEndpoint, ReasoningExposure};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 
 /// Base URL used when nothing is configured.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -32,6 +32,7 @@ pub struct ProviderConfig {
   /// Human-readable name.
   pub name: String,
   /// API root, for example `http://127.0.0.1:8080/v1`.
+  #[serde(serialize_with = "serialize_redacted_url")]
   pub base_url: String,
   /// Model id used when a request does not name one.
   pub model: String,
@@ -41,7 +42,10 @@ pub struct ProviderConfig {
   pub api_key: Option<String>,
   /// Environment variable holding the credential.
   pub api_key_env: Option<String>,
-  /// Extra headers, for example a gateway routing hint.
+  /// Extra headers, for example a gateway routing hint. Values are redacted
+  /// when this configuration is serialized because arbitrary headers may carry
+  /// credentials even when they are not named `api_key`.
+  #[serde(serialize_with = "serialize_redacted_values")]
   pub headers: BTreeMap<String, String>,
   /// Declared capabilities. A claim, never a discovery result.
   pub capabilities: ModelCapabilities,
@@ -68,7 +72,7 @@ impl fmt::Debug for ProviderConfig {
       .debug_struct("ProviderConfig")
       .field("id", &self.id)
       .field("name", &self.name)
-      .field("base_url", &self.base_url)
+      .field("base_url", &redact_url(&self.base_url))
       .field("model", &self.model)
       .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
       .field("api_key_env", &self.api_key_env)
@@ -292,6 +296,54 @@ impl ProviderConfig {
   }
 }
 
+fn redact_url(url: &str) -> String {
+  let safe = if let Some((scheme, authority_and_path)) = url.split_once("://") {
+    let authority_end = authority_and_path
+      .find(|character| matches!(character, '/' | '?' | '#'))
+      .unwrap_or(authority_and_path.len());
+    let authority = &authority_and_path[..authority_end];
+    if let Some(at) = authority.rfind('@') {
+      format!(
+        "{scheme}://[redacted]@{}{}",
+        &authority[at + 1..],
+        &authority_and_path[authority_end..]
+      )
+    } else {
+      url.to_string()
+    }
+  } else {
+    url.to_string()
+  };
+  if let Some((base, _)) = safe.split_once('?') {
+    return format!("{base}?[redacted]");
+  }
+  if let Some((base, _)) = safe.split_once('#') {
+    return format!("{base}#[redacted]");
+  }
+  safe
+}
+
+fn serialize_redacted_url<S>(url: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+  S: Serializer,
+{
+  redact_url(url).serialize(serializer)
+}
+
+fn serialize_redacted_values<S>(
+  values: &BTreeMap<String, String>,
+  serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+  S: Serializer,
+{
+  let mut map = serializer.serialize_map(Some(values.len()))?;
+  for name in values.keys() {
+    map.serialize_entry(name, "[redacted]")?;
+  }
+  map.end()
+}
+
 fn url_has_userinfo(url: &str) -> bool {
   let Some((_, authority_and_path)) = url.split_once("://") else {
     return false;
@@ -439,6 +491,8 @@ mod tests {
     };
     let text = serde_json::to_string(&with_key).unwrap();
     assert!(!text.contains("sk-secret"), "{text}");
+    assert!(!text.contains("Bearer secret"), "{text}");
+    assert!(text.contains("[redacted]"), "{text}");
     let debug = format!("{with_key:?}");
     assert!(!debug.contains("sk-secret"), "{debug}");
     assert!(!debug.contains("Bearer secret"), "{debug}");

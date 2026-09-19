@@ -90,6 +90,11 @@ impl BlobStore {
     let encoded = encode(bytes, blob.compression)?;
     let final_path = self.path_for(&blob);
     if final_path.exists() && self.verify(&blob)? {
+      // Even a pre-existing valid object must have its directory entry synced
+      // before a caller can durably publish a reference to it. This covers a
+      // concurrent writer whose rename completed but whose directory sync has
+      // not yet happened, as well as objects left by an older writer.
+      sync_parent(&final_path)?;
       return Ok(blob);
     }
     if let Some(parent) = final_path.parent() {
@@ -120,13 +125,39 @@ impl BlobStore {
         Ok(blob)
       }
       Err(error) => {
-        let _ = fs::remove_file(&temp);
         // Another writer may have won the race. Never accept that path merely
         // because it exists: verify the winner's decoded bytes before returning
         // a reference that may immediately become durable elsewhere.
-        if final_path.exists() && self.verify(&blob)? {
-          return Ok(blob);
+        if final_path.exists() {
+          if self.verify(&blob)? {
+            sync_parent(&final_path)?;
+            let _ = fs::remove_file(&temp);
+            return Ok(blob);
+          }
+          // Windows does not replace an existing destination on rename. A
+          // disagreeing object is safe to replace here because this writer's
+          // content-addressed bytes are the same reference being repaired; if
+          // another writer published the valid winner between the check and
+          // removal, the final verification below still gates success.
+          if fs::remove_file(&final_path).is_ok() {
+            match fs::rename(&temp, &final_path) {
+              Ok(()) if self.verify(&blob)? => {
+                sync_parent(&final_path)?;
+                return Ok(blob);
+              }
+              Ok(()) => {}
+              Err(rename_error) => {
+                let _ = fs::remove_file(&temp);
+                if final_path.exists() && self.verify(&blob)? {
+                  sync_parent(&final_path)?;
+                  return Ok(blob);
+                }
+                return Err(StoreError::Io(rename_error));
+              }
+            }
+          }
         }
+        let _ = fs::remove_file(&temp);
         Err(StoreError::Io(error))
       }
     }
