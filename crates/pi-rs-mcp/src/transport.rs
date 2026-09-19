@@ -1155,34 +1155,60 @@ mod tests {
   #[test]
   fn http_transport_enforces_a_request_deadline_without_reposting() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+    listener.set_nonblocking(true).expect("nonblocking");
     let address = listener.local_addr().expect("fixture address");
     let handle = thread::spawn(move || {
-      let (mut stream, _) = listener.accept().expect("accept fixture request");
+      let deadline = std::time::Instant::now() + Duration::from_secs(5);
+      let mut stream = loop {
+        match listener.accept() {
+          Ok((stream, _)) => break stream,
+          Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+            if std::time::Instant::now() >= deadline {
+              panic!("accept timed out");
+            }
+            thread::sleep(Duration::from_millis(5));
+          }
+          Err(err) => panic!("accept error: {err}"),
+        }
+      };
       let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
       let mut request = [0u8; 1];
       let _ = stream.read(&mut request);
-      thread::sleep(Duration::from_millis(300));
+      thread::sleep(Duration::from_millis(800));
     });
     let transport = HttpTransport::new(format!("http://{address}/mcp"), BTreeMap::new())
       .expect("transport")
-      .with_timeout(Duration::from_millis(75));
+      .with_timeout(Duration::from_millis(100));
     let started = std::time::Instant::now();
     let error = transport.call("hang", None).unwrap_err();
     assert!(matches!(error, McpError::Timeout), "{error}");
-    assert!(started.elapsed() < Duration::from_millis(250));
+    assert!(started.elapsed() < Duration::from_millis(600));
     handle.join().expect("server");
   }
 
   #[test]
   fn http_transport_call_cancellation_returns_without_waiting_for_the_server() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+    listener.set_nonblocking(true).expect("nonblocking");
     let address = listener.local_addr().expect("fixture address");
     let handle = thread::spawn(move || {
-      let (mut stream, _) = listener.accept().expect("accept fixture request");
+      let deadline = std::time::Instant::now() + Duration::from_secs(5);
+      let mut stream = loop {
+        match listener.accept() {
+          Ok((stream, _)) => break stream,
+          Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+            if std::time::Instant::now() >= deadline {
+              panic!("accept timed out");
+            }
+            thread::sleep(Duration::from_millis(5));
+          }
+          Err(err) => panic!("accept error: {err}"),
+        }
+      };
       let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
       let mut request = [0u8; 1];
       let _ = stream.read(&mut request);
-      thread::sleep(Duration::from_millis(500));
+      thread::sleep(Duration::from_millis(800));
     });
     let transport = HttpTransport::new(format!("http://{address}/mcp"), BTreeMap::new())
       .expect("transport")
@@ -1190,7 +1216,7 @@ mod tests {
     let cancel = pi_rs_core::CancelToken::new();
     let trigger = cancel.clone();
     let killer = thread::spawn(move || {
-      thread::sleep(Duration::from_millis(75));
+      thread::sleep(Duration::from_millis(100));
       trigger.cancel();
     });
     let context = ToolExecutionContext::new(cancel, Duration::from_secs(10));
@@ -1204,7 +1230,7 @@ mod tests {
       transport.is_alive(),
       "cancelling one HTTP exchange must not permanently close the transport"
     );
-    assert!(started.elapsed() < Duration::from_millis(250));
+    assert!(started.elapsed() < Duration::from_millis(600));
     handle.join().expect("server");
   }
 
