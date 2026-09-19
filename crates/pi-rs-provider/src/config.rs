@@ -24,7 +24,7 @@ pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub(crate) const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 
 /// Configuration for one OpenAI-compatible endpoint.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProviderConfig {
   /// Provider id used in `provider/model` references.
@@ -59,6 +59,29 @@ pub struct ProviderConfig {
   /// event. The adapter's worker boundary keeps cancellation independent from
   /// this potentially long blocking socket timeout.
   pub read_timeout_ms: u64,
+}
+
+impl fmt::Debug for ProviderConfig {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let header_names: Vec<&str> = self.headers.keys().map(String::as_str).collect();
+    formatter
+      .debug_struct("ProviderConfig")
+      .field("id", &self.id)
+      .field("name", &self.name)
+      .field("base_url", &self.base_url)
+      .field("model", &self.model)
+      .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+      .field("api_key_env", &self.api_key_env)
+      .field("header_names", &header_names)
+      .field("capabilities", &self.capabilities)
+      .field("max_output_tokens", &self.max_output_tokens)
+      .field("max_tokens_field", &self.max_tokens_field)
+      .field("thinking_input", &self.thinking_input)
+      .field("stream", &self.stream)
+      .field("connect_timeout_ms", &self.connect_timeout_ms)
+      .field("read_timeout_ms", &self.read_timeout_ms)
+      .finish()
+  }
 }
 
 impl Default for ProviderConfig {
@@ -249,6 +272,11 @@ impl ProviderConfig {
         "base_url must start with http:// or https://",
       ));
     }
+    if url_has_userinfo(base) {
+      return Err(BuildError::Invalid(
+        "base_url must not contain userinfo credentials",
+      ));
+    }
     if !self.capabilities.text {
       return Err(BuildError::MissingCapability(CapabilityGap::Text));
     }
@@ -262,6 +290,16 @@ impl ProviderConfig {
       .and_then(|name| std::env::var(name).ok())
       .filter(|value| !value.trim().is_empty())
   }
+}
+
+fn url_has_userinfo(url: &str) -> bool {
+  let Some((_, authority_and_path)) = url.split_once("://") else {
+    return false;
+  };
+  authority_and_path
+    .split_once('/')
+    .map(|(authority, _)| authority.contains('@'))
+    .unwrap_or_else(|| authority_and_path.contains('@'))
 }
 
 /// One pooled agent per timeout and proxy-environment profile.
@@ -393,13 +431,28 @@ mod tests {
   }
 
   #[test]
-  fn credential_survives_serialization_as_absent() {
+  fn credentials_are_absent_from_serialization_and_debug() {
     let with_key = ProviderConfig {
       api_key: Some("sk-secret".into()),
+      headers: BTreeMap::from([(String::from("Authorization"), String::from("Bearer secret"))]),
       ..config()
     };
     let text = serde_json::to_string(&with_key).unwrap();
     assert!(!text.contains("sk-secret"), "{text}");
+    let debug = format!("{with_key:?}");
+    assert!(!debug.contains("sk-secret"), "{debug}");
+    assert!(!debug.contains("Bearer secret"), "{debug}");
+    assert!(debug.contains("header_names"), "{debug}");
+  }
+
+  #[test]
+  fn userinfo_credentials_are_rejected() {
+    let mut broken = config();
+    broken.base_url = "https://user:secret@example.test/v1".into();
+    assert!(matches!(
+      broken.validate(),
+      Err(BuildError::Invalid(message)) if message.contains("userinfo")
+    ));
   }
 
   #[test]

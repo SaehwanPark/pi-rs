@@ -536,6 +536,24 @@ pub(crate) fn restore_from_report(
       }
       SessionRecord::Epoch(epoch) => epochs.push(epoch.clone()),
       SessionRecord::Compaction(compaction) => {
+        if compaction.aborted {
+          if compaction.level == pi_rs_core::ContextLevel::L3Checkpoint
+            || compaction.removed_messages != 0
+            || compaction.summary_present
+            || compaction.replaces_from.is_some()
+            || compaction.replaces_through.is_some()
+          {
+            return Err(StoreError::Invalid(format!(
+              "{} contains an invalid aborted compaction marker",
+              path.display()
+            )));
+          }
+          if let Some(summary_event_id) = &compaction.summary_event_id {
+            messages.retain(|message| &message.event_id != summary_event_id);
+          }
+          compactions.push(compaction.clone());
+          continue;
+        }
         match (compaction.replaces_from, compaction.replaces_through) {
           (None, None) => {}
           (Some(from), Some(through)) if from.0 > 0 && from <= through => {}
@@ -1144,6 +1162,9 @@ mod tests {
         summary_present: false,
         replaces_from: None,
         replaces_through: None,
+        aborted: false,
+        start_event_id: None,
+        summary_event_id: None,
       }))
       .unwrap();
     drop(log);
@@ -1191,6 +1212,9 @@ mod tests {
         summary_present: false,
         replaces_from: None,
         replaces_through: None,
+        aborted: false,
+        start_event_id: None,
+        summary_event_id: None,
       }))
       .unwrap();
     drop(log);
@@ -1221,6 +1245,9 @@ mod tests {
         summary_present: true,
         replaces_from: Some(EventSeq(1)),
         replaces_through: Some(EventSeq(2)),
+        aborted: false,
+        start_event_id: None,
+        summary_event_id: None,
       }))
       .unwrap();
     log.append(&message("new", 4)).unwrap();
@@ -1267,6 +1294,9 @@ mod tests {
         summary_present: true,
         replaces_from: None,
         replaces_through: None,
+        aborted: false,
+        start_event_id: None,
+        summary_event_id: None,
       }))
       .unwrap();
     drop(log);
@@ -1333,6 +1363,9 @@ mod tests {
           summary_present: true,
           replaces_from: None,
           replaces_through: None,
+          aborted: false,
+          start_event_id: None,
+          summary_event_id: None,
         })],
       ),
       (
@@ -1349,6 +1382,9 @@ mod tests {
             summary_present: true,
             replaces_from: None,
             replaces_through: None,
+            aborted: false,
+            start_event_id: None,
+            summary_event_id: None,
           }),
         ],
       ),
@@ -1367,6 +1403,9 @@ mod tests {
             summary_present: true,
             replaces_from: None,
             replaces_through: None,
+            aborted: false,
+            start_event_id: None,
+            summary_event_id: None,
           }),
         ],
       ),

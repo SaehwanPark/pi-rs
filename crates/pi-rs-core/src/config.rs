@@ -34,7 +34,7 @@ pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
 /// One configured model endpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelEndpoint {
   /// Provider id used in `provider/model` references.
   pub provider: String,
@@ -45,8 +45,8 @@ pub struct ModelEndpoint {
   /// Environment variable holding the credential. Preferred over `api_key`.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub api_key_env: Option<String>,
-  /// Literal credential for a local endpoint. Never serialized back out.
-  #[serde(default, skip_serializing_if = "Option::is_none")]
+  /// Literal credential for a local endpoint. Never serialized or debug-printed.
+  #[serde(default, skip_serializing)]
   pub api_key: Option<String>,
   pub capabilities: ModelCapabilities,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,6 +57,23 @@ pub struct ModelEndpoint {
   /// Optional logical idle deadline for this HTTP endpoint.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub read_timeout_ms: Option<u64>,
+}
+
+impl fmt::Debug for ModelEndpoint {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("ModelEndpoint")
+      .field("provider", &self.provider)
+      .field("model", &self.model)
+      .field("base_url", &self.base_url)
+      .field("api_key_env", &self.api_key_env)
+      .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+      .field("capabilities", &self.capabilities)
+      .field("max_output_tokens", &self.max_output_tokens)
+      .field("connect_timeout_ms", &self.connect_timeout_ms)
+      .field("read_timeout_ms", &self.read_timeout_ms)
+      .finish()
+  }
 }
 
 impl ModelEndpoint {
@@ -425,6 +442,12 @@ impl RuntimeConfig {
           endpoint.provider, endpoint.model
         )));
       }
+      if endpoint.base_url.as_deref().is_some_and(url_has_userinfo) {
+        return Err(ConfigError(format!(
+          "endpoint {}/{} URL must not contain userinfo credentials",
+          endpoint.provider, endpoint.model
+        )));
+      }
       for (name, timeout) in [
         ("connect_timeout_ms", endpoint.connect_timeout_ms),
         ("read_timeout_ms", endpoint.read_timeout_ms),
@@ -628,15 +651,37 @@ mod tests {
   }
 
   #[test]
-  fn literal_credentials_are_never_written_out() {
+  fn literal_credentials_are_never_written_or_debug_printed() {
     let mut config = sample_config();
     config.endpoints[0].api_key = Some("local-debug-key".into());
+    let json = serde_json::to_string(&config.endpoints[0]).unwrap();
+    assert!(
+      !json.contains("local-debug-key"),
+      "endpoint serialization must not carry secrets: {json}"
+    );
+    let endpoint_debug = format!("{:?}", config.endpoints[0]);
+    assert!(
+      !endpoint_debug.contains("local-debug-key"),
+      "{endpoint_debug}"
+    );
+    let runtime_debug = format!("{config:?}");
+    assert!(
+      !runtime_debug.contains("local-debug-key"),
+      "{runtime_debug}"
+    );
     let json = config.to_json_string().unwrap();
     assert!(
       !json.contains("local-debug-key"),
       "config output must not carry secrets: {json}"
     );
     assert!(json.contains("http://127.0.0.1:8080/v1"));
+  }
+
+  #[test]
+  fn endpoint_userinfo_credentials_are_rejected() {
+    let mut config = sample_config();
+    config.endpoints[0].base_url = Some("https://user:secret@example.test/v1".into());
+    assert!(config.validate().unwrap_err().0.contains("userinfo"));
   }
 
   #[test]

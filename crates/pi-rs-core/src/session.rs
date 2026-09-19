@@ -131,6 +131,22 @@ pub struct SessionCompactionRecord {
   pub replaces_from: Option<EventSeq>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub replaces_through: Option<EventSeq>,
+  /// `true` for a durable rollback marker written after a process stopped
+  /// during an L1/L2 compaction. The staged summary remains canonical history,
+  /// but resume must not expose it in the model-visible projection.
+  #[serde(default, skip_serializing_if = "is_false")]
+  pub aborted: bool,
+  /// Start event closed by an aborted compaction marker.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub start_event_id: Option<EventId>,
+  /// Staged summary event ignored by an aborted compaction, when one reached the
+  /// canonical trace before the process stopped.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub summary_event_id: Option<EventId>,
+}
+
+fn is_false(value: &bool) -> bool {
+  !*value
 }
 
 /// A durable projection of an L0 history eviction.

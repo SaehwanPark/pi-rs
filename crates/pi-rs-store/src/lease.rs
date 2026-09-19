@@ -7,13 +7,13 @@
 //! the mutual-exclusion primitive.
 //!
 //! Lease directories from the pre-lock format are accepted conservatively. They
-//! are consulted only when the new lock file is empty, and their PID marker is
+//! are consulted only when the new lock file is absent, and their PID marker is
 //! never used for leases written by this build; an old marker may require manual
 //! cleanup when no kernel lock file exists.
 
 use std::{
   fs::{self, File, OpenOptions},
-  io::{self, Seek, SeekFrom, Write},
+  io::{self, Read, Seek, SeekFrom, Write},
   path::Path,
 };
 
@@ -50,21 +50,30 @@ impl SessionLease {
     }
 
     let lock_path = path.join(LOCK_FILE);
-    let mut file = OpenOptions::new()
-      .read(true)
-      .write(true)
-      .create(true)
-      .truncate(false)
-      .open(&lock_path)?;
-
+    let lock_preexists = lock_path.exists();
     // A directory written by an older pi-rs process has an owner marker but no
-    // lock marker. Do not let a new process overlap a still-running old writer;
-    // once that process exits, the kernel lock below becomes the only primitive
-    // used by this build. This branch is migration compatibility, not normal
+    // lock file. Do not let a new process overlap a still-running old writer;
+    // once a lock file exists, even an empty one, the kernel lock is the only
+    // authority. This branch is one-time migration compatibility, not normal
     // lease liveness.
-    if file.metadata()?.len() == 0 && path.join(OWNER_FILE).exists() && legacy_owner_alive(path) {
+    if !lock_preexists && path.join(OWNER_FILE).exists() && legacy_owner_alive(path) {
       return Err(active_error(path));
     }
+    let mut file = match OpenOptions::new()
+      .read(true)
+      .write(true)
+      .create_new(true)
+      .open(&lock_path)
+    {
+      Ok(file) => {
+        sync_lease_directory(path)?;
+        file
+      }
+      Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+        OpenOptions::new().read(true).write(true).open(&lock_path)?
+      }
+      Err(error) => return Err(StoreError::Io(error)),
+    };
 
     if let Err(error) = file.try_lock_exclusive() {
       if is_lock_contended(&error) {
@@ -73,11 +82,11 @@ impl SessionLease {
       return Err(StoreError::Io(error));
     }
 
-    let token = uuidv7();
-    if let Err(error) = write_lock_marker(&mut file, &token) {
+    if let Err(error) = ensure_lock_marker(&mut file) {
       let _ = fs4::FileExt::unlock(&file);
-      return Err(StoreError::Io(error));
+      return Err(error);
     }
+    let token = uuidv7();
     if let Err(error) = write_owner_marker(path, &token) {
       let _ = fs4::FileExt::unlock(&file);
       return Err(StoreError::Io(error));
@@ -94,15 +103,15 @@ impl SessionLease {
       return false;
     }
     let lock_path = path.join(LOCK_FILE);
-    let Ok(file) = OpenOptions::new().read(true).write(true).open(lock_path) else {
+    if !lock_path.exists() {
       // An old-format directory may not have a lock file yet. Be conservative
       // when the owner marker is unreadable; retention must not delete a live
       // session merely because it cannot inspect its compatibility marker.
-      return path.join(OWNER_FILE).exists();
-    };
-    if file.metadata().map(|meta| meta.len()).unwrap_or(0) == 0 && path.join(OWNER_FILE).exists() {
-      return legacy_owner_alive(path);
+      return path.join(OWNER_FILE).exists() && legacy_owner_alive(path);
     }
+    let Ok(file) = OpenOptions::new().read(true).write(true).open(lock_path) else {
+      return true;
+    };
     match file.try_lock_exclusive() {
       Ok(()) => {
         let _ = fs4::FileExt::unlock(&file);
@@ -135,11 +144,55 @@ fn is_lock_contended(error: &io::Error) -> bool {
       .is_some_and(|(actual, contended)| actual == contended)
 }
 
-fn write_lock_marker(file: &mut File, token: &str) -> io::Result<()> {
-  file.set_len(0)?;
+fn ensure_lock_marker(file: &mut File) -> Result<(), StoreError> {
   file.seek(SeekFrom::Start(0))?;
-  writeln!(file, "{LOCK_MARKER}\n{token}")?;
-  file.sync_all()
+  let mut contents = Vec::new();
+  file.read_to_end(&mut contents)?;
+  if contents.is_empty() {
+    // The file's existence is the durable format marker. An empty file can only
+    // be a newly created marker whose publication was interrupted; fill it while
+    // holding the kernel lock, without a destructive truncate/rewrite.
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(format!("{LOCK_MARKER}\n").as_bytes())?;
+    file.flush()?;
+    file.sync_all()?;
+    sync_lease_directory_from_file(file)?;
+    return Ok(());
+  }
+  if contents
+    .split(|byte| *byte == b'\n')
+    .next()
+    .is_some_and(|line| line == LOCK_MARKER.as_bytes())
+  {
+    return Ok(());
+  }
+  Err(StoreError::Invalid(
+    "session lease lock marker is corrupt; manual recovery required".into(),
+  ))
+}
+
+#[cfg(unix)]
+fn sync_lease_directory(path: &Path) -> Result<(), StoreError> {
+  File::open(path)?.sync_all()?;
+  Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_lease_directory(_path: &Path) -> Result<(), StoreError> {
+  Ok(())
+}
+
+#[cfg(unix)]
+fn sync_lease_directory_from_file(file: &File) -> Result<(), StoreError> {
+  // The parent directory is not recoverable from a handle alone on every
+  // platform; the file sync above is the required marker durability boundary.
+  let _ = file;
+  Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_lease_directory_from_file(_file: &File) -> Result<(), StoreError> {
+  Ok(())
 }
 
 fn write_owner_marker(path: &Path, token: &str) -> io::Result<()> {
@@ -234,6 +287,24 @@ mod tests {
     assert!(!SessionLease::is_active(&path));
     let second = SessionLease::acquire(&path).unwrap();
     drop(second);
+  }
+
+  #[test]
+  fn an_existing_empty_lock_file_is_not_reinterpreted_as_a_legacy_lease() {
+    let tmp = TempDir::new("lease-empty-marker");
+    let path = tmp.path().join("session.lease");
+    fs::create_dir_all(&path).unwrap();
+    fs::write(path.join(LOCK_FILE), b"").unwrap();
+    fs::write(
+      path.join(OWNER_FILE),
+      format!("{}\nold-token", std::process::id()),
+    )
+    .unwrap();
+
+    let lease = SessionLease::acquire(&path).expect("kernel lock owns an existing marker file");
+    drop(lease);
+    let marker = fs::read_to_string(path.join(LOCK_FILE)).unwrap();
+    assert_eq!(marker, format!("{LOCK_MARKER}\n"));
   }
 
   #[test]
