@@ -652,6 +652,7 @@ impl Session {
   ) -> Result<EventSeq, StoreError> {
     if let Some(record) = projection.as_ref() {
       validate_projection_size(&envelope.meta.event_id, record, &self.policy.redaction)?;
+      validate_session_record_size(record, &self.policy.redaction)?;
     }
     let tx_id = self.wal.prepare(envelope)?;
     let seq = self.journal.append_bounded(
@@ -695,8 +696,21 @@ impl Session {
     }
 
     validate_message_envelope(envelope)?;
-    let recovery = self.prepare_message_recovery(message)?;
-    let tx_id = self.wal.prepare_message(envelope, recovery)?;
+    // Preflight the final redacted semantic line before creating recovery
+    // payloads or changing durable state. Otherwise the canonical event could
+    // be committed while the projection is permanently too large to append.
+    let projected = self.message_record(envelope, message, self.journal.next_seq())?;
+    validate_session_record_size(&projected, &self.policy.redaction)?;
+    let (recovery, cleanup_blob) = self.prepare_message_recovery(message)?;
+    let tx_id = match self.wal.prepare_message(envelope, recovery) {
+      Ok(tx_id) => tx_id,
+      Err(error) => {
+        if let Some(blob) = cleanup_blob.as_ref() {
+          self.remove_unreferenced_recovery_blob(blob);
+        }
+        return Err(error);
+      }
+    };
     #[cfg(test)]
     self.hit_failpoint(ProjectionFailpoint::Prepare)?;
     let seq = self.journal.append_bounded(
@@ -753,7 +767,10 @@ impl Session {
     })
   }
 
-  fn prepare_message_recovery(&self, message: &Message) -> Result<MessageRecovery, StoreError> {
+  fn prepare_message_recovery(
+    &self,
+    message: &Message,
+  ) -> Result<(MessageRecovery, Option<BlobRef>), StoreError> {
     let mut value = serde_json::to_value(message)?;
     self.policy.redaction.apply_json(&mut value);
     let sanitized: Message = serde_json::from_value(value)?;
@@ -766,12 +783,39 @@ impl Session {
         .unwrap_or(MAX_INLINE_MESSAGE_BYTES)
         .min(MAX_INLINE_MESSAGE_BYTES)
     {
-      return Ok(MessageRecovery::Inline {
-        message: Box::new(sanitized),
-      });
+      return Ok((
+        MessageRecovery::Inline {
+          message: Box::new(sanitized),
+        },
+        None,
+      ));
     }
+    let planned = self
+      .blobs
+      .reference_for(&encoded, Some("application/json"))?;
+    let existed = self.blobs.exists(&planned);
     let blob = self.blobs.put(&encoded, Some("application/json"))?;
-    Ok(MessageRecovery::Blob { blob })
+    Ok((
+      MessageRecovery::Blob { blob: blob.clone() },
+      (!existed).then_some(blob),
+    ))
+  }
+
+  fn remove_unreferenced_recovery_blob(&self, blob: &BlobRef) {
+    let Ok(pending) = self.wal.pending() else {
+      // If WAL state cannot be read, retain the blob. Recovery safety is more
+      // important than reclaiming one payload whose liveness is uncertain.
+      return;
+    };
+    let referenced = pending.iter().any(|intent| {
+      matches!(
+        intent.envelope.recovery.as_ref(),
+        Some(MessageRecovery::Blob { blob: candidate }) if candidate == blob
+      )
+    });
+    if !referenced {
+      let _ = self.blobs.remove(blob);
+    }
   }
 
   fn message_record(
@@ -883,14 +927,20 @@ impl Session {
       seq: Some(seq),
       external_context,
     });
+    validate_session_record_size(&record, &self.policy.redaction)?;
     // A held message intent may have been prepared before the runtime had the
     // complete response (for compatibility with older callers). Attach the
     // exact redacted payload before the semantic append so a crash in this
     // interval is still recoverable. New runtime paths use `emit_message`,
     // which prepares this payload before the canonical append.
     if intent.envelope.recovery.is_none() {
-      let recovery = self.prepare_message_recovery(&attributed.message)?;
-      self.wal.set_recovery(&intent.tx_id, recovery)?;
+      let (recovery, cleanup_blob) = self.prepare_message_recovery(&attributed.message)?;
+      if let Err(error) = self.wal.set_recovery(&intent.tx_id, recovery) {
+        if let Some(blob) = cleanup_blob.as_ref() {
+          self.remove_unreferenced_recovery_blob(blob);
+        }
+        return Err(error);
+      }
     }
     self.log.append(&record)?;
     self.wal.commit(&intent.tx_id)?;
@@ -1360,11 +1410,14 @@ impl Session {
     }
     let semantic = SessionLog::read(self.path())?;
     let mut missing = Vec::new();
-    let mut assistant_call_ids = BTreeSet::new();
     for record in semantic.items.iter().filter_map(|record| match record {
       SessionRecord::Message(message) if message.role == Role::Assistant => Some(message),
       _ => None,
     }) {
+      // Provider call ids are scoped to one assistant response. A provider may
+      // reuse an id on a later turn/model round, so never make this set global
+      // to the whole session.
+      let mut assistant_call_ids = BTreeSet::new();
       let assistant = trace_report
         .items
         .iter()
@@ -1389,6 +1442,16 @@ impl Session {
           let event = restore_externalized_event(entry, self)?;
           if let AgentEvent::ToolRequested(requested) = event
             && requested.call_id == call.id
+            && (entry.envelope.meta.parent_event_id.as_ref()
+              == Some(&assistant.envelope.meta.event_id)
+              || (entry.envelope.meta.parent_event_id.is_none()
+                && entry.envelope.meta.turn_id == Some(record.turn_id.clone())
+                && entry
+                  .envelope
+                  .meta
+                  .seq
+                  .zip(assistant.envelope.meta.seq)
+                  .is_some_and(|(request_seq, assistant_seq)| request_seq > assistant_seq)))
           {
             requests.push((entry, requested));
           }
@@ -3586,236 +3649,216 @@ fn validate_tool_result_projection(
 /// runs again after the synthetic terminal records are appended.
 fn unstarted_tool_requests(
   entries: &[pi_rs_core::TraceEntry],
-  session: &SessionId,
+  _session: &SessionId,
 ) -> Result<Vec<pi_rs_core::TraceEntry>, StoreError> {
-  let mut pending = BTreeMap::<ToolCallId, (pi_rs_core::TraceEntry, bool)>::new();
-  let mut seen = BTreeSet::<ToolCallId>::new();
-  let mut ordered = Vec::<ToolCallId>::new();
+  let pending = scan_tool_lifecycles(entries)?;
+  Ok(
+    pending
+      .into_iter()
+      .filter_map(|call| (!call.started).then_some(call.request))
+      .collect(),
+  )
+}
+
+#[derive(Debug, Clone)]
+struct PendingToolLifecycle {
+  request: pi_rs_core::TraceEntry,
+  started: bool,
+  started_event_id: Option<EventId>,
+}
+
+/// Resolve a lifecycle edge by its causal parent when present. Parentless
+/// entries are an intentionally supported legacy format, so they fall back to
+/// the call id only when exactly one active request can match it.
+fn resolve_pending_tool(
+  pending: &BTreeMap<EventId, PendingToolLifecycle>,
+  entry: &pi_rs_core::TraceEntry,
+  call_id: &ToolCallId,
+) -> Result<EventId, &'static str> {
+  if let Some(parent) = entry.envelope.meta.parent_event_id.as_ref() {
+    if pending.contains_key(parent) {
+      return Ok(parent.clone());
+    }
+    if let Some((event_id, _)) = pending
+      .iter()
+      .find(|(_, call)| call.started_event_id.as_ref() == Some(parent))
+    {
+      return Ok(event_id.clone());
+    }
+    return Err("tool lifecycle parent does not identify a pending request");
+  }
+
+  let mut matches = pending.iter().filter(|(_, call)| {
+    matches!(
+      &call.request.envelope.event,
+      AgentEvent::ToolRequested(requested) if requested.call_id == *call_id
+    )
+  });
+  let Some((event_id, _)) = matches.next() else {
+    return Err("tool lifecycle has no matching request");
+  };
+  if matches.next().is_some() {
+    return Err("parentless tool lifecycle is ambiguous for this call id");
+  }
+  Ok(event_id.clone())
+}
+
+fn tool_call_metadata_matches(entry: &pi_rs_core::TraceEntry, call_id: &ToolCallId) -> bool {
+  entry
+    .envelope
+    .meta
+    .tool_call_id
+    .as_ref()
+    .is_none_or(|metadata_id| metadata_id == call_id)
+}
+
+fn lifecycle_invalid(entry: &pi_rs_core::TraceEntry, detail: &str) -> StoreError {
+  StoreError::Invalid(format!(
+    "session {} has an invalid tool lifecycle at {}: {detail}; resume requires recovery",
+    entry.envelope.meta.session_id, entry.envelope.meta.event_id
+  ))
+}
+
+fn scan_tool_lifecycles(
+  entries: &[pi_rs_core::TraceEntry],
+) -> Result<Vec<PendingToolLifecycle>, StoreError> {
+  let mut pending = BTreeMap::<EventId, PendingToolLifecycle>::new();
+  let mut ordered = Vec::<EventId>::new();
+
   for entry in entries {
-    let invalid = |detail: &str| {
-      StoreError::Invalid(format!(
-        "session {session} has an invalid tool lifecycle at {}: {detail}; resume requires recovery",
-        entry.envelope.meta.event_id
-      ))
-    };
     match &entry.envelope.event {
       AgentEvent::ToolRequested(requested) => {
-        if entry.envelope.meta.turn_id.is_none() || requested.call_id.as_str().is_empty() {
+        let invalid = |detail: &str| lifecycle_invalid(entry, detail);
+        if entry.envelope.meta.turn_id.is_none()
+          || requested.call_id.as_str().is_empty()
+          || !tool_call_metadata_matches(entry, &requested.call_id)
+        {
           return Err(invalid("tool request has no turn or call identity"));
         }
-        if !seen.insert(requested.call_id.clone()) {
-          return Err(invalid("duplicate tool request"));
+        let event_id = entry.envelope.meta.event_id.clone();
+        if pending
+          .insert(
+            event_id.clone(),
+            PendingToolLifecycle {
+              request: entry.clone(),
+              started: false,
+              started_event_id: None,
+            },
+          )
+          .is_some()
+        {
+          return Err(invalid("duplicate tool request event identity"));
         }
-        pending.insert(requested.call_id.clone(), (entry.clone(), false));
-        ordered.push(requested.call_id.clone());
+        ordered.push(event_id);
       }
       AgentEvent::ToolStarted(started) => {
-        let Some((request, already_started)) = pending.get_mut(&started.call_id) else {
-          return Err(invalid("tool started without a matching request"));
-        };
-        if *already_started {
-          return Err(invalid("duplicate tool start"));
+        let request_id = resolve_pending_tool(&pending, entry, &started.call_id)
+          .map_err(|detail| lifecycle_invalid(entry, detail))?;
+        let call = pending
+          .get_mut(&request_id)
+          .expect("resolved pending tool must remain in map");
+        if call.started {
+          return Err(lifecycle_invalid(entry, "duplicate tool start"));
         }
-        let AgentEvent::ToolRequested(requested) = &request.envelope.event else {
+        let AgentEvent::ToolRequested(requested) = &call.request.envelope.event else {
           unreachable!("pending tool entries are requests");
         };
-        if started.name != requested.name
-          || request.envelope.meta.turn_id != entry.envelope.meta.turn_id
-          || request.envelope.meta.model_epoch != entry.envelope.meta.model_epoch
-          || request.envelope.meta.model != entry.envelope.meta.model
+        if entry
+          .envelope
+          .meta
+          .parent_event_id
+          .as_ref()
+          .is_some_and(|parent| parent != &request_id)
+          || started.call_id != requested.call_id
+          || started.name != requested.name
+          || !tool_call_metadata_matches(entry, &started.call_id)
+          || call.request.envelope.meta.turn_id != entry.envelope.meta.turn_id
+          || call.request.envelope.meta.model_epoch != entry.envelope.meta.model_epoch
+          || call.request.envelope.meta.model != entry.envelope.meta.model
         {
-          return Err(invalid("tool start disagrees with its request"));
+          return Err(lifecycle_invalid(
+            entry,
+            "tool start disagrees with its request",
+          ));
         }
-        *already_started = true;
+        call.started = true;
+        call.started_event_id = Some(entry.envelope.meta.event_id.clone());
       }
       AgentEvent::ToolCompleted(completed) => {
-        let Some((request, started)) = pending.remove(&completed.call_id) else {
-          return Err(invalid("tool completed without a matching request"));
-        };
-        let AgentEvent::ToolRequested(requested) = &request.envelope.event else {
+        let request_id = resolve_pending_tool(&pending, entry, &completed.call_id)
+          .map_err(|detail| lifecycle_invalid(entry, detail))?;
+        let call = pending
+          .remove(&request_id)
+          .expect("resolved pending tool must remain in map");
+        let AgentEvent::ToolRequested(requested) = &call.request.envelope.event else {
           unreachable!("pending tool entries are requests");
         };
-        if !started {
-          return Err(invalid("tool completed before it started"));
+        if !call.started {
+          return Err(lifecycle_invalid(entry, "tool completed before it started"));
         }
-        if completed.name != requested.name
-          || request.envelope.meta.turn_id != entry.envelope.meta.turn_id
-          || request.envelope.meta.model_epoch != entry.envelope.meta.model_epoch
-          || request.envelope.meta.model != entry.envelope.meta.model
+        if completed.call_id != requested.call_id
+          || completed.name != requested.name
+          || !tool_call_metadata_matches(entry, &completed.call_id)
+          || call.request.envelope.meta.turn_id != entry.envelope.meta.turn_id
+          || call.request.envelope.meta.model_epoch != entry.envelope.meta.model_epoch
+          || call.request.envelope.meta.model != entry.envelope.meta.model
         {
-          return Err(invalid("tool completion disagrees with its request"));
+          return Err(lifecycle_invalid(
+            entry,
+            "tool completion disagrees with its request",
+          ));
+        }
+        if completed.state != ToolExecutionState::Succeeded {
+          return Err(lifecycle_invalid(
+            entry,
+            "tool completed with a non-success state",
+          ));
         }
       }
       AgentEvent::ToolFailed(failed) => {
-        let Some((request, _started)) = pending.remove(&failed.call_id) else {
-          return Err(invalid("tool failed without a matching request"));
-        };
-        let AgentEvent::ToolRequested(requested) = &request.envelope.event else {
+        let request_id = resolve_pending_tool(&pending, entry, &failed.call_id)
+          .map_err(|detail| lifecycle_invalid(entry, detail))?;
+        let call = pending
+          .remove(&request_id)
+          .expect("resolved pending tool must remain in map");
+        let AgentEvent::ToolRequested(requested) = &call.request.envelope.event else {
           unreachable!("pending tool entries are requests");
         };
         // A failed request may be recorded before execution begins when
         // cancellation or provider failure prevents the runtime from emitting
         // ToolStarted. That is a safe terminal state, not an interrupted
         // mutating operation.
-        if failed.name != requested.name
-          || request.envelope.meta.turn_id != entry.envelope.meta.turn_id
-          || request.envelope.meta.model_epoch != entry.envelope.meta.model_epoch
-          || request.envelope.meta.model != entry.envelope.meta.model
+        if failed.call_id != requested.call_id
+          || failed.name != requested.name
+          || !tool_call_metadata_matches(entry, &failed.call_id)
+          || call.request.envelope.meta.turn_id != entry.envelope.meta.turn_id
+          || call.request.envelope.meta.model_epoch != entry.envelope.meta.model_epoch
+          || call.request.envelope.meta.model != entry.envelope.meta.model
         {
-          return Err(invalid("tool failure disagrees with its request"));
+          return Err(lifecycle_invalid(
+            entry,
+            "tool failure disagrees with its request",
+          ));
         }
       }
       AgentEvent::ToolUnknown(unknown) => {
-        let Some((request, _started)) = pending.remove(&unknown.call_id) else {
-          return Err(invalid("tool became unknown without a matching request"));
-        };
-        let AgentEvent::ToolRequested(requested) = &request.envelope.event else {
+        let request_id = resolve_pending_tool(&pending, entry, &unknown.call_id)
+          .map_err(|detail| lifecycle_invalid(entry, detail))?;
+        let call = pending
+          .remove(&request_id)
+          .expect("resolved pending tool must remain in map");
+        let AgentEvent::ToolRequested(requested) = &call.request.envelope.event else {
           unreachable!("pending tool entries are requests");
         };
-        if unknown.name != requested.name
-          || unknown.mutating == requested.read_only
-          || request.envelope.meta.turn_id != entry.envelope.meta.turn_id
-          || request.envelope.meta.model_epoch != entry.envelope.meta.model_epoch
-          || request.envelope.meta.model != entry.envelope.meta.model
+        if unknown.mutating == requested.read_only
+          || unknown.call_id != requested.call_id
+          || unknown.name != requested.name
+          || !tool_call_metadata_matches(entry, &unknown.call_id)
+          || call.request.envelope.meta.turn_id != entry.envelope.meta.turn_id
+          || call.request.envelope.meta.model_epoch != entry.envelope.meta.model_epoch
+          || call.request.envelope.meta.model != entry.envelope.meta.model
         {
-          return Err(invalid("tool unknown result disagrees with its request"));
-        }
-      }
-      _ => {}
-    }
-  }
-  Ok(
-    ordered
-      .into_iter()
-      .filter_map(|call_id| {
-        pending
-          .remove(&call_id)
-          .and_then(|(entry, started)| (!started).then_some(entry))
-      })
-      .collect(),
-  )
-}
-
-fn tool_meta_matches(call: &InterruptedToolCall, entry: &pi_rs_core::TraceEntry) -> bool {
-  call.turn_id == entry.envelope.meta.turn_id
-    && call
-      .epoch
-      .is_none_or(|epoch| entry.envelope.meta.model_epoch == Some(epoch))
-    && call
-      .model
-      .as_ref()
-      .is_none_or(|model| entry.envelope.meta.model.as_ref() == Some(model))
-    && entry
-      .envelope
-      .meta
-      .tool_call_id
-      .as_ref()
-      .is_none_or(|call_id| call_id == &call.request.call_id)
-}
-
-fn interrupted_tool_calls(
-  entries: &[pi_rs_core::TraceEntry],
-) -> Result<Vec<InterruptedToolCall>, StoreError> {
-  let mut calls = BTreeMap::<ToolCallId, InterruptedToolCall>::new();
-  let mut seen = BTreeSet::<ToolCallId>::new();
-  let mut ordered = Vec::<ToolCallId>::new();
-  let invalid = |entry: &pi_rs_core::TraceEntry, detail: &str| {
-    StoreError::Invalid(format!(
-      "session {} has an invalid tool lifecycle at {}: {detail}; resume requires recovery",
-      entry.envelope.meta.session_id, entry.envelope.meta.event_id
-    ))
-  };
-
-  for entry in entries {
-    match &entry.envelope.event {
-      AgentEvent::ToolRequested(requested) => {
-        if entry.envelope.meta.turn_id.is_none() || requested.call_id.as_str().is_empty() {
-          return Err(invalid(entry, "tool request has no turn or call identity"));
-        }
-        if !seen.insert(requested.call_id.clone()) {
-          return Err(invalid(entry, "duplicate tool request"));
-        }
-        let request = ToolRequest {
-          call_id: requested.call_id.clone(),
-          name: requested.name.clone(),
-          arguments: requested.arguments.clone(),
-        };
-        calls.insert(
-          requested.call_id.clone(),
-          InterruptedToolCall {
-            request,
-            state: ToolExecutionState::Requested,
-            read_only: requested.read_only,
-            turn_id: entry.envelope.meta.turn_id.clone(),
-            epoch: entry.envelope.meta.model_epoch,
-            model: entry.envelope.meta.model.clone(),
-          },
-        );
-        ordered.push(requested.call_id.clone());
-      }
-      AgentEvent::ToolStarted(started) => {
-        let Some(call) = calls.get_mut(&started.call_id) else {
-          return Err(invalid(entry, "tool started without a matching request"));
-        };
-        if call.state != ToolExecutionState::Requested {
-          return Err(invalid(entry, "duplicate tool start"));
-        }
-        if started.name != call.request.name || !tool_meta_matches(call, entry) {
-          return Err(invalid(entry, "tool start disagrees with its request"));
-        }
-        call.state = ToolExecutionState::Started;
-      }
-      AgentEvent::ToolCompleted(completed) => {
-        let Some(call) = calls.remove(&completed.call_id) else {
-          return Err(invalid(entry, "tool completed without a matching request"));
-        };
-        if call.state != ToolExecutionState::Started {
-          return Err(invalid(entry, "tool completed before it started"));
-        }
-        if completed.name != call.request.name || !tool_meta_matches(&call, entry) {
-          return Err(invalid(entry, "tool completion disagrees with its request"));
-        }
-        if completed.state != ToolExecutionState::Succeeded {
-          return Err(invalid(entry, "tool completed with a non-success state"));
-        }
-      }
-      AgentEvent::ToolFailed(failed) => {
-        let Some(call) = calls.remove(&failed.call_id) else {
-          return Err(invalid(entry, "tool failed without a matching request"));
-        };
-        // A failed request can be an explicit no-execution terminal result:
-        // the runtime records this when cancellation/provider failure occurs
-        // before it can invoke the tool. It is safe to close Requested here;
-        // an unclosed request remains a hard resume refusal below.
-        if call.state != ToolExecutionState::Requested && call.state != ToolExecutionState::Started
-        {
-          return Err(invalid(
-            entry,
-            "tool failed from an invalid lifecycle state",
-          ));
-        }
-        if failed.name != call.request.name || !tool_meta_matches(&call, entry) {
-          return Err(invalid(entry, "tool failure disagrees with its request"));
-        }
-      }
-      AgentEvent::ToolUnknown(unknown) => {
-        let Some(call) = calls.remove(&unknown.call_id) else {
-          return Err(invalid(
-            entry,
-            "tool became unknown without a matching request",
-          ));
-        };
-        // `Unknown` is also the explicit terminal used for a refused or
-        // cancelled request that never crossed the execution boundary.
-        if call.state != ToolExecutionState::Requested && call.state != ToolExecutionState::Started
-        {
-          return Err(invalid(
-            entry,
-            "tool became unknown from an invalid lifecycle state",
-          ));
-        }
-        if unknown.mutating == call.read_only || !tool_meta_matches(&call, entry) {
-          return Err(invalid(
+          return Err(lifecycle_invalid(
             entry,
             "tool unknown result disagrees with its request",
           ));
@@ -3825,19 +3868,47 @@ fn interrupted_tool_calls(
     }
   }
 
+  // Keep the original request order for deterministic recovery.
+  Ok(
+    ordered
+      .into_iter()
+      .filter_map(|event_id| pending.remove(&event_id))
+      .collect(),
+  )
+}
+
+fn interrupted_tool_calls(
+  entries: &[pi_rs_core::TraceEntry],
+) -> Result<Vec<InterruptedToolCall>, StoreError> {
+  let pending = scan_tool_lifecycles(entries)?;
   let mut interrupted = Vec::new();
-  for call_id in ordered {
-    let Some(call) = calls.remove(&call_id) else {
-      continue;
-    };
-    if call.state == ToolExecutionState::Requested {
+  for call in pending {
+    if !call.started {
+      let call_id = match &call.request.envelope.event {
+        AgentEvent::ToolRequested(requested) => requested.call_id.clone(),
+        _ => unreachable!("pending tool entries are requests"),
+      };
       return Err(StoreError::Invalid(format!(
         "durable tool request {call_id} has no ToolStarted; resume requires recovery"
       )));
     }
-    // A started call is deliberately returned as `Unknown` work for runtime
-    // reconciliation; it must never be replayed as if execution were certain.
-    interrupted.push(call);
+    let AgentEvent::ToolRequested(requested) = &call.request.envelope.event else {
+      unreachable!("pending tool entries are requests");
+    };
+    interrupted.push(InterruptedToolCall {
+      request: ToolRequest {
+        call_id: requested.call_id.clone(),
+        name: requested.name.clone(),
+        arguments: requested.arguments.clone(),
+      },
+      state: ToolExecutionState::Started,
+      read_only: requested.read_only,
+      turn_id: call.request.envelope.meta.turn_id.clone(),
+      epoch: call.request.envelope.meta.model_epoch,
+      model: call.request.envelope.meta.model.clone(),
+      request_event_id: Some(call.request.envelope.meta.event_id.clone()),
+      started_event_id: call.started_event_id,
+    });
   }
   Ok(interrupted)
 }
@@ -3982,6 +4053,22 @@ fn replace_string_segments(value: &mut serde_json::Value, segments: &[&str], tex
     _ => None,
   };
   child.is_some_and(|child| replace_string_segments(child, tail, text))
+}
+
+fn validate_session_record_size(
+  record: &SessionRecord,
+  redaction: &RedactionPolicy,
+) -> Result<(), StoreError> {
+  let mut value = serde_json::to_value(record)?;
+  redaction.apply_json(&mut value);
+  let bytes = serde_json::to_vec(&value)?.len();
+  if bytes.saturating_add(1) > crate::jsonl::MAX_JSONL_LINE_BYTES {
+    return Err(StoreError::Invalid(format!(
+      "session record exceeds the {}-byte JSONL line bound",
+      crate::jsonl::MAX_JSONL_LINE_BYTES
+    )));
+  }
+  Ok(())
 }
 
 fn validate_message_envelope(envelope: &EventEnvelope) -> Result<(), StoreError> {
@@ -5172,6 +5259,37 @@ mod tests {
       "large message bytes are persisted in the session blob store"
     );
     resumed.finish().unwrap();
+  }
+
+  #[test]
+  fn oversized_semantic_message_is_rejected_before_durable_mutation() {
+    let tmp = TempDir::new("store-message-line-bound");
+    let opened = store(&tmp);
+    let id = SessionId::from_string(uuidv7());
+    let turn = TurnId::new();
+    let mut session = opened.begin(header(&id)).unwrap();
+    let text = "x".repeat(crate::jsonl::MAX_JSONL_LINE_BYTES + 1);
+    let mut envelope = EventEnvelope::new(
+      meta(&id, &turn),
+      AgentEvent::UserMessage(UserMessage {
+        text: text.clone(),
+        attachments: 0,
+      }),
+    );
+    let trace_path = session.trace_path().to_path_buf();
+    let error = session
+      .emit_message(&mut envelope, &Message::user(&text))
+      .expect_err("semantic lines over the reader bound must be refused");
+    assert!(error.to_string().contains("JSONL line bound"), "{error}");
+    drop(session);
+
+    assert!(TraceJournal::read(&trace_path).unwrap().items.is_empty());
+    assert!(
+      ProjectionWal::pending_at(&opened.layout().wal_path(&id))
+        .unwrap()
+        .is_empty()
+    );
+    assert!(object_paths_under(&opened.layout().blobs_dir(&id)).is_empty());
   }
 
   #[test]
@@ -6871,6 +6989,60 @@ mod tests {
       pi_rs_core::ToolExecutionState::Started
     );
     assert_eq!(restored.interrupted_tools[0].request.name, "write");
+  }
+
+  #[test]
+  fn recovery_scopes_parentless_legacy_call_ids_to_active_invocations() {
+    let tmp = TempDir::new("store-reused-tool-id");
+    let opened = store(&tmp);
+    let session_id = SessionId::new();
+    let call_id = ToolCallId::from_string("call_1");
+    let mut session = opened.begin(header(&session_id)).unwrap();
+    for _ in 0..2 {
+      let turn_id = TurnId::new();
+      session
+        .emit(&mut EventEnvelope::new(
+          meta(&session_id, &turn_id),
+          AgentEvent::ToolRequested(ToolRequested {
+            call_id: call_id.clone(),
+            name: "read".into(),
+            arguments: serde_json::json!({}),
+            read_only: true,
+          }),
+        ))
+        .unwrap();
+      session
+        .emit(&mut EventEnvelope::new(
+          meta(&session_id, &turn_id),
+          AgentEvent::ToolStarted(ToolStarted {
+            call_id: call_id.clone(),
+            name: "read".into(),
+          }),
+        ))
+        .unwrap();
+      session
+        .emit(&mut EventEnvelope::new(
+          meta(&session_id, &turn_id),
+          AgentEvent::ToolCompleted(ToolCompleted {
+            call_id: call_id.clone(),
+            name: "read".into(),
+            state: ToolExecutionState::Succeeded,
+            duration_ms: 0,
+            status: Some(0),
+            reduced: false,
+            blob: None,
+            visible_bytes: 0,
+          }),
+        ))
+        .unwrap();
+    }
+    let trace_path = session.trace_path().to_path_buf();
+    session.finish().unwrap();
+    let trace = TraceJournal::read(&trace_path).unwrap();
+    assert!(
+      scan_tool_lifecycles(&trace.items).unwrap().is_empty(),
+      "a completed legacy invocation must not reserve its provider id forever"
+    );
   }
 
   #[test]

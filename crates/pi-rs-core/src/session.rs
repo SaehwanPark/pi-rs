@@ -175,6 +175,13 @@ pub struct InterruptedToolCall {
   pub turn_id: Option<TurnId>,
   pub epoch: Option<u32>,
   pub model: Option<ModelRef>,
+  /// Event identity of the request that owns this invocation. New traces carry
+  /// it so recovery can close one invocation even when a provider reuses its
+  /// protocol call id; `None` is retained for imported/legacy projections.
+  pub request_event_id: Option<EventId>,
+  /// Event identity of the observed start boundary, when one exists. Recovery
+  /// parents its terminal fact here rather than to a session-global call id.
+  pub started_event_id: Option<EventId>,
 }
 
 /// A checkpoint barrier.

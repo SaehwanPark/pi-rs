@@ -166,8 +166,12 @@ impl Decoder {
   ) -> Result<CompletionUsage, pi_rs_core::ModelFailure> {
     let tools = std::mem::take(&mut self.tools);
     // A decoded tool call is output the provider produced, even though a user
-    // would not call it an answer.
+    // would not call it an answer. Build the complete batch before emitting any
+    // call: a duplicate provider id makes result correlation ambiguous, and
+    // exposing only the first call would let the runtime execute a partial batch.
     let produced_a_call = !tools.is_empty();
+    let mut decoded = Vec::with_capacity(tools.len());
+    let mut ids = std::collections::BTreeSet::new();
     for (index, builder) in tools {
       let Some(id) = builder.id.filter(|id| !id.trim().is_empty()) else {
         return Err(decode_failure(format!(
@@ -184,11 +188,19 @@ impl Decoder {
           .with_detail(summarize(&builder.arguments))
         })?
       };
-      sink.emit(&ProviderEvent::ToolCall(ToolCallBlock {
+      if !ids.insert(id.clone()) {
+        return Err(decode_failure(format!(
+          "duplicate tool call id {id} in one provider response"
+        )));
+      }
+      decoded.push(ToolCallBlock {
         id: ToolCallId::from_string(id),
         name: builder.name,
         arguments,
-      }));
+      });
+    }
+    for call in decoded {
+      sink.emit(&ProviderEvent::ToolCall(call));
     }
     // A turn is complete only when the provider said so. A socket that simply
     // closed, or a stream that reached `[DONE]` without ever naming a finish
@@ -607,6 +619,32 @@ mod tests {
       })
       .collect();
     assert_eq!(names, vec!["read", "exec"]);
+  }
+
+  #[test]
+  fn duplicate_tool_ids_in_one_response_are_rejected_before_emission() {
+    let mut collector = Collector::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
+    decoder
+      .chunk(
+        &chunk(json!({
+          "tool_calls": [
+            {"index": 0, "id": "call_1", "function": {"name": "read", "arguments": "{}"}},
+            {"index": 1, "id": "call_1", "function": {"name": "grep", "arguments": "{}"}},
+          ]
+        })),
+        &mut collector,
+      )
+      .unwrap();
+    let failure = decoder
+      .finish(StreamEnd::DoneSentinel, &mut collector)
+      .expect_err("one provider response cannot contain two invocations with one id");
+    assert_eq!(failure.kind, ModelFailureKind::Protocol);
+    assert!(failure.message.contains("duplicate tool call id call_1"));
+    assert!(
+      collector.events().is_empty(),
+      "the ambiguous batch must not partially escape the decoder"
+    );
   }
 
   #[test]

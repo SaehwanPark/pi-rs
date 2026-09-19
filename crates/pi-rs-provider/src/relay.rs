@@ -12,8 +12,9 @@ use std::{
   io::{self, Read, Write},
   net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
   sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
+    mpsc::{self, SyncSender, TrySendError},
   },
   thread,
   time::{Duration, Instant},
@@ -22,6 +23,29 @@ use std::{
 const POLL: Duration = Duration::from_millis(25);
 const MAX_REQUEST_HEADERS: usize = 2 * 1024 * 1024;
 const MAX_PROXY_RESPONSE_HEADERS: usize = 64 * 1024;
+
+struct ResolveJob {
+  host: String,
+  port: u16,
+  result: SyncSender<io::Result<Vec<SocketAddr>>>,
+}
+
+static RESOLVER: OnceLock<SyncSender<ResolveJob>> = OnceLock::new();
+
+fn resolver() -> &'static SyncSender<ResolveJob> {
+  RESOLVER.get_or_init(|| {
+    let (sender, receiver) = mpsc::sync_channel::<ResolveJob>(1);
+    thread::spawn(move || {
+      while let Ok(job) = receiver.recv() {
+        let result = (job.host.as_str(), job.port)
+          .to_socket_addrs()
+          .map(|addresses| addresses.collect::<Vec<_>>());
+        let _ = job.result.send(result);
+      }
+    });
+    sender
+  })
+}
 
 #[derive(Clone, Debug)]
 struct UpstreamProxy {
@@ -357,15 +381,19 @@ fn resolve_target(
   // DNS policy, macOS scoped/VPN resolvers, search domains, and enterprise
   // split-DNS rules instead of sending private names to a public fallback.
   // `ToSocketAddrs` may block inside the OS, so keep it off the relay worker
-  // and poll the result for the request deadline/cancellation boundary.
-  let host = host.to_owned();
-  let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-  thread::spawn(move || {
-    let result = (host.as_str(), port)
-      .to_socket_addrs()
-      .map(|addresses| addresses.collect::<Vec<_>>());
-    let _ = sender.send(result);
-  });
+  // and poll the result for the request deadline/cancellation boundary. A
+  // process-wide one-worker queue bounds detached resolver work when a platform
+  // lookup ignores cancellation; a full queue fails closed rather than spawning
+  // another unbounded thread.
+  let (sender, receiver) = mpsc::sync_channel(1);
+  match resolver().try_send(ResolveJob {
+    host: host.to_owned(),
+    port,
+    result: sender,
+  }) {
+    Ok(()) => {}
+    Err(TrySendError::Full(_job) | TrySendError::Disconnected(_job)) => return None,
+  }
   loop {
     if stop.load(Ordering::Acquire) {
       return None;
