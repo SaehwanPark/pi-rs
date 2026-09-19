@@ -6,9 +6,10 @@
 //! machine reboot. The marker beside it is diagnostic only; it is never used as
 //! the mutual-exclusion primitive.
 //!
-//! Lease directories from the pre-lock format are accepted during a bounded
-//! compatibility window. They are consulted only when the new lock file is
-//! empty, and their PID marker is never used for leases written by this build.
+//! Lease directories from the pre-lock format are accepted conservatively. They
+//! are consulted only when the new lock file is empty, and their PID marker is
+//! never used for leases written by this build; an old marker may require manual
+//! cleanup when no kernel lock file exists.
 
 use std::{
   fs::{self, File, OpenOptions},
@@ -53,6 +54,7 @@ impl SessionLease {
       .read(true)
       .write(true)
       .create(true)
+      .truncate(false)
       .open(&lock_path)?;
 
     // A directory written by an older pi-rs process has an owner marker but no
@@ -73,11 +75,11 @@ impl SessionLease {
 
     let token = uuidv7();
     if let Err(error) = write_lock_marker(&mut file, &token) {
-      let _ = file.unlock();
+      let _ = fs4::FileExt::unlock(&file);
       return Err(StoreError::Io(error));
     }
     if let Err(error) = write_owner_marker(path, &token) {
-      let _ = file.unlock();
+      let _ = fs4::FileExt::unlock(&file);
       return Err(StoreError::Io(error));
     }
 
@@ -103,7 +105,7 @@ impl SessionLease {
     }
     match file.try_lock_exclusive() {
       Ok(()) => {
-        let _ = file.unlock();
+        let _ = fs4::FileExt::unlock(&file);
         false
       }
       Err(error) if is_lock_contended(&error) => true,
@@ -117,7 +119,7 @@ impl Drop for SessionLease {
     // Unlock explicitly for clarity; dropping the handle would release it too.
     // The path is intentionally retained: deleting a lock file after unlock can
     // race a new opener and remove its active lock from under it.
-    let _ = self.file.unlock();
+    let _ = fs4::FileExt::unlock(&self.file);
   }
 }
 
@@ -192,24 +194,12 @@ fn legacy_process_alive(pid: u32) -> bool {
 }
 
 #[cfg(windows)]
-fn legacy_process_alive(pid: u32) -> bool {
-  use windows_sys::Win32::{
-    Foundation::{CloseHandle, STILL_ACTIVE},
-    System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
-  };
-
-  // This is compatibility-only PID inspection. Normal leases are released by
-  // the Windows file-lock primitive and never need process-table queries.
-  unsafe {
-    let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-    if handle.is_null() {
-      return true;
-    }
-    let mut exit_code = 0;
-    let alive = GetExitCodeProcess(handle, &mut exit_code) != 0 && exit_code == STILL_ACTIVE;
-    CloseHandle(handle);
-    alive
-  }
+fn legacy_process_alive(_pid: u32) -> bool {
+  // The pre-lock format has no cross-platform ownership primitive. Keep an old
+  // marker conservative rather than spawning `tasklist` or introducing unsafe
+  // process-table bindings; all leases written by this build use the kernel
+  // lock and are released automatically on process exit.
+  true
 }
 
 #[cfg(not(any(unix, windows)))]

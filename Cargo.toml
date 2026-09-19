@@ -45,7 +45,6 @@ getrandom = "0.3"
 rustix = { version = "0.38.44", default-features = false, features = ["process"] }
 ureq = { version = "2.10", default-features = false, features = ["tls", "json"] }
 tempfile = "3"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 crossterm = "0.28"
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
 libc = "0.2"

@@ -336,3 +336,59 @@ impl ProjectionWal {
     self.writer.write_line(&line, true)
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use pi_rs_core::{
+    Diagnostic, DiagnosticLevel, EventEnvelope, EventId, EventMeta, SessionId, SpanId, TraceId,
+    TurnId, event::AgentEvent,
+  };
+
+  use pi_rs_core::RedactionPolicy;
+
+  use crate::TempDir;
+
+  use super::*;
+
+  fn diagnostic(session: &SessionId) -> EventEnvelope {
+    EventEnvelope::new(
+      EventMeta {
+        event_id: EventId::new(),
+        session_id: session.clone(),
+        turn_id: Some(TurnId::new()),
+        seq: None,
+        timestamp_ms: 1,
+        model_epoch: None,
+        model: None,
+        tool_call_id: None,
+        parent_event_id: None,
+        trace_id: TraceId::new(),
+        span_id: SpanId::new(),
+      },
+      AgentEvent::Diagnostic(Diagnostic {
+        level: DiagnosticLevel::Info,
+        message: "wal compaction".into(),
+      }),
+    )
+  }
+
+  #[test]
+  fn committed_wal_can_be_compacted_and_reused() {
+    let tmp = TempDir::new("projection-wal-reuse");
+    let path = tmp.child("session.wal.jsonl");
+    let session = SessionId::from_string("018f-wal");
+    let mut wal = ProjectionWal::open(&path, RedactionPolicy::default()).unwrap();
+
+    let first = diagnostic(&session);
+    wal.prepare(&first).unwrap();
+    wal.commit(&first.meta.event_id).unwrap();
+    assert!(wal.pending().unwrap().is_empty());
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+
+    let second = diagnostic(&session);
+    wal.prepare(&second).unwrap();
+    wal.commit(&second.meta.event_id).unwrap();
+    assert!(wal.pending().unwrap().is_empty());
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+  }
+}
