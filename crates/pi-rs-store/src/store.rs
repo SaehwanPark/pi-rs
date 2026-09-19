@@ -793,7 +793,7 @@ impl Session {
     let planned = self
       .blobs
       .reference_for(&encoded, Some("application/json"))?;
-    let existed = self.blobs.exists(&planned);
+    let existed = self.blobs.exists(&planned) && self.blobs.verify(&planned)?;
     let blob = self.blobs.put(&encoded, Some("application/json"))?;
     Ok((
       MessageRecovery::Blob { blob: blob.clone() },

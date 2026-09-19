@@ -6895,7 +6895,9 @@ mod tests {
     );
 
     let err = turn_loop.failover_manual().unwrap_err();
-    assert!(format!("{err:?}").contains("no backup model configured"));
+    assert!(
+      matches!(err, TurnError::Refused(message) if message.contains("no backup model configured"))
+    );
   }
 
   #[test]
