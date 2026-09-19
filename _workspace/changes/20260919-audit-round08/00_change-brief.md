@@ -21,7 +21,7 @@ keep progress visible through incremental commits, and merge the verified change
 
 - `_workspace/changes/20260919-audit-round08/`
 - `crates/pi-rs-runtime/src/turn.rs`
-- `crates/pi-rs-runtime/src/store_trace.rs` (tests)
+- `crates/pi-rs-runtime/src/turn.rs` (tests)
 - `crates/pi-rs-mcp/src/relay.rs`
 - relevant documentation/tests only when required by the contract
 
