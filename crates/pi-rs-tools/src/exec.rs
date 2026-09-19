@@ -692,7 +692,9 @@ mod tests {
     let tool = ExecTool::new(runtime);
     let mut recorder = Recorder::default();
     #[cfg(windows)]
-    let command = "for /L %i in (1,1,1000) do @echo verbose & exit /b 7".to_string();
+    let command =
+      "(for /L %i in (1,1,20) do @echo verbose verbose verbose verbose verbose) & exit /b 7"
+        .to_string();
     #[cfg(not(windows))]
     let command = "yes verbose | head -c 4096; exit 7".to_string();
     let outcome = tool
