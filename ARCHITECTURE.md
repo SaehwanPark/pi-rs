@@ -235,8 +235,10 @@ Durable layout (the session files are kept flat so listing only reads headers):
 
 Exact paths remain configurable. A committed WAL is compacted; an incomplete
 intent blocks read-only continuation until resume repairs it or fails closed.
-`begin` and `resume` hold the per-session lease for the handle lifetime, and
-retention acquires the same lease before deleting a victim.
+Message-bearing runtime events use one WAL transaction with an exact redacted
+message payload: small messages stay inline, while larger messages keep a verified
+session-blob reference. `begin` and `resume` hold the per-session lease for the
+handle lifetime, and retention acquires the same lease before deleting a victim.
 
 ## 8. Reasoning provenance
 

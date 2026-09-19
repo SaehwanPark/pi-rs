@@ -137,7 +137,27 @@ pub trait Trace: Send {
     Ok(())
   }
 
-  /// Persist one semantic message against the event that introduced it.
+  /// Emit one canonical event and its exact model-visible message as one logical
+  /// durable operation. The store-backed implementation prepares the recovery
+  /// payload before appending the event; non-durable sinks use the compatibility
+  /// sequence below.
+  fn emit_message(
+    &mut self,
+    envelope: &mut EventEnvelope,
+    message: &Message,
+  ) -> Result<(), SinkError> {
+    if envelope.meta.seq.is_none() {
+      self.emit(envelope)?;
+    }
+    self.record_message(&AttributedMessage {
+      envelope: envelope.clone(),
+      message: message.clone(),
+    })
+  }
+
+  /// Compatibility escape hatch for callers that already emitted an event.
+  /// Runtime message-bearing paths use [`Trace::emit_message`] so a durable
+  /// implementation can keep the event and projection in one transaction.
   fn record_message(&mut self, attributed: &AttributedMessage) -> Result<(), SinkError> {
     let _ = attributed;
     Ok(())
@@ -190,6 +210,14 @@ impl<T: Trace + ?Sized> Trace for &mut T {
 
   fn complete_without_message(&mut self, envelope: &EventEnvelope) -> Result<(), SinkError> {
     <T as Trace>::complete_without_message(self, envelope)
+  }
+
+  fn emit_message(
+    &mut self,
+    envelope: &mut EventEnvelope,
+    message: &Message,
+  ) -> Result<(), SinkError> {
+    <T as Trace>::emit_message(self, envelope, message)
   }
 
   fn record_message(&mut self, attributed: &AttributedMessage) -> Result<(), SinkError> {
@@ -339,7 +367,9 @@ struct Response {
   epoch: u32,
   text: Option<String>,
   calls: Vec<ToolCallBlock>,
-  introduced_by: EventEnvelope,
+  /// The completion is held until the exact assistant message is assembled, so
+  /// the canonical completion and its projection share one transaction.
+  completion: EventEnvelope,
 }
 
 /// Drives turns against one primary model, with an optional backup.
@@ -1014,16 +1044,14 @@ impl<'a> TurnLoop<'a> {
       }
       if !blocks.is_empty() {
         let message = Message::new(Role::Assistant, blocks);
-        let introduced_by = response.introduced_by.clone();
-        self.trace.record_message(&AttributedMessage {
-          envelope: introduced_by.clone(),
-          message: message.clone(),
-        })?;
-        self.push_message(message, introduced_by.meta.seq);
+        let mut completion = response.completion;
+        self.trace.emit_message(&mut completion, &message)?;
+        self.envelopes.push(completion.clone());
+        self.push_message(message, completion.meta.seq);
       } else {
-        self
-          .trace
-          .complete_without_message(&response.introduced_by)?;
+        let mut completion = response.completion;
+        self.trace.emit_without_message(&mut completion)?;
+        self.envelopes.push(completion);
       }
 
       if response.calls.is_empty() {
@@ -1138,12 +1166,7 @@ impl<'a> TurnLoop<'a> {
     self.emit_with_sink(turn_id, event, true)
   }
 
-  fn emit_with_sink(
-    &mut self,
-    turn_id: Option<TurnId>,
-    event: AgentEvent,
-    without_message: bool,
-  ) -> Result<EventEnvelope, TurnError> {
+  fn new_envelope(&self, turn_id: Option<TurnId>, event: AgentEvent) -> EventEnvelope {
     let epoch = &self.epochs[self.epochs.len() - 1];
     let mut meta = EventMeta::new(self.session_id.clone(), self.trace_id.clone());
     meta.model_epoch = Some(epoch.index);
@@ -1151,7 +1174,16 @@ impl<'a> TurnLoop<'a> {
     if let Some(turn_id) = turn_id {
       meta.turn_id = Some(turn_id);
     }
-    let mut envelope = EventEnvelope::new(meta, event);
+    EventEnvelope::new(meta, event)
+  }
+
+  fn emit_with_sink(
+    &mut self,
+    turn_id: Option<TurnId>,
+    event: AgentEvent,
+    without_message: bool,
+  ) -> Result<EventEnvelope, TurnError> {
+    let mut envelope = self.new_envelope(turn_id, event);
     if without_message {
       self.trace.emit_without_message(&mut envelope)?;
     } else {
@@ -1207,11 +1239,9 @@ impl<'a> TurnLoop<'a> {
     event: AgentEvent,
     message: &Message,
   ) -> Result<EventEnvelope, TurnError> {
-    let envelope = self.emit(turn_id, event)?;
-    self.trace.record_message(&AttributedMessage {
-      envelope: envelope.clone(),
-      message: message.clone(),
-    })?;
+    let mut envelope = self.new_envelope(turn_id, event);
+    self.trace.emit_message(&mut envelope, message)?;
+    self.envelopes.push(envelope.clone());
     Ok(envelope)
   }
 
@@ -1473,7 +1503,6 @@ impl<'a> TurnLoop<'a> {
         calls,
         committed,
         reasoning_provenance: provenance,
-        assistant_introduced_by,
         sink_error,
         first_delta_ms,
         ..
@@ -1497,36 +1526,34 @@ impl<'a> TurnLoop<'a> {
               let tool_calls = u32::try_from(calls.len()).map_err(|_| {
                 TurnFailure::Sink(SinkError("tool-call count exceeds durable limit".into()))
               })?;
-              let introduced_by = self
-                .emit(
-                  Some(turn_id.clone()),
-                  AgentEvent::ModelRequestCompleted(ModelRequestCompleted {
-                    epoch,
-                    model: model.clone(),
-                    finish_reason: usage.finish_reason.clone().or_else(|| {
-                      usage.is_certain().then(|| {
-                        if calls.is_empty() {
-                          "stop"
-                        } else {
-                          "tool_calls"
-                        }
-                        .into()
-                      })
-                    }),
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                    duration_ms,
-                    tool_calls,
-                    reasoning_provenance: provenance,
-                    first_delta_ms,
+              let completion = self.new_envelope(
+                Some(turn_id.clone()),
+                AgentEvent::ModelRequestCompleted(ModelRequestCompleted {
+                  epoch,
+                  model: model.clone(),
+                  finish_reason: usage.finish_reason.clone().or_else(|| {
+                    usage.is_certain().then(|| {
+                      if calls.is_empty() {
+                        "stop"
+                      } else {
+                        "tool_calls"
+                      }
+                      .into()
+                    })
                   }),
-                )
-                .map_err(TurnFailure::from)?;
+                  input_tokens: usage.input_tokens,
+                  output_tokens: usage.output_tokens,
+                  duration_ms,
+                  tool_calls,
+                  reasoning_provenance: provenance,
+                  first_delta_ms,
+                }),
+              );
               return Ok(Response {
                 epoch,
                 text: (!text.is_empty()).then_some(text),
                 calls,
-                introduced_by: assistant_introduced_by.unwrap_or(introduced_by),
+                completion,
               });
             }
           }
@@ -2824,7 +2851,6 @@ struct Collector<'a> {
   reasoning_index: u32,
   text_index: u32,
   reasoning_provenance: Option<ReasoningProvenance>,
-  assistant_introduced_by: Option<EventEnvelope>,
   sink_error: Option<SinkError>,
 }
 
@@ -2849,7 +2875,6 @@ impl<'a> Collector<'a> {
       reasoning_index: 0,
       text_index: 0,
       reasoning_provenance: None,
-      assistant_introduced_by: None,
       sink_error: None,
     }
   }
@@ -2903,13 +2928,10 @@ impl pi_rs_core::ProviderEventSink for Collector<'_> {
           text: text.clone(),
           chunk_index: self.text_index,
         }));
-        if let Some(envelope) = traced {
+        if traced.is_some() {
           self.text_index = self.text_index.saturating_add(1);
           self.committed = true;
           self.text.push_str(text);
-          if self.assistant_introduced_by.is_none() {
-            self.assistant_introduced_by = Some(envelope);
-          }
           self.progress.on_text_delta(text);
         }
       }
@@ -6337,7 +6359,9 @@ mod tests {
     );
     // The user message and assistant answer are the only model-visible records
     // replaced; request/lifecycle events and the retained suffix are excluded.
-    assert_eq!(epoch["replaces_through"], 5);
+    // The assistant projection is bound to the terminal completion event so its
+    // tool-call payload and text share one recovery transaction.
+    assert_eq!(epoch["replaces_through"], 6);
     let summary = epoch["summary"]
       .as_object()
       .expect("the epoch carries a stored blob reference, not prose");
@@ -6353,7 +6377,7 @@ mod tests {
     assert_eq!(restored.epochs[0].epoch, 0);
     assert_eq!(restored.compactions.len(), 1);
     assert_eq!(restored.compactions[0].replaces_from, Some(EventSeq(3)));
-    assert_eq!(restored.compactions[0].replaces_through, Some(EventSeq(5)));
+    assert_eq!(restored.compactions[0].replaces_through, Some(EventSeq(6)));
     assert_eq!(restored.context_epoch, 1);
     assert_eq!(
       restored

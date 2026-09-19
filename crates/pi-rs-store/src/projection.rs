@@ -7,17 +7,20 @@
 //! semantic record is durable. Resume consumes any uncommitted intent before it
 //! can contact a provider.
 //!
-//! Prepare entries intentionally contain only the event identity and the small
-//! lifecycle discriminator needed by recovery. The canonical envelope can carry
-//! user text, tool arguments, or provider payloads, so retaining it in a WAL
-//! would make crash metadata an unbounded second copy of the trace.
+//! Prepare entries contain only the event identity and the small lifecycle
+//! discriminator needed by recovery, plus a bounded exact-message payload for
+//! message transactions. Large messages are represented by a verified blob
+//! reference, so crash metadata never becomes an unbounded second copy of the
+//! trace.
 
 use std::{
   collections::{BTreeMap, BTreeSet},
   path::{Path, PathBuf},
 };
 
-use pi_rs_core::{AgentEvent, EventEnvelope, EventId, RedactionPolicy, SessionRecord, TurnId};
+use pi_rs_core::{
+  AgentEvent, BlobRef, EventEnvelope, EventId, Message, RedactionPolicy, SessionRecord, TurnId,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
@@ -27,9 +30,9 @@ use crate::{
 
 /// Maximum serialized size of one WAL line.
 ///
-/// Message payloads are intentionally not copied into the WAL; this bound covers
-/// lifecycle records and checkpoint capsules so a crash marker cannot become an
-/// unbounded second durable payload.
+/// Inline message payloads are capped before they reach the WAL; this bound also
+/// covers lifecycle records and checkpoint capsules so a crash marker cannot
+/// become an unbounded second durable payload.
 pub(crate) const MAX_WAL_LINE_BYTES: usize = 256 * 1024;
 /// Total bytes accepted from one projection WAL before recovery refuses it.
 ///
@@ -72,6 +75,16 @@ pub(crate) enum WalEventKind {
   Other,
 }
 
+/// Exact model-visible message bytes retained for recovery of a pending
+/// transaction. Small messages stay in the bounded WAL; larger ones are stored
+/// in the session blob store and the WAL keeps only the verified reference.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub(crate) enum MessageRecovery {
+  Inline { message: Box<Message> },
+  Blob { blob: BlobRef },
+}
+
 /// Compact replacement for a full event envelope in a prepare entry.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct WalPrepare {
@@ -79,6 +92,8 @@ pub(crate) struct WalPrepare {
   pub(crate) turn_id: Option<TurnId>,
   pub(crate) model_epoch: Option<u32>,
   pub(crate) kind: WalEventKind,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub(crate) recovery: Option<MessageRecovery>,
 }
 
 impl WalPrepare {
@@ -95,6 +110,7 @@ impl WalPrepare {
       turn_id: envelope.meta.turn_id.clone(),
       model_epoch: envelope.meta.model_epoch,
       kind,
+      recovery: None,
     }
   }
 }
@@ -119,6 +135,8 @@ impl<'de> Deserialize<'de> for WalPrepare {
       turn_id: Option<TurnId>,
       model_epoch: Option<u32>,
       kind: WalEventKind,
+      #[serde(default)]
+      recovery: Option<MessageRecovery>,
     }
     let compact =
       serde_json::from_value::<CompactWalPrepare>(value).map_err(serde::de::Error::custom)?;
@@ -127,6 +145,7 @@ impl<'de> Deserialize<'de> for WalPrepare {
       turn_id: compact.turn_id,
       model_epoch: compact.model_epoch,
       kind: compact.kind,
+      recovery: compact.recovery,
     })
   }
 }
@@ -138,6 +157,10 @@ enum WalEntry {
   Prepare {
     tx_id: EventId,
     envelope: WalPrepare,
+  },
+  Recovery {
+    tx_id: EventId,
+    recovery: MessageRecovery,
   },
   Projection {
     tx_id: EventId,
@@ -187,12 +210,52 @@ impl ProjectionWal {
   }
 
   pub fn prepare(&mut self, envelope: &EventEnvelope) -> Result<EventId, StoreError> {
+    self.prepare_with_recovery(envelope, None)
+  }
+
+  pub fn prepare_message(
+    &mut self,
+    envelope: &EventEnvelope,
+    recovery: MessageRecovery,
+  ) -> Result<EventId, StoreError> {
+    self.prepare_with_recovery(envelope, Some(recovery))
+  }
+
+  fn prepare_with_recovery(
+    &mut self,
+    envelope: &EventEnvelope,
+    recovery: Option<MessageRecovery>,
+  ) -> Result<EventId, StoreError> {
     let tx_id = envelope.meta.event_id.clone();
+    let mut prepared = WalPrepare::from_envelope(envelope);
+    prepared.recovery = recovery;
     self.append(&WalEntry::Prepare {
       tx_id: tx_id.clone(),
-      envelope: WalPrepare::from_envelope(envelope),
+      envelope: prepared,
     })?;
     Ok(tx_id)
+  }
+
+  pub fn set_recovery(
+    &mut self,
+    tx_id: &EventId,
+    recovery: MessageRecovery,
+  ) -> Result<(), StoreError> {
+    let pending = self.pending()?;
+    let Some(intent) = pending.iter().find(|intent| intent.tx_id == *tx_id) else {
+      return Err(StoreError::Invalid(format!(
+        "projection WAL has no pending transaction {tx_id}"
+      )));
+    };
+    if intent.envelope.recovery.is_some() {
+      return Err(StoreError::Invalid(format!(
+        "projection WAL transaction {tx_id} already has a recovery payload"
+      )));
+    }
+    self.append(&WalEntry::Recovery {
+      tx_id: tx_id.clone(),
+      recovery,
+    })
   }
 
   pub fn set_projection(
@@ -289,6 +352,23 @@ impl ProjectionWal {
             },
           );
         }
+        WalEntry::Recovery { tx_id, recovery } => {
+          if let Some(intent) = pending.get_mut(&tx_id) {
+            if intent.envelope.recovery.replace(recovery).is_some() {
+              return Err(StoreError::Invalid(format!(
+                "projection WAL {} has a duplicate recovery payload for {}",
+                path.display(),
+                tx_id
+              )));
+            }
+          } else {
+            return Err(StoreError::Invalid(format!(
+              "projection WAL {} has a recovery payload without a prepare for {}",
+              path.display(),
+              tx_id
+            )));
+          }
+        }
         WalEntry::Projection { tx_id, record } => {
           if matches!(record.as_ref(), SessionRecord::Header(_)) {
             return Err(StoreError::Invalid(format!(
@@ -341,11 +421,9 @@ impl ProjectionWal {
 #[cfg(test)]
 mod tests {
   use pi_rs_core::{
-    Diagnostic, DiagnosticLevel, EventEnvelope, EventId, EventMeta, SessionId, SpanId, TraceId,
-    TurnId, event::AgentEvent,
+    Diagnostic, DiagnosticLevel, EventEnvelope, EventId, EventMeta, Message, RedactionPolicy,
+    SessionId, SpanId, TraceId, TurnId, event::AgentEvent,
   };
-
-  use pi_rs_core::RedactionPolicy;
 
   use crate::TempDir;
 
@@ -371,6 +449,65 @@ mod tests {
         message: "wal compaction".into(),
       }),
     )
+  }
+
+  #[test]
+  fn legacy_prepare_entries_without_message_recovery_remain_readable() {
+    let tmp = TempDir::new("projection-wal-legacy");
+    let path = tmp.child("session.wal.jsonl");
+    let session = SessionId::from_string("018f-wal-legacy");
+    let envelope = diagnostic(&session);
+    let event_id = envelope.meta.event_id.clone();
+    let line = serde_json::json!({
+      "op": "prepare",
+      "tx_id": event_id.clone(),
+      "envelope": {
+        "event_id": event_id,
+        "turn_id": envelope.meta.turn_id,
+        "model_epoch": envelope.meta.model_epoch,
+        "kind": serde_json::to_value(WalEventKind::Other).unwrap()
+      }
+    });
+    std::fs::write(
+      &path,
+      format!("{}\n", serde_json::to_string(&line).unwrap()),
+    )
+    .unwrap();
+    let pending = ProjectionWal::pending_at(&path).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].envelope.recovery.is_none());
+    assert_eq!(pending[0].tx_id, envelope.meta.event_id);
+  }
+
+  #[test]
+  fn inline_message_recovery_is_redacted_and_stays_within_the_wal_bound() {
+    let tmp = TempDir::new("projection-wal-message");
+    let path = tmp.child("session.wal.jsonl");
+    let session = SessionId::from_string("018f-wal-message");
+    let secret = "projection-secret";
+    let policy = RedactionPolicy {
+      scan_environment: false,
+      literals: vec![secret.into()],
+      ..RedactionPolicy::default()
+    };
+    let mut wal = ProjectionWal::open(&path, policy).unwrap();
+    let envelope = diagnostic(&session);
+    wal
+      .prepare_message(
+        &envelope,
+        MessageRecovery::Inline {
+          message: Box::new(Message::user(secret)),
+        },
+      )
+      .unwrap();
+    let pending = wal.pending().unwrap();
+    let Some(MessageRecovery::Inline { message }) = pending[0].envelope.recovery.as_ref() else {
+      panic!("small messages stay inline")
+    };
+    assert_eq!(message.text(), "[redacted:field]");
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(!on_disk.contains(secret));
+    assert!(on_disk.len() < MAX_WAL_LINE_BYTES);
   }
 
   #[test]

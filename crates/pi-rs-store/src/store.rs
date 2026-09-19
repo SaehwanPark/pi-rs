@@ -43,7 +43,7 @@ use crate::{
   blob::BlobStore,
   journal::TraceJournal,
   lease::SessionLease,
-  projection::{ProjectionWal, validate_projection_size},
+  projection::{MessageRecovery, ProjectionWal, validate_projection_size},
   retention::{self, RetentionReport},
   session_log::{self, RestoredSession, SessionLog},
 };
@@ -57,6 +57,14 @@ pub const DEFAULT_INLINE_THRESHOLD_BYTES: u64 = 8 * 1024;
 const MAX_CAPSULE_BYTES: u64 = 128 * 1024;
 const MAX_CHECKPOINT_COUNT: usize = 1_024;
 const MAX_CHECKPOINT_TOTAL_BYTES: u64 = 8 * 1024 * 1024;
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectionFailpoint {
+  Prepare,
+  CanonicalAppend,
+  SemanticAppend,
+}
 
 /// Write policy for one session, resolved from configuration once.
 ///
@@ -228,6 +236,7 @@ impl Store {
     let mut opened = self.session(header, log, journal, wal, lease);
     opened.recover_projection()?;
     opened.recover_abandoned_model_requests()?;
+    opened.recover_unrequested_assistant_calls()?;
     opened.recover_unstarted_tool_requests()?;
     // Recovery may have repaired a WAL intent or normalized a safe interrupted
     // lifecycle; validate the complete state before returning an append handle
@@ -274,6 +283,8 @@ impl Store {
       wal,
       _lease: lease,
       policy: self.policy.clone(),
+      #[cfg(test)]
+      failpoint: None,
     }
   }
 
@@ -550,6 +561,8 @@ pub struct Session {
   _lease: SessionLease,
   blobs: BlobStore,
   policy: WritePolicy,
+  #[cfg(test)]
+  failpoint: Option<ProjectionFailpoint>,
 }
 
 impl Session {
@@ -593,6 +606,22 @@ impl Session {
 
   pub fn policy(&self) -> &WritePolicy {
     &self.policy
+  }
+
+  #[cfg(test)]
+  fn set_failpoint(&mut self, failpoint: ProjectionFailpoint) {
+    self.failpoint = Some(failpoint);
+  }
+
+  #[cfg(test)]
+  fn hit_failpoint(&mut self, failpoint: ProjectionFailpoint) -> Result<(), StoreError> {
+    if self.failpoint == Some(failpoint) {
+      self.failpoint = None;
+      return Err(StoreError::Invalid(format!(
+        "synthetic projection interruption at {failpoint:?}"
+      )));
+    }
+    Ok(())
   }
 
   /// Append a canonical trace event, stamping the authoritative sequence number
@@ -643,6 +672,50 @@ impl Session {
     Ok(seq)
   }
 
+  /// Emit a canonical event and its exact model-visible message as one durable
+  /// transaction. The recovery payload is prepared before the WAL prepare, so a
+  /// canonical event can never outlive the bytes needed to rebuild its semantic
+  /// projection.
+  pub fn emit_message(
+    &mut self,
+    envelope: &mut EventEnvelope,
+    message: &Message,
+  ) -> Result<EventSeq, StoreError> {
+    if envelope.meta.seq.is_some() {
+      let record = self.complete_message(&pi_rs_core::AttributedMessage {
+        envelope: envelope.clone(),
+        message: message.clone(),
+      })?;
+      return record.seq.ok_or_else(|| {
+        StoreError::Invalid(format!(
+          "message {} completed without a canonical sequence",
+          record.event_id
+        ))
+      });
+    }
+
+    validate_message_envelope(envelope)?;
+    let recovery = self.prepare_message_recovery(message)?;
+    let tx_id = self.wal.prepare_message(envelope, recovery)?;
+    #[cfg(test)]
+    self.hit_failpoint(ProjectionFailpoint::Prepare)?;
+    let seq = self.journal.append_bounded(
+      envelope,
+      None,
+      Some(&self.blobs),
+      self.policy.inline_threshold_bytes,
+    )?;
+    envelope.meta.seq = Some(seq);
+    #[cfg(test)]
+    self.hit_failpoint(ProjectionFailpoint::CanonicalAppend)?;
+    let record = self.message_record(envelope, message, seq)?;
+    self.log.append(&record)?;
+    #[cfg(test)]
+    self.hit_failpoint(ProjectionFailpoint::SemanticAppend)?;
+    self.wal.commit(&tx_id)?;
+    Ok(seq)
+  }
+
   /// Commit a held event transaction after its multi-event lifecycle has
   /// completed. This is used for compaction's start marker, whose intent must
   /// remain open until the summary and completion are durable.
@@ -656,6 +729,90 @@ impl Session {
       self.wal.commit(event_id)?;
     }
     Ok(())
+  }
+
+  fn recover_message(&self, recovery: &MessageRecovery) -> Result<Message, StoreError> {
+    let bytes = match recovery {
+      MessageRecovery::Inline { message } => {
+        return Ok((**message).clone());
+      }
+      MessageRecovery::Blob { blob } => self
+        .blobs
+        .get_relative_verified(&blob.relative_path())
+        .map_err(|error| {
+          StoreError::Invalid(format!(
+            "message recovery blob {} is unreadable: {error}",
+            blob.relative_path()
+          ))
+        })?,
+    };
+    serde_json::from_slice(&bytes).map_err(|error| {
+      StoreError::Invalid(format!(
+        "message recovery payload is not a valid session message: {error}"
+      ))
+    })
+  }
+
+  fn prepare_message_recovery(&self, message: &Message) -> Result<MessageRecovery, StoreError> {
+    let mut value = serde_json::to_value(message)?;
+    self.policy.redaction.apply_json(&mut value);
+    let sanitized: Message = serde_json::from_value(value)?;
+    let encoded = serde_json::to_vec(&sanitized)?;
+    // Keep the usual inline budget for the WAL payload, with a hard ceiling so
+    // an unusually configured trace budget cannot make recovery metadata large.
+    const MAX_INLINE_MESSAGE_BYTES: usize = 32 * 1024;
+    if encoded.len()
+      <= usize::try_from(self.policy.inline_threshold_bytes)
+        .unwrap_or(MAX_INLINE_MESSAGE_BYTES)
+        .min(MAX_INLINE_MESSAGE_BYTES)
+    {
+      return Ok(MessageRecovery::Inline {
+        message: Box::new(sanitized),
+      });
+    }
+    let blob = self.blobs.put(&encoded, Some("application/json"))?;
+    Ok(MessageRecovery::Blob { blob })
+  }
+
+  fn message_record(
+    &self,
+    envelope: &EventEnvelope,
+    message: &Message,
+    seq: EventSeq,
+  ) -> Result<SessionRecord, StoreError> {
+    validate_message_envelope(envelope)?;
+    let meta = &envelope.meta;
+    let turn_id = meta
+      .turn_id
+      .as_ref()
+      .ok_or_else(|| StoreError::Invalid("a persisted message must belong to a turn".into()))?;
+    let epoch = meta
+      .model_epoch
+      .ok_or_else(|| StoreError::Invalid("a persisted message must carry a model epoch".into()))?;
+    let model = meta
+      .model
+      .as_ref()
+      .ok_or_else(|| StoreError::Invalid("a persisted message must carry a model".into()))?;
+    let external_context = match &envelope.event {
+      AgentEvent::ExternalContextRetrieved(retrieved) => Some(ExternalContextRef {
+        provider: retrieved.source.provider.clone(),
+        resource_id: retrieved.source.resource_id.clone(),
+        citation: retrieved.citation.clone(),
+        provenance: retrieved.source.provenance.clone(),
+        metadata: retrieved.metadata.clone(),
+      }),
+      _ => None,
+    };
+    Ok(SessionRecord::Message(SessionMessage {
+      turn_id: turn_id.clone(),
+      role: message.role,
+      message: message.clone(),
+      epoch,
+      model: model.clone(),
+      event_id: meta.event_id.clone(),
+      seq: Some(seq),
+      external_context,
+    }))
   }
 
   /// Complete the pending event transaction with the model-visible message.
@@ -726,11 +883,15 @@ impl Session {
       seq: Some(seq),
       external_context,
     });
-    // Message payloads may be arbitrarily large (the journal can externalize
-    // their trace fields), so do not duplicate them in the WAL. The prepare
-    // intent plus canonical event are enough to recover a missing append; when
-    // the semantic append already reached disk, recovery finds it by event id
-    // and only closes the intent.
+    // A held message intent may have been prepared before the runtime had the
+    // complete response (for compatibility with older callers). Attach the
+    // exact redacted payload before the semantic append so a crash in this
+    // interval is still recoverable. New runtime paths use `emit_message`,
+    // which prepares this payload before the canonical append.
+    if intent.envelope.recovery.is_none() {
+      let recovery = self.prepare_message_recovery(&attributed.message)?;
+      self.wal.set_recovery(&intent.tx_id, recovery)?;
+    }
     self.log.append(&record)?;
     self.wal.commit(&intent.tx_id)?;
     let SessionRecord::Message(message) = record else {
@@ -930,12 +1091,14 @@ impl Session {
       }
       let record = match intent.record {
         Some(record) => record,
-        None => recover_projection_record(trace_entry, trace, records, self)?.ok_or_else(|| {
-          StoreError::Invalid(format!(
-            "session {} checkpoint event has no recoverable barrier projection",
-            self.id()
-          ))
-        })?,
+        None => {
+          recover_projection_record(trace_entry, trace, records, self, None)?.ok_or_else(|| {
+            StoreError::Invalid(format!(
+              "session {} checkpoint event has no recoverable barrier projection",
+              self.id()
+            ))
+          })?
+        }
       };
       let SessionRecord::CheckpointBarrier(barrier) = record else {
         return Err(StoreError::Invalid(format!(
@@ -1082,6 +1245,7 @@ impl Session {
         continue;
       }
 
+      let recovery = intent.envelope.recovery.clone();
       let record = match intent.record {
         Some(record) => Some(record),
         None => {
@@ -1096,7 +1260,7 @@ impl Session {
             self.wal.commit(&intent.tx_id)?;
             continue;
           }
-          recover_projection_record(trace_entry, &trace, &records, self)?
+          recover_projection_record(trace_entry, &trace, &records, self, recovery.as_ref())?
         }
       };
       let Some(record) = record else {
@@ -1180,6 +1344,156 @@ impl Session {
     Ok(())
   }
 
+  /// Close assistant tool calls that were projected before execution crossed
+  /// the `ToolRequested` boundary. The assistant message is durable evidence of
+  /// intent, while the ordering contract proves that no tool code could have
+  /// run. The synthesized request is parented to that assistant event so the
+  /// recovery-generated lifecycle remains explicit in the canonical trace.
+  fn recover_unrequested_assistant_calls(&mut self) -> Result<(), StoreError> {
+    let trace_report = TraceJournal::read(self.trace_path())?;
+    if trace_report.malformed > 0 {
+      return Err(StoreError::Invalid(format!(
+        "session {} trace contains {} malformed record(s); assistant-call recovery is unsafe",
+        self.id(),
+        trace_report.malformed
+      )));
+    }
+    let semantic = SessionLog::read(self.path())?;
+    let mut missing = Vec::new();
+    let mut assistant_call_ids = BTreeSet::new();
+    for record in semantic.items.iter().filter_map(|record| match record {
+      SessionRecord::Message(message) if message.role == Role::Assistant => Some(message),
+      _ => None,
+    }) {
+      let assistant = trace_report
+        .items
+        .iter()
+        .find(|entry| entry.envelope.meta.event_id == record.event_id)
+        .ok_or_else(|| {
+          StoreError::Invalid(format!(
+            "session {} assistant message {} has no canonical event; resume requires recovery",
+            self.id(),
+            record.event_id
+          ))
+        })?;
+      for call in record.message.tool_calls() {
+        if !assistant_call_ids.insert(call.id.clone()) {
+          return Err(StoreError::Invalid(format!(
+            "session {} assistant tool call {} appears more than once; resume requires recovery",
+            self.id(),
+            call.id
+          )));
+        }
+        let mut requests = Vec::new();
+        for entry in &trace_report.items {
+          let event = restore_externalized_event(entry, self)?;
+          if let AgentEvent::ToolRequested(requested) = event
+            && requested.call_id == call.id
+          {
+            requests.push((entry, requested));
+          }
+        }
+        if requests.len() > 1 {
+          return Err(StoreError::Invalid(format!(
+            "session {} assistant tool call {} has duplicate canonical requests; resume requires recovery",
+            self.id(),
+            call.id
+          )));
+        }
+        // Pi imports may omit model metadata on tool events; an explicit
+        // mismatch remains corruption, while absent metadata stays compatible.
+        let exact = requests.first().is_some_and(|(entry, requested)| {
+          requested.name == call.name
+            && requested.arguments == call.arguments
+            && entry.envelope.meta.turn_id == Some(record.turn_id.clone())
+            && entry
+              .envelope
+              .meta
+              .model_epoch
+              .is_none_or(|epoch| epoch == record.epoch)
+            && entry
+              .envelope
+              .meta
+              .model
+              .as_ref()
+              .is_none_or(|model| model == &record.model)
+            && entry
+              .envelope
+              .meta
+              .seq
+              .zip(assistant.envelope.meta.seq)
+              .is_some_and(|(request_seq, assistant_seq)| request_seq > assistant_seq)
+        });
+        if requests.len() == 1 && !exact {
+          return Err(StoreError::Invalid(format!(
+            "session {} assistant tool call {} disagrees with its canonical request; resume requires recovery",
+            self.id(),
+            call.id
+          )));
+        }
+        if !exact {
+          missing.push((
+            record.clone(),
+            call.clone(),
+            assistant.envelope.meta.trace_id.clone(),
+          ));
+        }
+      }
+    }
+
+    for (assistant, call, trace_id) in missing {
+      let details = "not executed: process stopped before execution boundary".to_string();
+      let mut request_meta = EventMeta::new(self.id().clone(), trace_id.clone());
+      request_meta.turn_id = Some(assistant.turn_id.clone());
+      request_meta.model_epoch = Some(assistant.epoch);
+      request_meta.model = Some(assistant.model.clone());
+      request_meta.tool_call_id = Some(call.id.clone());
+      request_meta.parent_event_id = Some(assistant.event_id.clone());
+      let mut requested = EventEnvelope::new(
+        request_meta,
+        AgentEvent::ToolRequested(pi_rs_core::ToolRequested {
+          call_id: call.id.clone(),
+          name: call.name.clone(),
+          arguments: call.arguments.clone(),
+          // Recovery is about proving non-execution, not assigning a registry
+          // risk class. Keep the conservative value for later inspection.
+          read_only: false,
+        }),
+      );
+      self.emit(&mut requested)?;
+
+      let mut failed_meta = EventMeta::new(self.id().clone(), trace_id.clone());
+      failed_meta.turn_id = Some(assistant.turn_id.clone());
+      failed_meta.model_epoch = Some(assistant.epoch);
+      failed_meta.model = Some(assistant.model.clone());
+      failed_meta.tool_call_id = Some(call.id.clone());
+      failed_meta.parent_event_id = Some(requested.meta.event_id.clone());
+      let mut failed = EventEnvelope::new(
+        failed_meta,
+        AgentEvent::ToolFailed(pi_rs_core::ToolFailed {
+          call_id: call.id.clone(),
+          name: call.name.clone(),
+          message: details.clone(),
+          duration_ms: 0,
+          status: None,
+        }),
+      );
+      let message = Message::new(
+        Role::Tool,
+        vec![ContentBlock::ToolResult(ToolResultBlock {
+          id: call.id,
+          name: call.name,
+          state: ToolExecutionState::Failed,
+          text: details,
+          is_error: true,
+          reduced: false,
+        })],
+      );
+      self.emit_message(&mut failed, &message)?;
+    }
+    Ok(())
+  }
+
   /// Close tool requests that were recorded before execution crossed the
   /// `ToolStarted` boundary. This is provably safe: no tool code could have
   /// run, so a protocol-completing failed result is preferable to bricking the
@@ -1218,7 +1532,6 @@ impl Session {
           status: None,
         }),
       );
-      self.emit_transaction(&mut envelope, None, true)?;
       let message = Message::new(
         Role::Tool,
         vec![ContentBlock::ToolResult(ToolResultBlock {
@@ -1230,7 +1543,7 @@ impl Session {
           reduced: false,
         })],
       );
-      self.complete_message(&pi_rs_core::AttributedMessage { envelope, message })?;
+      self.emit_message(&mut envelope, &message)?;
     }
     Ok(())
   }
@@ -1370,7 +1683,7 @@ impl Session {
       else {
         continue;
       };
-      if recover_projection_record(trace_entry, &trace_report.items, &[], self)?.is_none() {
+      if recover_projection_record(trace_entry, &trace_report.items, &[], self, None)?.is_none() {
         self.wal.commit(&intent.tx_id)?;
       }
     }
@@ -2720,7 +3033,10 @@ fn validate_projection_alignment(
             message.role == Role::Assistant
               && entries.iter().any(|candidate| {
                 candidate.envelope.meta.event_id == message.event_id
-                  && matches!(&candidate.envelope.event, AgentEvent::AssistantDelta(_))
+                  && matches!(
+                    &candidate.envelope.event,
+                    AgentEvent::AssistantDelta(_) | AgentEvent::ModelRequestCompleted(_)
+                  )
               })
           });
           if !projected {
@@ -2745,16 +3061,36 @@ fn validate_projection_alignment(
         _ => None,
       })
     {
-      let requested = entries.iter().any(|entry| {
-        matches!(
-          &entry.envelope.event,
-          AgentEvent::ToolRequested(requested)
-            if requested.call_id == call.id
-              && requested.name == call.name
-              && requested.arguments == call.arguments
-              && entry.envelope.meta.turn_id == Some(message.turn_id.clone())
-        )
-      });
+      let mut requested = false;
+      for entry in entries {
+        let event = restore_externalized_event_from_blobs(entry, blobs, session)?;
+        if let AgentEvent::ToolRequested(candidate) = event
+          && candidate.call_id == call.id
+          && candidate.name == call.name
+          && candidate.arguments == call.arguments
+          && entry.envelope.meta.turn_id == Some(message.turn_id.clone())
+          && entry
+            .envelope
+            .meta
+            .model_epoch
+            .is_none_or(|epoch| epoch == message.epoch)
+          && entry
+            .envelope
+            .meta
+            .model
+            .as_ref()
+            .is_none_or(|model| model == &message.model)
+          && entry
+            .envelope
+            .meta
+            .seq
+            .zip(message.seq)
+            .is_some_and(|(request_seq, assistant_seq)| request_seq > assistant_seq)
+        {
+          requested = true;
+          break;
+        }
+      }
       if !requested {
         return Err(StoreError::Invalid(format!(
           "session {session} assistant tool call {} has no canonical ToolRequested event; resume requires recovery",
@@ -3648,11 +3984,31 @@ fn replace_string_segments(value: &mut serde_json::Value, segments: &[&str], tex
   child.is_some_and(|child| replace_string_segments(child, tail, text))
 }
 
+fn validate_message_envelope(envelope: &EventEnvelope) -> Result<(), StoreError> {
+  if envelope.meta.turn_id.is_none() {
+    return Err(StoreError::Invalid(
+      "a persisted message must belong to a turn".into(),
+    ));
+  }
+  if envelope.meta.model_epoch.is_none() {
+    return Err(StoreError::Invalid(
+      "a persisted message must carry a model epoch".into(),
+    ));
+  }
+  if envelope.meta.model.is_none() {
+    return Err(StoreError::Invalid(
+      "a persisted message must carry a model".into(),
+    ));
+  }
+  Ok(())
+}
+
 fn recover_projection_record(
   trace_entry: &pi_rs_core::TraceEntry,
   trace: &[pi_rs_core::TraceEntry],
   records: &[SessionRecord],
   session: &Session,
+  recovery: Option<&MessageRecovery>,
 ) -> Result<Option<SessionRecord>, StoreError> {
   let seq = trace_entry.envelope.meta.seq;
   let meta = &trace_entry.envelope.meta;
@@ -3670,6 +4026,21 @@ fn recover_projection_record(
       .ok_or_else(|| StoreError::Invalid("cannot recover a message without a model".into()))?;
     Ok::<_, StoreError>((turn_id, epoch, model))
   };
+  if let Some(recovery) = recovery {
+    let message = session.recover_message(recovery)?;
+    let seq = seq.ok_or_else(|| {
+      StoreError::Invalid(format!(
+        "session {} message event {} has no canonical sequence",
+        session.id(),
+        trace_entry.envelope.meta.event_id
+      ))
+    })?;
+    return Ok(Some(session.message_record(
+      &trace_entry.envelope,
+      &message,
+      seq,
+    )?));
+  }
   match &trace_entry.envelope.event {
     AgentEvent::UserMessage(_) => {
       let event = restore_externalized_event(trace_entry, session)?;
@@ -4002,10 +4373,11 @@ mod tests {
     context::{CAPSULE_SCHEMA_VERSION, ReductionReason},
     event::{
       AgentEvent, CheckpointCreated, ContextReduced, Diagnostic, DiagnosticLevel, EventMeta,
-      ModelRequestStarted, SessionEndReason, SessionEnded, SessionStarted, ToolCompleted,
-      ToolRequested, ToolStarted, TurnCompleted, TurnStatus, UserMessage,
+      ModelRequestCompleted, ModelRequestStarted, SessionEndReason, SessionEnded, SessionStarted,
+      ToolCompleted, ToolRequested, ToolStarted, TurnCompleted, TurnStatus, UserMessage,
     },
     ids::{EventId, ToolCallId, TraceId, uuidv7},
+    message::ToolCallBlock,
     session::{SESSION_SCHEMA_VERSION, SessionEpochRecord, SessionReductionRecord},
     trace::{BlobCompression, TraceRetention},
   };
@@ -4417,6 +4789,429 @@ mod tests {
   }
 
   #[test]
+  fn message_transaction_recovers_or_rolls_back_at_each_boundary() {
+    let cases = [
+      (ProjectionFailpoint::Prepare, false),
+      (ProjectionFailpoint::CanonicalAppend, true),
+      (ProjectionFailpoint::SemanticAppend, true),
+    ];
+    for (failpoint, should_restore) in cases {
+      let tmp = TempDir::new(&format!("message-transaction-{failpoint:?}"));
+      let opened = store(&tmp);
+      let id = SessionId::from_string(uuidv7());
+      let turn = TurnId::new();
+      let mut session = opened.begin(header(&id)).unwrap();
+      let mut envelope = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::UserMessage(UserMessage {
+          text: "exact durable message".into(),
+          attachments: 0,
+        }),
+      );
+      session.set_failpoint(failpoint);
+      assert!(
+        session
+          .emit_message(&mut envelope, &Message::user("exact durable message"))
+          .is_err(),
+        "the synthetic interruption must fire at {failpoint:?}"
+      );
+      drop(session);
+
+      assert!(
+        matches!(opened.restore(&id), Err(StoreError::Invalid(message)) if message.contains("incomplete trace/session projection")),
+        "read-only restore must not consume {failpoint:?}"
+      );
+      let resumed = opened.resume(&id).unwrap();
+      let restored = opened.restore(&id).unwrap();
+      if should_restore {
+        assert_eq!(restored.messages.len(), 1, "{failpoint:?}");
+        assert_eq!(
+          restored.messages[0].message,
+          Message::user("exact durable message")
+        );
+        assert_eq!(restored.messages[0].seq, Some(EventSeq(1)));
+      } else {
+        assert!(
+          restored.messages.is_empty(),
+          "{failpoint:?} rolls back safely"
+        );
+        assert_eq!(restored.last_seq, None);
+      }
+      assert!(
+        ProjectionWal::pending_at(&opened.layout().wal_path(&id))
+          .unwrap()
+          .is_empty()
+      );
+      resumed.finish().unwrap();
+    }
+  }
+
+  #[test]
+  fn message_failpoints_cover_every_runtime_message_shape() {
+    #[derive(Debug, Clone, Copy)]
+    enum Case {
+      User,
+      ExternalContext,
+      AssistantText,
+      AssistantCalls,
+      ToolCompleted,
+      ReducedToolCompleted,
+      ToolFailed,
+      ToolUnknown,
+    }
+
+    let cases = [
+      Case::User,
+      Case::ExternalContext,
+      Case::AssistantText,
+      Case::AssistantCalls,
+      Case::ToolCompleted,
+      Case::ReducedToolCompleted,
+      Case::ToolFailed,
+      Case::ToolUnknown,
+    ];
+    let failpoints = [
+      ProjectionFailpoint::Prepare,
+      ProjectionFailpoint::CanonicalAppend,
+      ProjectionFailpoint::SemanticAppend,
+    ];
+
+    for case in cases {
+      for failpoint in failpoints {
+        let tmp = TempDir::new(&format!("message-shape-{case:?}-{failpoint:?}"));
+        let opened = store(&tmp);
+        let id = SessionId::from_string(uuidv7());
+        let turn = TurnId::new();
+        let model = ModelRef::new("local", "qwen");
+        let mut session = opened.begin(header(&id)).unwrap();
+        let mut emit_model_start = || {
+          let mut started = EventEnvelope::new(
+            meta(&id, &turn),
+            AgentEvent::ModelRequestStarted(ModelRequestStarted {
+              epoch: 0,
+              model: model.clone(),
+              message_count: 1,
+              context_tokens_est: 12,
+              tools_exposed: 3,
+            }),
+          );
+          session.emit(&mut started).unwrap();
+        };
+        let (mut envelope, message) = match case {
+          Case::User => (
+            EventEnvelope::new(
+              meta(&id, &turn),
+              AgentEvent::UserMessage(UserMessage {
+                text: "user message".into(),
+                attachments: 0,
+              }),
+            ),
+            Message::user("user message"),
+          ),
+          Case::ExternalContext => {
+            let source = pi_rs_core::ExternalContextSource {
+              provider: "fixture".into(),
+              resource_id: "chunk-1".into(),
+              provenance: "fixture/test".into(),
+            };
+            let mut metadata = BTreeMap::new();
+            metadata.insert("url".into(), "https://example.test/chunk-1".into());
+            let context = pi_rs_core::ExternalContextItem::inline(
+              source,
+              "evidence from the context provider",
+              Some("[1]".into()),
+            )
+            .with_metadata(metadata.clone());
+            (
+              EventEnvelope::new(
+                meta(&id, &turn),
+                AgentEvent::ExternalContextRetrieved(pi_rs_core::ExternalContextRetrieved {
+                  source: context.source.clone(),
+                  citation: context.citation.clone(),
+                  bytes: context.text.len() as u64,
+                  inline: true,
+                  metadata,
+                }),
+              ),
+              Message::user(context.format_for_model()),
+            )
+          }
+          Case::AssistantText => {
+            emit_model_start();
+            let mut delta = EventEnvelope::new(
+              meta(&id, &turn),
+              AgentEvent::AssistantDelta(pi_rs_core::AssistantDelta {
+                text: "assistant text".into(),
+                chunk_index: 0,
+              }),
+            );
+            session.emit(&mut delta).unwrap();
+            (
+              EventEnvelope::new(
+                meta(&id, &turn),
+                AgentEvent::ModelRequestCompleted(ModelRequestCompleted {
+                  epoch: 0,
+                  model: model.clone(),
+                  finish_reason: Some("stop".into()),
+                  input_tokens: Some(12),
+                  output_tokens: Some(2),
+                  duration_ms: 1,
+                  tool_calls: 0,
+                  reasoning_provenance: None,
+                  first_delta_ms: Some(0),
+                }),
+              ),
+              Message::assistant("assistant text"),
+            )
+          }
+          Case::AssistantCalls => {
+            emit_model_start();
+            let calls = vec![
+              ToolCallBlock {
+                id: ToolCallId::from_string("99999999-9999-4999-8999-999999999991"),
+                name: "read".into(),
+                arguments: serde_json::json!({"path": "a.txt"}),
+              },
+              ToolCallBlock {
+                id: ToolCallId::from_string("99999999-9999-4999-8999-999999999992"),
+                name: "exec".into(),
+                arguments: serde_json::json!({"command": "echo ok"}),
+              },
+            ];
+            (
+              EventEnvelope::new(
+                meta(&id, &turn),
+                AgentEvent::ModelRequestCompleted(ModelRequestCompleted {
+                  epoch: 0,
+                  model: model.clone(),
+                  finish_reason: Some("tool_calls".into()),
+                  input_tokens: Some(12),
+                  output_tokens: Some(4),
+                  duration_ms: 1,
+                  tool_calls: calls.len() as u32,
+                  reasoning_provenance: None,
+                  first_delta_ms: Some(0),
+                }),
+              ),
+              Message::new(
+                Role::Assistant,
+                calls.into_iter().map(ContentBlock::ToolCall).collect(),
+              ),
+            )
+          }
+          Case::ToolCompleted | Case::ReducedToolCompleted => {
+            let call_id = ToolCallId::from_string(if matches!(case, Case::ToolCompleted) {
+              "99999999-9999-4999-8999-999999999993"
+            } else {
+              "99999999-9999-4999-8999-999999999994"
+            });
+            let name = "read";
+            let mut requested = EventEnvelope::new(
+              meta(&id, &turn),
+              AgentEvent::ToolRequested(ToolRequested {
+                call_id: call_id.clone(),
+                name: name.into(),
+                arguments: serde_json::json!({"path": "a.txt"}),
+                read_only: true,
+              }),
+            );
+            session.emit(&mut requested).unwrap();
+            let mut started = EventEnvelope::new(
+              meta(&id, &turn),
+              AgentEvent::ToolStarted(ToolStarted {
+                call_id: call_id.clone(),
+                name: name.into(),
+              }),
+            );
+            session.emit(&mut started).unwrap();
+            let reduced = matches!(case, Case::ReducedToolCompleted);
+            let text = if reduced { "visible" } else { "complete" };
+            let blob = reduced.then(|| session.put_recovery_blob(b"full tool output").unwrap());
+            (
+              EventEnvelope::new(
+                meta(&id, &turn),
+                AgentEvent::ToolCompleted(ToolCompleted {
+                  call_id: call_id.clone(),
+                  name: name.into(),
+                  state: ToolExecutionState::Succeeded,
+                  duration_ms: 1,
+                  status: Some(0),
+                  reduced,
+                  blob,
+                  visible_bytes: text.len() as u64,
+                }),
+              ),
+              Message::new(
+                Role::Tool,
+                vec![ContentBlock::ToolResult(ToolResultBlock {
+                  id: call_id,
+                  name: name.into(),
+                  state: ToolExecutionState::Succeeded,
+                  text: text.into(),
+                  is_error: false,
+                  reduced,
+                })],
+              ),
+            )
+          }
+          Case::ToolFailed | Case::ToolUnknown => {
+            let call_id = ToolCallId::from_string(if matches!(case, Case::ToolFailed) {
+              "99999999-9999-4999-8999-999999999995"
+            } else {
+              "99999999-9999-4999-8999-999999999996"
+            });
+            let name = "write";
+            let mut requested = EventEnvelope::new(
+              meta(&id, &turn),
+              AgentEvent::ToolRequested(ToolRequested {
+                call_id: call_id.clone(),
+                name: name.into(),
+                arguments: serde_json::json!({"path": "out.txt", "contents": "x"}),
+                read_only: false,
+              }),
+            );
+            session.emit(&mut requested).unwrap();
+            let (event, state, text) = if matches!(case, Case::ToolFailed) {
+              (
+                AgentEvent::ToolFailed(ToolFailed {
+                  call_id: call_id.clone(),
+                  name: name.into(),
+                  message: "failed output".into(),
+                  duration_ms: 1,
+                  status: Some(1),
+                }),
+                ToolExecutionState::Failed,
+                "failed output",
+              )
+            } else {
+              (
+                AgentEvent::ToolUnknown(pi_rs_core::ToolUnknown {
+                  call_id: call_id.clone(),
+                  name: name.into(),
+                  why: "completion not observed".into(),
+                  mutating: true,
+                }),
+                ToolExecutionState::Unknown,
+                "completion not observed",
+              )
+            };
+            (
+              EventEnvelope::new(meta(&id, &turn), event),
+              Message::new(
+                Role::Tool,
+                vec![ContentBlock::ToolResult(ToolResultBlock {
+                  id: call_id,
+                  name: name.into(),
+                  state,
+                  text: text.into(),
+                  is_error: true,
+                  reduced: false,
+                })],
+              ),
+            )
+          }
+        };
+        let event_id = envelope.meta.event_id.clone();
+        session.set_failpoint(failpoint);
+        assert!(
+          session.emit_message(&mut envelope, &message).is_err(),
+          "{case:?} must interrupt at {failpoint:?}"
+        );
+        drop(session);
+
+        let resumed = opened
+          .resume(&id)
+          .unwrap_or_else(|error| panic!("{case:?} at {failpoint:?}: {error}"));
+        let restored = opened.restore(&id).unwrap();
+        if failpoint != ProjectionFailpoint::Prepare {
+          let projection = restored
+            .messages
+            .iter()
+            .find(|record| record.event_id == event_id)
+            .unwrap_or_else(|| panic!("{case:?} projection is missing at {failpoint:?}"));
+          assert_eq!(projection.message, message, "{case:?} at {failpoint:?}");
+        }
+        resumed.finish().unwrap();
+      }
+    }
+  }
+
+  #[test]
+  fn oversized_message_recovery_uses_a_durable_blob_reference() {
+    let tmp = TempDir::new("store-message-wal-bound");
+    let opened = store(&tmp);
+    let id = SessionId::from_string(uuidv7());
+    let turn = TurnId::new();
+    let mut session = opened.begin(header(&id)).unwrap();
+    let text = "x".repeat(400_000);
+    let mut envelope = EventEnvelope::new(
+      meta(&id, &turn),
+      AgentEvent::UserMessage(UserMessage {
+        text: text.clone(),
+        attachments: 0,
+      }),
+    );
+    session.set_failpoint(ProjectionFailpoint::CanonicalAppend);
+    assert!(
+      session
+        .emit_message(&mut envelope, &Message::user(&text))
+        .is_err()
+    );
+    drop(session);
+
+    let resumed = opened
+      .resume(&id)
+      .expect("message recovery must read its durable blob reference");
+    let restored = opened.restore(&id).unwrap();
+    assert_eq!(restored.messages.len(), 1);
+    assert_eq!(restored.messages[0].message.text(), text);
+    assert!(
+      objects_under(&opened.layout().blobs_dir(&id))
+        .iter()
+        .any(|bytes| bytes.len() > 300_000),
+      "large message bytes are persisted in the session blob store"
+    );
+    resumed.finish().unwrap();
+  }
+
+  #[test]
+  fn corrupt_message_recovery_blob_fails_closed() {
+    let tmp = TempDir::new("store-message-wal-corrupt");
+    let opened = store(&tmp);
+    let id = SessionId::from_string(uuidv7());
+    let turn = TurnId::new();
+    let mut session = opened.begin(header(&id)).unwrap();
+    let text = "x".repeat(400_000);
+    let mut envelope = EventEnvelope::new(
+      meta(&id, &turn),
+      AgentEvent::UserMessage(UserMessage {
+        text: text.clone(),
+        attachments: 0,
+      }),
+    );
+    session.set_failpoint(ProjectionFailpoint::CanonicalAppend);
+    assert!(
+      session
+        .emit_message(&mut envelope, &Message::user(&text))
+        .is_err()
+    );
+    drop(session);
+    let blob = object_paths_under(&opened.layout().blobs_dir(&id))
+      .into_iter()
+      .find(|path| std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 300_000))
+      .expect("message recovery stores a large payload as a blob");
+    std::fs::write(blob, b"corrupt").unwrap();
+    let error = opened
+      .resume(&id)
+      .expect_err("a recovery blob hash mismatch must not become a message");
+    assert!(
+      error.to_string().contains("message recovery blob")
+        || error.to_string().contains("blob reference does not match"),
+      "{error}"
+    );
+  }
+
+  #[test]
   fn oversized_held_message_recovers_without_a_projection_wal_payload() {
     let tmp = TempDir::new("store-message-wal-bound");
     let opened = store(&tmp);
@@ -4609,6 +5404,384 @@ mod tests {
   }
 
   #[test]
+  fn assistant_tool_call_without_a_request_is_closed_as_never_executed() {
+    let tmp = TempDir::new("store-assistant-call-recovery");
+    let opened = store(&tmp);
+    let id = SessionId::from_string(uuidv7());
+    let turn = TurnId::new();
+    let call_id = ToolCallId::from_string("88888888-8888-4888-8888-888888888888");
+    {
+      let mut session = opened.begin(header(&id)).unwrap();
+      let mut started = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ModelRequestStarted(ModelRequestStarted {
+          epoch: 0,
+          model: ModelRef::new("local", "qwen"),
+          message_count: 1,
+          context_tokens_est: 12,
+          tools_exposed: 1,
+        }),
+      );
+      session.emit(&mut started).unwrap();
+      let call = ToolCallBlock {
+        id: call_id.clone(),
+        name: "write".into(),
+        arguments: serde_json::json!({"path": "out.txt", "contents": "data"}),
+      };
+      let assistant = Message::new(Role::Assistant, vec![ContentBlock::ToolCall(call)]);
+      let mut completion = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ModelRequestCompleted(ModelRequestCompleted {
+          epoch: 0,
+          model: ModelRef::new("local", "qwen"),
+          finish_reason: Some("tool_calls".into()),
+          input_tokens: Some(12),
+          output_tokens: Some(4),
+          duration_ms: 1,
+          tool_calls: 1,
+          reasoning_provenance: None,
+          first_delta_ms: Some(0),
+        }),
+      );
+      session.emit_message(&mut completion, &assistant).unwrap();
+    }
+
+    let resumed = opened
+      .resume(&id)
+      .expect("an assistant call without a request is provably unexecuted");
+    let trace = TraceJournal::read(resumed.trace_path()).unwrap();
+    let assistant_event = trace
+      .items
+      .iter()
+      .find(|entry| matches!(entry.envelope.event, AgentEvent::ModelRequestCompleted(_)))
+      .unwrap();
+    let requested = trace
+      .items
+      .iter()
+      .find(|entry| {
+        matches!(
+          &entry.envelope.event,
+          AgentEvent::ToolRequested(requested) if requested.call_id == call_id
+        )
+      })
+      .expect("resume synthesizes the missing request");
+    assert_eq!(
+      requested.envelope.meta.parent_event_id.as_ref(),
+      Some(&assistant_event.envelope.meta.event_id),
+      "the recovery-generated request is parented to the assistant message event"
+    );
+    assert!(trace.items.iter().any(|entry| {
+      matches!(
+        &entry.envelope.event,
+        AgentEvent::ToolFailed(failed)
+          if failed.call_id == call_id
+            && failed.message == "not executed: process stopped before execution boundary"
+      )
+    }));
+    let restored = opened.restore(&id).unwrap();
+    assert_eq!(restored.messages.len(), 2);
+    assert!(matches!(
+      restored.messages[1].message.content.first(),
+      Some(ContentBlock::ToolResult(result))
+        if result.id == call_id
+          && result.text == "not executed: process stopped before execution boundary"
+    ));
+    resumed.finish().unwrap();
+  }
+
+  #[test]
+  fn assistant_tool_matching_restores_externalized_request_arguments() {
+    let tmp = TempDir::new("store-assistant-externalized-request");
+    let opened = store(&tmp);
+    let id = SessionId::from_string(uuidv7());
+    let turn = TurnId::new();
+    let call_id = ToolCallId::from_string("88888888-8888-4888-8888-888888888886");
+    let arguments = serde_json::json!({"payload": "x".repeat(20_000)});
+    {
+      let mut session = opened.begin(header(&id)).unwrap();
+      let mut started = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ModelRequestStarted(ModelRequestStarted {
+          epoch: 0,
+          model: ModelRef::new("local", "qwen"),
+          message_count: 1,
+          context_tokens_est: 12,
+          tools_exposed: 1,
+        }),
+      );
+      session.emit(&mut started).unwrap();
+      let assistant = Message::new(
+        Role::Assistant,
+        vec![ContentBlock::ToolCall(ToolCallBlock {
+          id: call_id.clone(),
+          name: "read".into(),
+          arguments: arguments.clone(),
+        })],
+      );
+      let mut completion = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ModelRequestCompleted(ModelRequestCompleted {
+          epoch: 0,
+          model: ModelRef::new("local", "qwen"),
+          finish_reason: Some("tool_calls".into()),
+          input_tokens: Some(12),
+          output_tokens: Some(4),
+          duration_ms: 1,
+          tool_calls: 1,
+          reasoning_provenance: None,
+          first_delta_ms: Some(0),
+        }),
+      );
+      session.emit_message(&mut completion, &assistant).unwrap();
+      let mut requested = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ToolRequested(ToolRequested {
+          call_id,
+          name: "read".into(),
+          arguments,
+          read_only: true,
+        }),
+      );
+      session.emit(&mut requested).unwrap();
+    }
+
+    let resumed = opened
+      .resume(&id)
+      .expect("externalized request arguments must compare after blob restoration");
+    let trace = TraceJournal::read(resumed.trace_path()).unwrap();
+    assert_eq!(
+      trace
+        .items
+        .iter()
+        .filter(|entry| matches!(entry.envelope.event, AgentEvent::ToolRequested(_)))
+        .count(),
+      1,
+      "matching externalized request is not synthesized a second time"
+    );
+    assert!(
+      trace
+        .items
+        .iter()
+        .any(|entry| { matches!(entry.envelope.event, AgentEvent::ToolFailed(_)) })
+    );
+    resumed.finish().unwrap();
+  }
+
+  #[test]
+  fn assistant_multi_tool_recovery_preserves_completed_calls_and_closes_only_missing_calls() {
+    let tmp = TempDir::new("store-assistant-multi-recovery");
+    let opened = store(&tmp);
+    let id = SessionId::from_string(uuidv7());
+    let turn = TurnId::new();
+    let calls = [
+      ToolCallBlock {
+        id: ToolCallId::from_string("88888888-8888-4888-8888-888888888881"),
+        name: "read".into(),
+        arguments: serde_json::json!({"path": "a.txt"}),
+      },
+      ToolCallBlock {
+        id: ToolCallId::from_string("88888888-8888-4888-8888-888888888882"),
+        name: "write".into(),
+        arguments: serde_json::json!({"path": "b.txt", "contents": "b"}),
+      },
+      ToolCallBlock {
+        id: ToolCallId::from_string("88888888-8888-4888-8888-888888888883"),
+        name: "exec".into(),
+        arguments: serde_json::json!({"command": "echo c"}),
+      },
+    ];
+    {
+      let mut session = opened.begin(header(&id)).unwrap();
+      let mut started = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ModelRequestStarted(ModelRequestStarted {
+          epoch: 0,
+          model: ModelRef::new("local", "qwen"),
+          message_count: 1,
+          context_tokens_est: 12,
+          tools_exposed: 3,
+        }),
+      );
+      session.emit(&mut started).unwrap();
+      let assistant = Message::new(
+        Role::Assistant,
+        calls.iter().cloned().map(ContentBlock::ToolCall).collect(),
+      );
+      let mut completion = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ModelRequestCompleted(ModelRequestCompleted {
+          epoch: 0,
+          model: ModelRef::new("local", "qwen"),
+          finish_reason: Some("tool_calls".into()),
+          input_tokens: Some(12),
+          output_tokens: Some(6),
+          duration_ms: 1,
+          tool_calls: 3,
+          reasoning_provenance: None,
+          first_delta_ms: Some(0),
+        }),
+      );
+      session.emit_message(&mut completion, &assistant).unwrap();
+
+      let mut requested = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ToolRequested(ToolRequested {
+          call_id: calls[0].id.clone(),
+          name: calls[0].name.clone(),
+          arguments: calls[0].arguments.clone(),
+          read_only: true,
+        }),
+      );
+      session.emit(&mut requested).unwrap();
+      let mut tool_started = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ToolStarted(ToolStarted {
+          call_id: calls[0].id.clone(),
+          name: calls[0].name.clone(),
+        }),
+      );
+      session.emit(&mut tool_started).unwrap();
+      let mut completed = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ToolCompleted(ToolCompleted {
+          call_id: calls[0].id.clone(),
+          name: calls[0].name.clone(),
+          state: ToolExecutionState::Succeeded,
+          duration_ms: 1,
+          status: Some(0),
+          reduced: false,
+          blob: None,
+          visible_bytes: 2,
+        }),
+      );
+      session
+        .emit_message(
+          &mut completed,
+          &Message::new(
+            Role::Tool,
+            vec![ContentBlock::ToolResult(ToolResultBlock {
+              id: calls[0].id.clone(),
+              name: calls[0].name.clone(),
+              state: ToolExecutionState::Succeeded,
+              text: "ok".into(),
+              is_error: false,
+              reduced: false,
+            })],
+          ),
+        )
+        .unwrap();
+    }
+
+    let resumed = opened.resume(&id).unwrap();
+    let trace = TraceJournal::read(resumed.trace_path()).unwrap();
+    assert_eq!(
+      trace
+        .items
+        .iter()
+        .filter(|entry| matches!(entry.envelope.event, AgentEvent::ToolRequested(_)))
+        .count(),
+      3,
+      "the already completed call is not duplicated"
+    );
+    for call in &calls[1..] {
+      assert!(trace.items.iter().any(|entry| {
+        matches!(
+          &entry.envelope.event,
+          AgentEvent::ToolFailed(failed)
+            if failed.call_id == call.id
+              && failed.message == "not executed: process stopped before execution boundary"
+        )
+      }));
+    }
+    let restored = opened.restore(&id).unwrap();
+    assert_eq!(restored.messages.len(), 4);
+    assert!(matches!(
+      restored.messages[1].message.content.first(),
+      Some(ContentBlock::ToolResult(result))
+        if result.id == calls[0].id && result.state == ToolExecutionState::Succeeded
+    ));
+    for (index, call) in calls[1..].iter().enumerate() {
+      assert!(matches!(
+        restored.messages[index + 2].message.content.first(),
+        Some(ContentBlock::ToolResult(result))
+          if result.id == call.id
+            && result.state == ToolExecutionState::Failed
+      ));
+    }
+    resumed.finish().unwrap();
+  }
+
+  #[test]
+  fn assistant_tool_request_duplicates_and_mismatches_fail_closed() {
+    for (label, second_arguments) in [
+      ("duplicate", serde_json::json!({"path": "out.txt"})),
+      ("mismatch", serde_json::json!({"path": "other.txt"})),
+    ] {
+      let tmp = TempDir::new(&format!("store-assistant-{label}"));
+      let opened = store(&tmp);
+      let id = SessionId::from_string(uuidv7());
+      let turn = TurnId::new();
+      let call_id = ToolCallId::from_string("88888888-8888-4888-8888-888888888887");
+      let mut session = opened.begin(header(&id)).unwrap();
+      let mut started = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ModelRequestStarted(ModelRequestStarted {
+          epoch: 0,
+          model: ModelRef::new("local", "qwen"),
+          message_count: 1,
+          context_tokens_est: 12,
+          tools_exposed: 1,
+        }),
+      );
+      session.emit(&mut started).unwrap();
+      let call = ToolCallBlock {
+        id: call_id.clone(),
+        name: "write".into(),
+        arguments: serde_json::json!({"path": "out.txt"}),
+      };
+      let assistant = Message::new(Role::Assistant, vec![ContentBlock::ToolCall(call)]);
+      let mut completion = EventEnvelope::new(
+        meta(&id, &turn),
+        AgentEvent::ModelRequestCompleted(ModelRequestCompleted {
+          epoch: 0,
+          model: ModelRef::new("local", "qwen"),
+          finish_reason: Some("tool_calls".into()),
+          input_tokens: Some(12),
+          output_tokens: Some(4),
+          duration_ms: 1,
+          tool_calls: 1,
+          reasoning_provenance: None,
+          first_delta_ms: Some(0),
+        }),
+      );
+      session.emit_message(&mut completion, &assistant).unwrap();
+      for arguments in [serde_json::json!({"path": "out.txt"}), second_arguments] {
+        let mut requested = EventEnvelope::new(
+          meta(&id, &turn),
+          AgentEvent::ToolRequested(ToolRequested {
+            call_id: call_id.clone(),
+            name: "write".into(),
+            arguments,
+            read_only: false,
+          }),
+        );
+        session.emit(&mut requested).unwrap();
+      }
+      drop(session);
+      let error = opened
+        .resume(&id)
+        .expect_err("ambiguous assistant call reconciliation must fail closed");
+      assert!(
+        error.to_string().contains("duplicate canonical requests")
+          || error
+            .to_string()
+            .contains("disagrees with its canonical request"),
+        "{label}: {error}"
+      );
+    }
+  }
+
+  #[test]
   fn oversized_checkpoint_projection_is_rejected_before_canonical_append() {
     let tmp = TempDir::new("store-checkpoint-wal-bound");
     let opened = store(&tmp);
@@ -4789,12 +5962,21 @@ mod tests {
 
   /// Every stored object below a directory, descending into hash shards.
   fn objects_under(dir: &std::path::Path) -> Vec<Vec<u8>> {
+    let mut objects = object_paths_under(dir)
+      .into_iter()
+      .map(|path| std::fs::read(path).unwrap())
+      .collect::<Vec<_>>();
+    objects.sort();
+    objects
+  }
+
+  fn object_paths_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut objects = Vec::new();
     for entry in std::fs::read_dir(dir).unwrap().filter_map(Result::ok) {
       if entry.path().is_file() {
-        objects.push(std::fs::read(entry.path()).unwrap());
+        objects.push(entry.path());
       } else {
-        objects.extend(objects_under(&entry.path()));
+        objects.extend(object_paths_under(&entry.path()));
       }
     }
     objects.sort();
