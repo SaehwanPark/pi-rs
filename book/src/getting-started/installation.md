@@ -41,17 +41,19 @@ pi-rs --help
 
 ## Prebuilt Binaries (GitHub Releases)
 
-Release artifacts are published on GitHub when available. Check the release notes for the supported target, or build from source for another platform:
+Release artifacts are target-specific. The v0.2.0 release includes an
+`x86_64-pc-windows-msvc` archive; build from source for other targets:
 
 👉 **[Download from GitHub Releases](https://github.com/SaehwanPark/pi-rs/releases)**
 
-After downloading:
+On Windows PowerShell:
 
-```bash
-tar -xzf pi-rs-v0.2.0-x86_64-unknown-linux-gnu.tar.gz
-chmod +x pi-rs
-sudo mv pi-rs /usr/local/bin/
+```powershell
+Expand-Archive .\pi-rs-v0.2.0-x86_64-pc-windows-msvc.zip -DestinationPath $env:USERPROFILE\.cargo\bin
 ```
+
+On Linux or macOS, use the Cargo source build above unless a matching release asset is
+listed for your target.
 
 ---
 
