@@ -26,11 +26,14 @@ def free_port() -> int:
 
 
 def read_json_response(response) -> tuple[int, dict | list | None]:
-    status = int(response.status)
-    body = response.read()
-    if not body:
-        return status, None
-    return status, json.loads(body.decode("utf-8"))
+    try:
+        status = int(response.status)
+        body = response.read()
+        if not body:
+            return status, None
+        return status, json.loads(body.decode("utf-8"))
+    finally:
+        response.close()
 
 
 def http_call(base: str, method: str, path: str, body: bytes | None = None, signature: str | None = None):
@@ -201,8 +204,7 @@ class BatchRelayOracle(unittest.TestCase):
         self.assertEqual(state["status"], "succeeded")
         self.assertEqual([job["status"] for job in state["jobs"]], ["succeeded", "succeeded"])
 
-        self.server.terminate()
-        self.server.wait(timeout=3)
+        self.stop_server()
         self.server = self.start_server()
         self.wait_health()
         self.assertEqual(self.get_batch("release-1")["status"], "succeeded")
@@ -242,8 +244,8 @@ class BatchRelayOracle(unittest.TestCase):
         state = self.get_batch("failed-1")
         self.assertEqual(state["status"], "failed")
         self.assertEqual([job["status"] for job in state["jobs"]], ["failed", "blocked"])
-        self.assertEqual(fail_log.read_text(encoding="utf-8").count("root"), 1)
-        self.assertNotIn("child", fail_log.read_text(encoding="utf-8"))
+        failed_ids = [json.loads(line)["job_id"] for line in fail_log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(failed_ids, ["root"])
 
     def test_crashed_lease_is_reclaimed_by_fresh_worker(self) -> None:
         batch = {
@@ -282,6 +284,9 @@ class BatchRelayOracle(unittest.TestCase):
         self.assertEqual(self.get_batch("crash-1")["jobs"][0]["status"], "leased")
         worker.terminate()
         worker.wait(timeout=3)
+        for stream in (worker.stdout, worker.stderr):
+            if stream is not None:
+                stream.close()
         release.write_text("release\n", encoding="utf-8")
         time.sleep(1.2)
         self.assertEqual(self.get_batch("crash-1")["jobs"][0]["status"], "pending")

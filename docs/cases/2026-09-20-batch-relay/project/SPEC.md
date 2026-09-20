@@ -179,6 +179,8 @@ A response with `ok: false` is a failed attempt. It may include boolean
 - retryable failure, malformed response, unexpected EOF, or sink failure:
   increment attempts, record a non-empty error, clear the lease, leave the
   job `pending`, continue bounded cleanup, and cause a non-zero worker exit;
+  a job is attempted at most once by one `--once` invocation, so a retryable
+  job is deferred to a later invocation;
 - non-retryable failure (`ok: false, retryable: false`): increment attempts,
   record the error, clear the lease, mark the job `failed`, and cause every
   dependent job to become `blocked` once the worker evaluates dependencies;
