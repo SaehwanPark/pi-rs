@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/SaehwanPark/rupi/actions/workflows/ci.yml"><img src="https://github.com/SaehwanPark/rupi/actions/workflows/ci.yml/badge.svg" alt="CI Status" /></a>
   <a href="https://saehwanpark.github.io/rupi/"><img src="https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg" alt="Documentation" /></a>
-  <a href="https://github.com/SaehwanPark/rupi/releases"><img src="https://img.shields.io/badge/release-v0.2.1-green.svg" alt="Release v0.2.1" /></a>
+  <a href="https://github.com/SaehwanPark/rupi/releases"><img src="https://img.shields.io/badge/release-v0.2.2-green.svg" alt="Release v0.2.2" /></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.85%2B%20(2024)-orange.svg" alt="Rust 1.85+" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-purple.svg" alt="License" /></a>
 </p>
@@ -20,7 +20,7 @@
 keeps a small terminal workflow while offering behavioral compatibility with selected Pi
 skills, prompts, packages, extensions, and session files.
 
-The current release is **v0.2.1**. The easiest first model is a local
+The current release is **v0.2.2**. The easiest first model is a local
 [llama.cpp](https://github.com/ggml-org/llama.cpp) server running
 Qwen3.8-Flash-Next; cloud OpenAI-compatible endpoints work too.
 
@@ -41,12 +41,39 @@ Qwen3.8-Flash-Next; cloud OpenAI-compatible endpoints work too.
 
 ### 1. Install rupi
 
-From a local checkout:
+On Linux or macOS, the release installer downloads the matching archive, verifies its
+SHA-256 checksum, and installs into `~/.local/bin`:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/SaehwanPark/rupi/main/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Pin an exact release or choose another writable directory with:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/SaehwanPark/rupi/main/install.sh \
+  | sh -s -- --version v0.2.2 --install-dir "$HOME/.local/bin"
+```
+
+On Windows PowerShell, download the script so you can inspect it, then run it for the
+current user:
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/SaehwanPark/rupi/main/install.ps1 -OutFile .\install-rupi.ps1
+Get-Content .\install-rupi.ps1
+.\install-rupi.ps1 -Version v0.2.2 -AddToPath
+Remove-Item .\install-rupi.ps1
+```
+
+`-AddToPath` updates the user-level PATH and does not require administrator access. The
+installers support Linux x86_64, macOS Intel/Apple Silicon, and Windows x86_64. If your
+target is not published yet, use the source build:
 
 ```bash
 git clone https://github.com/SaehwanPark/rupi.git
 cd rupi
-cargo install --path .
+cargo install --path . --locked
 ```
 
 Or download a matching binary from the
@@ -115,6 +142,24 @@ If the model server is unavailable, check that it is listening on port 8000 and 
 configured model name exactly matches its `/v1/models` response. See the
 [beginner guide](https://saehwanpark.github.io/rupi/getting-started/quickstart.html) for
 step-by-step recovery help.
+
+## Live example: Test Ledger
+
+The repository includes **Test Ledger**, a small dependency-free Python task ledger used
+as a concrete first project. Run its independent tests, then ask rupi for a narrow
+read-only review from the example directory:
+
+```bash
+cd docs/cases/2026-09-20-task-ledger/toy-project
+python -m unittest discover -s tests -p "test_*.py" -v
+rupi run --config rupi.config.json --cwd . \
+  --prompt "Read SPEC.md and the project files. Do not change anything. Summarize the contract and the tests that prove it."
+```
+
+The checked-in example config is intended for this disposable workspace and allows
+mutations; set `auto_approve_mutating` to `false` before a read-only first run elsewhere.
+The [Test Ledger walkthrough](https://saehwanpark.github.io/rupi/getting-started/test-ledger.html)
+shows the full test, trace, replay, and bounded-edit workflow.
 
 ## Commands
 

@@ -6,6 +6,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.2] - 2026-09-20
+
+This release makes the first installation and first-project path usable without requiring
+Rust when a supported prebuilt archive is available.
+
+### Added
+
+- Added checksum-verified `install.sh` for Linux/macOS and `install.ps1` for Windows.
+- Added release archives for Linux x86_64, macOS Intel/Apple Silicon, and Windows x86_64,
+  plus a tag-driven GitHub Actions publication workflow.
+- Added the Test Ledger live example and its independent subprocess acceptance walkthrough.
+
+### Documentation
+
+- Updated the README and mdBook installation guide with installer, source-build, and
+  checksum/recovery instructions.
+- Added the Test Ledger first-task walkthrough covering safe inspection, bounded changes,
+  independent tests, trace, and replay.
+
+---
+
 ## [0.2.1] - 2026-09-20
 
 `rupi` is the new project identity. This release clarifies that the runtime is an

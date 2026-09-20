@@ -4,7 +4,7 @@ Working status for the `rupi` runtime. Roadmap intent lives in [`ROADMAP.md`](..
 this document records **what exists, what is proven, and what is deliberately deferred or not
 yet exercised**.
 
-Verification for everything marked *done* below is rerun for the v0.2.1 release
+Verification for everything marked *done* below is rerun for the v0.2.2 release
 (`2026-09-20`); the release PR records the exact host output and any platform-specific
 limitations:
 
