@@ -27,6 +27,13 @@ The final one-shot progress-boundary retry is recorded in
 [`ONE_SHOT_RETRY_REPORT.md`](ONE_SHOT_RETRY_REPORT.md): both turns made model
 first writes, and the boundary correctly returned the normal tool set after
 successful progress, but T still did not complete.
+The final 120-second budget retry is recorded in
+[`BUDGET_RETRY_REPORT.md`](BUDGET_RETRY_REPORT.md): the longer deadline and
+six-request recovery budget produced more partial files, but T and both
+acceptance checks still failed.
+The recovery invocation also has a recorded prompt-fidelity deviation: one
+sentence was accidentally appended beyond the committed recovery prompt. No
+additional retry was run because this was the final bounded attempt.
 
 No rupi runtime/source/tests or canonical documents changed.
 
@@ -44,6 +51,8 @@ No rupi runtime/source/tests or canonical documents changed.
   retry.
 - `8efea83` — one-shot progress boundary after successful progress-tool
   completion.
+- `5ab2dc9` — 120-second initial/recovery deadlines and six-request recovery
+  budget.
 
 All changed files are under
 `docs/cases/2026-09-20-webhook-inbox/`. The runtime, Rust crates, repository
@@ -74,6 +83,9 @@ unchanged.
 - final one-shot progress-boundary retry traces: R-11 49 entries/replay exit 0;
   R-12 542 entries/replay exit 0; both turns made model-authored first writes,
   but neither completed the package or passed the project/oracle checks;
+- final 120-second budget retry traces: R-13 75 entries/replay exit 0; R-14
+  1,261 entries/replay exit 0; R-13 wrote three package files and R-14 wrote
+  README plus two package files, but neither completed T or passed acceptance;
 - source import review found only Python standard-library modules;
 - no file outside the case directory was modified.
 
@@ -110,3 +122,7 @@ reactivation bug, but the broader high implementation stopgate remains:
 first-write progress is now observable, while bounded completion and acceptance
 still fail. This is the final bounded retry for the case; no tester repair is
 counted as implementation evidence.
+
+The final 120-second/config-budget retry confirms that the remaining stopgate
+is bounded model/provider completion rather than progress-boundary reactivation.
+No further Webhook Inbox implementation retry should be performed.

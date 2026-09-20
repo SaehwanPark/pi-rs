@@ -426,3 +426,43 @@ The high stopgate remains, materially reduced: the runtime boundary now allows
 normal schemas after successful progress and the model reaches first writes,
 but it still does not complete T or pass either acceptance check without tester
 repair.
+
+## Final 120-second budget retry (`5ab2dc9`, 2026-09-20)
+
+The final implementation retry is recorded in
+[`BUDGET_RETRY_REPORT.md`](BUDGET_RETRY_REPORT.md). Rupi was rebuilt from
+`5ab2dc9`. The user-authorized llama server remained healthy in
+`--reasoning off` mode. A brand-new ignored workspace contained only the
+committed `SPEC.md`, configs, `.gitignore`, and unchanged oracle/sinks; no
+prior retry or implementation files were copied, created, or deleted.
+
+All three config probes returned the expected no-session result with no invalid
+config error. R-13 initial session
+`01a0c065-0a45-74db-89ad-efbfc70a510f` ran 200,325 ms, with 5/5 model request
+starts/completions and one retry, 5/5/0 tool request/completion/failure counts,
+and a first write at 51,272 ms. It wrote `__init__.py`, `signature.py`, and
+`schema.py`, then ended in typed provider quarantine after the 120-second
+request timeout.
+
+R-14 recovery session `01a0c068-670a-795d-a220-ed5f8452f1d4` ran 215,824 ms,
+with 6/6/0 model requests/retries and 7/6/1 tool request/completion/failure
+counts. It first wrote `README.md` at 76,102 ms, then wrote `__init__.py` and
+`signing.py`, ending naturally at `budget_exhausted`. One attempted read of an
+outside-workspace skill file failed and was retained in the trace.
+
+The one-shot boundary remained correct: initial schemas changed 7 -> 3 -> 7
+after successful writes, with one nudge/info diagnostic and no second
+activation; recovery showed the same 7 -> 3 -> 7 transition before its final
+0-tool request. The model-authored workspace had no server, store, worker, CLI,
+or tests. The unchanged project suite failed because `tests/` was absent, and
+the unchanged oracle ran because model output existed but both tests failed at
+`/healthz` with connection refused. Trace/replay exited 0 for both sessions
+(75/1,261 entries; 15/20 tool lifecycle frames).
+
+The high stopgate remains. The longer deadline and recovery budget increased
+partial output, but did not produce a complete project or passing acceptance.
+The initial prompt was verbatim. R-14 accidentally appended one sentence not
+present in the committed recovery prompt: `Treat the task as incomplete if any
+required file or verification is unfinished.` This prompt-fidelity deviation
+is recorded in the retry report; no further Webhook Inbox retry was performed
+because this was the final implementation retry.
