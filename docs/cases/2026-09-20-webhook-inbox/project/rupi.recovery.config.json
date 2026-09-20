@@ -1,16 +1,17 @@
 {
   "version": 1,
   "primary": "local/qwen3.8-flash-next",
-  "thinking": "low",
+  "thinking": "off",
   "state_dir": ".rupi-state-recovery",
   "limits": {
-    "max_model_requests_per_turn": 8
+    "max_model_requests_per_turn": 3
   },
   "endpoints": [
     {
       "provider": "local",
       "model": "qwen3.8-flash-next",
       "base_url": "http://127.0.0.1:8000/v1",
+      "request_timeout_ms": 30000,
       "capabilities": {
         "text": true,
         "images": false,

@@ -11,6 +11,7 @@
       "provider": "local",
       "model": "qwen3.8-flash-next",
       "base_url": "http://127.0.0.1:8000/v1",
+      "request_timeout_ms": 30000,
       "capabilities": {
         "text": true,
         "images": false,
