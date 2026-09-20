@@ -169,6 +169,22 @@ and a `--state` option passed before the subcommand even though the parser accep
 it only after the subcommand. These are toy-project quality findings; no fixes
 were applied after discovery.
 
+### Repository verification
+
+The repository-level checks were also run from this branch. Formatting,
+`cargo check -p rupi-core --all-features`, clippy with warnings denied, and
+`cargo doc --workspace --no-deps` passed. `cargo test --workspace --quiet`
+failed in the unchanged integration test
+`tests/tool_lifecycle_events.rs` test
+`an_outcome_the_runtime_cannot_determine_is_not_coerced_into_success_or_failure`.
+That fixture runs the Unix command `sleep 5`; on this Windows host `cmd.exe`
+reports that `sleep` is not recognized, so the test observes an immediate
+`ToolFailed` instead of the timeout-boundary `ToolUnknown` state it intends to
+exercise. The case branch has no changes under `src/`, `crates/`, or `tests/`,
+so this is recorded as a pre-existing test portability limitation, not a case
+regression. No fix was made because the rupi codebase was immutable for this
+session.
+
 ## Findings
 
 Detailed chronological evidence is in
@@ -295,4 +311,3 @@ harness**. The user can recover partial files and inspect exactly what happened,
 but completion requires unusually long, opaque model turns and independent
 verification. The case is complete with the toy project intentionally left in its
 observed partially verified state.
-

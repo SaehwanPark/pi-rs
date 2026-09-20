@@ -211,3 +211,34 @@ bytecode, and task data out of the eventual commit.
 Classification: positive safety/usability observation. The explicit mutation
 switch is understandable once found in the quickstart, but a new user must
 manually edit JSON before any coding task can change files.
+
+### V-08 — Workspace test command has an unrelated Windows fixture failure
+
+Condition: The case branch contains no changes under `src/`, `crates/`, or
+`tests/`; the repository verification commands were run after the case was
+complete.
+
+Expected: `cargo test --workspace --quiet` should pass on this Windows host.
+
+Observed: The workspace suite failed in the unchanged integration test
+`tests/tool_lifecycle_events.rs` test
+`an_outcome_the_runtime_cannot_determine_is_not_coerced_into_success_or_failure`.
+That fixture invokes `sleep 5`, but the Windows `cmd.exe` runner reports
+`'sleep' is not recognized as an internal or external command`, so the test
+receives `ToolFailed` immediately instead of the timeout-boundary
+`ToolUnknown` outcome it is designed to exercise. Formatting, `cargo check`,
+clippy, and documentation generation passed.
+
+Exit/status: workspace test command failed; the other listed repository checks
+passed.
+
+Evidence: the failing test source is unchanged from `origin/main`, and
+`git diff --name-only main...HEAD -- src crates tests` is empty. No rupi source
+or test fix was made for this case.
+
+Classification: validation limitation / pre-existing Windows test portability
+issue, not a regression introduced by this case.
+
+Impact: the repository's prescribed full test gate is not green on this host,
+so the case handoff distinguishes that baseline failure from the toy-project
+findings.
