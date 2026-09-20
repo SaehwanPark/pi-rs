@@ -1,0 +1,7 @@
+.rupi-state*/
+__pycache__/
+*.py[cod]
+state/
+*.sqlite3
+*.log
+*.marker

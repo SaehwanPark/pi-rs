@@ -1,0 +1,9 @@
+Continue the incomplete Artifact Pipeline implementation in this workspace.
+Read SPEC.md and inspect the files already present. Work only in the project
+workspace and do not edit the acceptance oracle. Finish missing implementation,
+README, and focused tests. Prioritize the HTTP contract, atomic signed
+admission, SQLite restart persistence, direct-argv bounded worker, leases and
+reclaim, dependency ordering, and declared input_refs resolved from successful
+job output. Use direct argv on Windows. Run the complete project unittest suite
+and the help commands before giving a final summary. If anything remains
+incomplete, say exactly what failed instead of claiming success.
