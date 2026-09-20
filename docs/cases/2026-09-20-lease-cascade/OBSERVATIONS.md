@@ -76,9 +76,50 @@ scope.
 
 ## Live implementation evidence
 
-Pending. Each model attempt will record the exact `rupi run` command, prompt
-file/content, config, session id, request count, elapsed time, stdout/stderr,
-tool outcomes, and whether the first write and both acceptance gates occurred.
+### Setup-fidelity invocation (not model evidence)
+
+Command run from `project/`:
+
+```text
+$prompt=Get-Content -LiteralPath 'prompts/initial.txt' -Raw; $sw=[Diagnostics.Stopwatch]::StartNew(); $result=& 'C:\Users\saehwan\repos\pi-rs\target\debug\rupi.exe' run --config rupi.config.json --cwd . --prompt $prompt --no-color --no-reasoning --verbose 2>&1; $code=$LASTEXITCODE; $sw.Stop(); 'exit_code=' + $code; 'elapsed_ms=' + $sw.ElapsedMilliseconds; '--- combined stdout/stderr ---'; $result; exit $code
+```
+
+The prompt path was wrong from the `project/` working directory, so
+PowerShell reported `Cannot find path 'prompts/initial.txt'`. `rupi` therefore
+received an empty prompt, made one request, created session
+`01a0c0ea-133e-7885-a601-b36f83f955cb`, wrote no project files, and exited `0`
+after `10,958 ms`. This is recorded as tester setup friction, not a model
+attempt or completion evidence.
+
+### I-01 corrected initial authoring
+
+Prompt: committed `prompts/initial.txt`; config: committed
+`project/rupi.config.json`; actual command from `project/`:
+
+```text
+$prompt=Get-Content -LiteralPath '..\prompts\initial.txt' -Raw; $sw=[Diagnostics.Stopwatch]::StartNew(); $result=& 'C:\Users\saehwan\repos\pi-rs\target\debug\rupi.exe' run --config rupi.config.json --cwd . --prompt $prompt --no-color --no-reasoning --verbose 2>&1; $code=$LASTEXITCODE; $sw.Stop(); 'exit_code=' + $code; 'elapsed_ms=' + $sw.ElapsedMilliseconds; '--- combined stdout/stderr ---'; $result; exit $code
+```
+
+Session: `01a0c0ea-77bf-7b0a-8be4-cb0242fbbccd`. Result: exit `1`, elapsed
+`218,297 ms`; the combined stdout/stderr ended with:
+
+```text
+[model] no finish reason · 2m 00s · reasoning: reasoning
+[warn] model request failed (timeout): provider request exceeded its configured total timeout (120000 ms)
+[turn] timeout · 3m 38s
+[session end] interrupted · provider failure: timeout: provider request exceeded its configured total timeout (120000 ms)
+error: provider failure: timeout: provider request exceeded its configured total timeout (120000 ms)
+```
+
+The model made three requests. Request 1 read `SPEC.md`; the progress boundary
+activated after one request without a configured progress tool. Request 2 wrote
+`leasecascade/__init__.py` and `leasecascade/__main__.py` successfully. Request
+3 read the remaining specification and then timed out before another write.
+The trace recorded native reasoning and one active local model. The model also
+used the Windows `dir /s /b` shell command for workspace inspection; it returned
+paths but consumed a request/tool turn despite the prompt's direct-argv advice.
+The project was not complete and neither acceptance gate was run against this
+partial output.
 
 ## Verification and repairs
 
