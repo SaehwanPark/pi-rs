@@ -65,7 +65,8 @@ workspace, add an opt-in progress boundary under `limits`:
 ```
 
 The named tools must be permitted and mutating. The boundary is recorded in the trace,
-narrows only the next model request, and preserves normal tool lifecycle and `Unknown`
+narrows only the next model request, and is satisfied for the rest of the turn once a
+configured progress tool succeeds. It preserves normal tool lifecycle and `Unknown`
 semantics. It does not claim that a write succeeded; inspect the resulting files and run
 the project’s independent checks.
 

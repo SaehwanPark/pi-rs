@@ -411,6 +411,7 @@ pub struct TurnLoop<'a> {
   progress_tool_names: Vec<String>,
   progress_requests_without_progress: usize,
   progress_boundary_active: bool,
+  progress_boundary_used: bool,
   /// Model requests spent by the current turn, retries and takeovers included.
   ///
   /// Counted where requests are issued rather than where rounds are driven, so the
@@ -496,6 +497,7 @@ impl<'a> TurnLoop<'a> {
       progress_tool_names: Vec::new(),
       progress_requests_without_progress: 0,
       progress_boundary_active: false,
+      progress_boundary_used: false,
       requests: AtomicUsize::new(0),
       tools_enabled: true,
       session_started: false,
@@ -600,7 +602,9 @@ impl<'a> TurnLoop<'a> {
   /// Require a configured kind of tool progress after a bounded number of
   /// tool-bearing requests without it. While active, the next provider request
   /// exposes only the named tools; an empty name list exposes all permitted
-  /// mutating tools. The boundary is opt-in because read-only turns are valid.
+  /// mutating tools. A successful configured progress tool satisfies the
+  /// boundary for the rest of that turn. The boundary is opt-in because
+  /// read-only turns are valid.
   pub fn with_progress_boundary(
     mut self,
     max_requests_without_progress: Option<usize>,
@@ -1025,6 +1029,7 @@ impl<'a> TurnLoop<'a> {
     self.requests.store(0, Ordering::SeqCst);
     self.progress_requests_without_progress = 0;
     self.progress_boundary_active = false;
+    self.progress_boundary_used = false;
     // Recovery may rewrite only the history that predates this turn. Keep the
     // boundary local so one turn's emergency state cannot leak into the next.
     let mut turn_history_start = self.messages.len();
@@ -1167,14 +1172,14 @@ impl<'a> TurnLoop<'a> {
         .tool_calls
         .checked_add(tool_calls)
         .ok_or_else(|| TurnError::Sink("turn tool-call count is exhausted".into()))?;
-      self.execute_calls(
+      let progress_succeeded = self.execute_calls(
         turn_id.clone(),
         assistant_event_id,
         &calls,
         cancel,
         progress,
       )?;
-      self.observe_progress(&turn_id, &calls)?;
+      self.observe_progress(&turn_id, progress_succeeded)?;
     }
 
     if self.max_requests > 1 && self.requests.load(Ordering::SeqCst) < self.max_requests {
@@ -2736,14 +2741,18 @@ impl<'a> TurnLoop<'a> {
   fn observe_progress(
     &mut self,
     turn_id: &TurnId,
-    calls: &[ToolCallBlock],
+    progress_succeeded: bool,
   ) -> Result<(), TurnError> {
     let Some(limit) = self.progress_request_limit else {
       return Ok(());
     };
-    if calls.iter().any(|call| self.call_makes_progress(call)) {
+    if progress_succeeded {
       self.progress_requests_without_progress = 0;
       self.progress_boundary_active = false;
+      self.progress_boundary_used = true;
+      return Ok(());
+    }
+    if self.progress_boundary_used {
       return Ok(());
     }
     self.progress_requests_without_progress =
@@ -3006,7 +3015,8 @@ impl<'a> TurnLoop<'a> {
     calls: &[ToolCallBlock],
     cancel: &CancelToken,
     progress: &mut dyn TurnProgress,
-  ) -> Result<(), TurnError> {
+  ) -> Result<bool, TurnError> {
+    let mut progress_succeeded = false;
     for call in calls {
       let metadata = self.tools.metadata_for(&call.name);
       let read_only = metadata
@@ -3103,13 +3113,16 @@ impl<'a> TurnLoop<'a> {
         read_only,
         executed.2.or(Some(requested.meta.event_id.clone())),
       )?;
+      if self.call_makes_progress(call) && executed.0.state == ToolExecutionState::Succeeded {
+        progress_succeeded = true;
+      }
       progress.on_tool_finished(call, &executed.0);
       self.push_message(
         Message::new(Role::Tool, vec![ContentBlock::ToolResult(block)]),
         seq,
       );
     }
-    Ok(())
+    Ok(progress_succeeded)
   }
 
   /// Turn one executed call into its session block and its terminal event.
@@ -5031,6 +5044,7 @@ mod tests {
       vec![
         tool_call("spy", serde_json::json!({})),
         tool_call("write_probe", serde_json::json!({"path": "app.py"})),
+        tool_call("spy", serde_json::json!({"after": "write"})),
         text("done"),
       ],
     );
@@ -5058,10 +5072,10 @@ mod tests {
 
     assert_eq!(report.status, TurnStatus::Completed);
     assert_eq!(report.text, "done");
-    assert_eq!(read_seen.lock().unwrap().len(), 1);
+    assert_eq!(read_seen.lock().unwrap().len(), 2);
     assert_eq!(write_seen.lock().unwrap().len(), 1);
     let requests = provider.requests();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 4);
     assert_eq!(
       requests[1]
         .tools
@@ -5069,6 +5083,11 @@ mod tests {
         .map(|tool| tool.name.as_str())
         .collect::<Vec<_>>(),
       vec!["write_probe"]
+    );
+    assert_eq!(
+      requests[2].tools.len(),
+      2,
+      "a successful progress tool ends the one-shot boundary"
     );
     assert!(
       requests[1]

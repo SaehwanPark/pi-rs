@@ -1168,8 +1168,9 @@ boundary activates, the runtime records its instruction and narrows the next req
 tool schemas to the configured progress tools (or permitted mutating tools when no
 allowlist is supplied). This is a model-guidance and exposure boundary only: it must not
 claim that a host mutation succeeded, and the normal `Requested`, `Started`, `Succeeded`,
-`Failed`, or `Unknown` lifecycle remains authoritative. The default remains disabled so
-read-only tasks are not forced to mutate.
+`Failed`, or `Unknown` lifecycle remains authoritative. A successful configured progress
+tool satisfies the one-shot boundary for the rest of that turn. The default remains
+disabled so read-only tasks are not forced to mutate.
 
 This is a distributed-systems-style reliability invariant.
 
