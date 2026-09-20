@@ -38,6 +38,13 @@ then use this endpoint entry:
 arrives as a separate stream. The capability declaration must describe the endpoint you
 actually run.
 
+Thinking levels are normalized by the provider adapter's wire dialect. For a generic
+OpenAI-compatible `reasoning_effort` endpoint, the core `minimal` request is clamped to
+the endpoint's supported `low` value rather than sending an unsupported literal. The
+requested level is an intent, not proof that every endpoint accepts the same spelling;
+if a server still refuses a request, rupi reports its bounded diagnostic with the
+normalized failure kind and HTTP status.
+
 Check the server before debugging rupi:
 
 ```powershell

@@ -160,6 +160,8 @@ rupi interactive --config config.json --cwd .
 | No reasoning text | The server may expose only answer text; keep the provenance declaration honest. |
 | A write is refused | Set `auto_approve_mutating` only in a trusted workspace. |
 | Resume is refused | Use a complete session id or a prefix that matches exactly one session. |
+| A Windows command fails | Use `process` with a direct argv list for known programs; use `dir`, not Unix `ls`, in `exec`. |
+| A multi-file turn exhausts its budget | Split implementation and verification into separate bounded turns; exhaustion means incomplete work. |
 
 If you use another OpenAI-compatible server, keep the same config shape and replace the
 model id, URL, context window, and reasoning declaration with values that server documents.

@@ -35,6 +35,10 @@
 systems. For a known executable, prefer `process` so each argument remains one
 argv value and is not reinterpreted by shell quoting or expansion.
 
+On Windows, use `dir` rather than Unix `ls` when a shell listing is needed. For a known
+program, pass its executable and arguments directly to `process`; use `cmd.exe` with
+`/C` only when the command genuinely needs shell syntax.
+
 ### 6. `process`
 - **Purpose**: Execute a program directly with an explicit argument list.
 - **Parameters**: `program`, optional `args`, `cwd`, and `timeout_ms`.
