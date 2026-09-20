@@ -1,0 +1,13 @@
+You are implementing a new small project from scratch in the current workspace.
+Read SPEC.md completely before acting. Build the complete dependency-free
+artifactpipe package, a readable README.md, and focused unittest tests. Work
+only inside this project workspace; do not edit files outside it and do not
+edit the acceptance oracle. Use only Python standard-library modules.
+
+Use direct argv process calls for Python and tests on Windows; avoid Unix shell
+syntax and long exploratory commands. Start with a real write or edit after
+understanding the contract, then implement the service, worker, persistence,
+validation, and declared output-reference data flow. Run the project unittest
+suite, the help commands, and a small smoke check before finishing. Do not
+treat your own final summary as proof: report exact checks and any incomplete
+work only after the files and tests exist.

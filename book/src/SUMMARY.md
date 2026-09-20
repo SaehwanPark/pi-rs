@@ -10,6 +10,7 @@
 - [Live example: Event Outbox](getting-started/event-outbox.md)
 - [Live example: Webhook Inbox](getting-started/webhook-inbox.md)
 - [Live example: Batch Relay](getting-started/batch-relay.md)
+- [Live example: Artifact Pipeline](getting-started/artifact-pipeline.md)
 
 # User Guide
 - [Interactive TUI](user-guide/interactive-tui.md)
