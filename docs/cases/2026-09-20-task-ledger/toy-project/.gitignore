@@ -1,0 +1,4 @@
+.rupi-state/
+__pycache__/
+*.pyc
+.tasklog.json
