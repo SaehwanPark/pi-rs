@@ -9,6 +9,7 @@
 - [Live example: Read Queue](getting-started/read-queue.md)
 - [Live example: Event Outbox](getting-started/event-outbox.md)
 - [Live example: Webhook Inbox](getting-started/webhook-inbox.md)
+- [Live example: Batch Relay](getting-started/batch-relay.md)
 
 # User Guide
 - [Interactive TUI](user-guide/interactive-tui.md)

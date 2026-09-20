@@ -218,6 +218,26 @@ and bounded trace/replay evidence. The checked-in implementation passes; the
 case reports separately record that the final local-model implementation
 attempt remained incomplete.
 
+## Live example: Batch Relay
+
+[Batch Relay](https://saehwanpark.github.io/rupi/getting-started/batch-relay.html)
+is a fifth dependency-free Python example: an authenticated HTTP/SQLite batch
+worker with atomic dependency DAGs, retryable and terminal failures, blocked
+dependents, leases, and a direct-argv sink. Verify both the project suite and
+its independent fresh-process oracle:
+
+```bash
+cd docs/cases/2026-09-20-batch-relay/project
+python -W error::ResourceWarning -m unittest discover -s tests -p "test_*.py" -v
+cd ..
+python -W error::ResourceWarning -m unittest discover -s acceptance -p "test_*.py" -v
+```
+
+The [Batch Relay walkthrough](https://saehwanpark.github.io/rupi/getting-started/batch-relay.html)
+covers dependency ordering, retry/blocked state, lease reclaim, and bounded
+trace/replay evidence. The checked-in implementation passes after bounded
+tester repair; the case reports do not claim model-authored completion.
+
 ## Commands
 
 | Command | Purpose |
