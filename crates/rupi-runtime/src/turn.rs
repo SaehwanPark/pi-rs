@@ -29,13 +29,13 @@ use rupi_core::{
   ContextCompactionStarted, ContextLevel, ContextPolicy, ContextReduced, ContextState,
   DEFAULT_MAX_MODEL_REQUESTS_PER_TURN, Diagnostic, DiagnosticLevel, EpochReason, EventEnvelope,
   EventMeta, EventSeq, EventSink, ExternalContextItem, ExternalContextRetrieved, FailurePhase,
-  Message, ModelCapabilities, ModelEpoch, ModelEpochStarted, ModelFailover, ModelFailure,
-  ModelFailureKind, ModelProvider, ModelRef, ModelRequest, ModelRequestCompleted,
-  ModelRequestStarted, ModelRetry, ReasoningDelta, ReasoningProvenance, ReductionReason, Role,
-  SessionEndReason, SessionEnded, SessionId, SessionStarted, SinkError, ThinkingLevel,
-  ToolCallBlock, ToolCompleted, ToolExecutionState, ToolFailed, ToolProgress, ToolRequested,
-  ToolResultBlock, ToolStarted, ToolUnknown, TraceId, TurnCompleted, TurnId, TurnStatus,
-  UserMessage,
+  MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN, Message, ModelCapabilities, ModelEpoch,
+  ModelEpochStarted, ModelFailover, ModelFailure, ModelFailureKind, ModelProvider, ModelRef,
+  ModelRequest, ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta,
+  ReasoningProvenance, ReductionReason, Role, SessionEndReason, SessionEnded, SessionId,
+  SessionStarted, SinkError, ThinkingLevel, ToolCallBlock, ToolCompleted, ToolExecutionState,
+  ToolFailed, ToolProgress, ToolRequested, ToolResultBlock, ToolStarted, ToolUnknown, TraceId,
+  TurnCompleted, TurnId, TurnStatus, UserMessage,
 };
 use rupi_tools::{Executed, ToolRegistry};
 
@@ -579,7 +579,9 @@ impl<'a> TurnLoop<'a> {
 
   /// Override the per-turn request budget.
   pub fn with_max_requests(mut self, max: usize) -> Self {
-    self.max_requests = max.max(1);
+    self.max_requests = max
+      .max(1)
+      .min(MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN as usize);
     self
   }
 

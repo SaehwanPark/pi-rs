@@ -111,6 +111,14 @@ impl ProcessTool {
     let display = display_command(program, &args);
     let mut command = Command::new(program);
     command.args(&args);
+    #[cfg(unix)]
+    {
+      use std::os::unix::process::CommandExt;
+
+      // Keep direct programs in their own group so timeout/cancellation can
+      // terminate descendants just as the shell-backed `exec` path does.
+      command.process_group(0);
+    }
     let mut execution = CommandExecution {
       cwd: &cwd,
       runtime: &runtime,
@@ -219,5 +227,32 @@ mod tests {
       .unwrap_err();
     assert!(!error.started);
     assert!(error.message.contains("args[0]"), "{}", error.message);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn timeout_kills_descendants_of_a_direct_program() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("late-child-marker");
+    let command = format!("(sleep 1; touch '{}') & sleep 30", marker.display());
+    let mut recorder = Recorder::default();
+    let outcome = tool(&dir)
+      .execute(
+        &request(json!({
+          "program": "sh",
+          "args": ["-c", command],
+          "timeout_ms": 150
+        })),
+        &mut recorder,
+      )
+      .unwrap();
+    assert_eq!(
+      outcome.state,
+      ToolExecutionState::Unknown,
+      "{}",
+      outcome.text
+    );
+    std::thread::sleep(Duration::from_millis(1_300));
+    assert!(!marker.exists(), "direct child outlived the timeout");
   }
 }

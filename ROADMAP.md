@@ -762,6 +762,12 @@ Do not begin until stable baselines exist.
 - [x] Import a whole Pi session directory: `import-pi <dir>` files every `*.jsonl` it holds
       directly, each as its own session, and names cross-file lineage as the thing it
       deliberately does not reconstruct.
+- [x] Close the task-ledger recovery slice: freeze the external subprocess oracle,
+      expose and surface the bounded model-request budget, reserve no-tools
+      finalization with `--finalize` resume support, persist resumable interrupted
+      sessions, document Windows shell behavior, add direct argv process execution,
+      and verify the toy project plus full workspace on Windows (case remediation
+      record and PR #105, 2026-09-20).
 
 ### P2 — Later / deliberately deferred
 
