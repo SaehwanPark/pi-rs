@@ -1,6 +1,6 @@
 # Loop 3 live case: Webhook Inbox
 
-Status: draft
+Status: complete; acceptance passed after bounded tester repair
 Date: 2026-09-20
 Test operator: Codex acting as a fresh `rupi` user
 Model target: local `qwen3.8-flash-next`
