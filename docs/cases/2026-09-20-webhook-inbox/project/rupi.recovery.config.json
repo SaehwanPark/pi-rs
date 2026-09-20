@@ -4,7 +4,7 @@
   "thinking": "low",
   "state_dir": ".rupi-state-recovery",
   "limits": {
-    "max_model_requests_per_turn": 3,
+    "max_model_requests_per_turn": 6,
     "max_model_requests_without_progress": 1,
     "progress_tool_names": ["write", "edit", "append"]
   },
@@ -13,7 +13,7 @@
       "provider": "local",
       "model": "qwen3.8-flash-next",
       "base_url": "http://127.0.0.1:8000/v1",
-      "request_timeout_ms": 60000,
+      "request_timeout_ms": 120000,
       "capabilities": {
         "text": true,
         "images": false,
