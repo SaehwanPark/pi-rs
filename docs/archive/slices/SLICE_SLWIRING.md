@@ -1,6 +1,6 @@
 # Slice: the interactive loop draws its status line from `statusline::line`
 
-`crates/pi-rs-tui/src/statusline.rs` is the projection (snapshot in, `RenderLine` out — read its
+`crates/rupi-tui/src/statusline.rs` is the projection (snapshot in, `RenderLine` out — read its
 doc comment and its `Status`/`Activity` fields first; do not read the whole file).
 `src/interactive.rs` is the loop that should be drawing it but currently builds its own line.
 
@@ -8,7 +8,7 @@ doc comment and its `Status`/`Activity` fields first; do not read the whole file
 1. `grep -n "status_line\\|Status\\|columns\\|set_width" src/interactive.rs` to find what the loop
    draws today and where it gets the terminal width from. The status line must use **the same width
    source the editor already uses** — two different width notions in one frame is a bug.
-2. Replace the hand-built line with `pi_rs_tui::statusline::line(&Status { .. })` and render the
+2. Replace the hand-built line with `rupi_tui::statusline::line(&Status { .. })` and render the
    returned `RenderLine` through the path the loop already uses to paint, so the existing
    erase/repaint behaviour from PR #23 is preserved (it fixed a real bug: the erase walked past the
    top of the frame). Do not re-implement erase logic.
@@ -22,7 +22,7 @@ doc comment and its `Status`/`Activity` fields first; do not read the whole file
    showing (same wording where it already reads well, `1 turn` singular comes from `statusline`).
 
 ## Constraints
-- `pi-rs-tui` stays free of store/provider/runtime imports; this slice touches `src/interactive.rs`,
+- `rupi-tui` stays free of store/provider/runtime imports; this slice touches `src/interactive.rs`,
   `src/run.rs` (accessor only), tests, ROADMAP/IMPLEMENTATION_STATUS annotations. 2-space, 100 cols.
 - No new dependency. Do not change `statusline.rs` unless a test proves it wrong — say so if you do.
 - `bash bench/startup.sh` must not move more than noise.
@@ -39,7 +39,7 @@ if you can drive it, one real pty run: `printf 'hello\\n' | timeout 20 script -q
 interactive --store /tmp/slwiring-store' /dev/null` (or explain why not).
 
 Commit `--allow-empty -m "chore: start"` first, commit after every step, always compiling. Do not
-merge, rebase, push, open PRs, or touch other branches or /home/saehwan/repos/pi-rs.
+merge, rebase, push, open PRs, or touch other branches or /home/saehwan/repos/rupi.
 
 ---
 

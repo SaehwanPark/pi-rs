@@ -13,11 +13,11 @@ use std::{
   process::{Command, Output},
 };
 
-use pi_rs_core::{
+use rupi_core::{
   AgentEvent, ModelCapabilities, ModelEndpoint, ModelRef, ReasoningExposure, Role, RuntimeConfig,
   TurnStatus,
 };
-use pi_rs_store::{StateLayout, Store, TraceJournal, WritePolicy};
+use rupi_store::{StateLayout, Store, TraceJournal, WritePolicy};
 use tempfile::TempDir;
 
 use fake_provider::{FakeServer, sse, status_response, text_response};
@@ -90,14 +90,14 @@ fn write_config_exposing(
 }
 
 fn run(config: &Path, cwd: &Path, prompt: &str) -> Output {
-  Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+  Command::new(env!("CARGO_BIN_EXE_rupi"))
     .args(["run", "--config"])
     .arg(config)
     .arg("--cwd")
     .arg(cwd)
     .args(["--prompt", prompt])
     .output()
-    .expect("run pi-rs")
+    .expect("run rupi")
 }
 
 #[test]
@@ -200,7 +200,7 @@ fn one_turn_streams_and_persists_tools_messages_and_trace() {
   assert!(trace.iter().any(|entry| matches!(
     &entry.envelope.event,
     AgentEvent::ReasoningDelta(delta)
-      if delta.provenance == pi_rs_core::ReasoningProvenance::Native
+      if delta.provenance == rupi_core::ReasoningProvenance::Native
   )));
 
   for call_id in ["call_write", "call_exec"] {
@@ -481,13 +481,13 @@ fn provider_and_durable_state_failures_exit_nonzero() {
 
 #[test]
 fn help_argument_errors_and_bare_invocation_exit_without_configuration() {
-  let binary = env!("CARGO_BIN_EXE_pi-rs");
+  let binary = env!("CARGO_BIN_EXE_rupi");
   let bare = Command::new(binary).output().unwrap();
   assert!(bare.status.success());
   // A bare invocation names the commands rather than guessing one, so it has to list
   // all of them.
   let top_help = String::from_utf8_lossy(&bare.stdout);
-  assert!(top_help.contains("Usage: pi-rs <command>"), "{top_help}");
+  assert!(top_help.contains("Usage: rupi <command>"), "{top_help}");
   for command in ["run", "interactive", "trace", "skills", "prompts", "prompt"] {
     assert!(
       top_help.contains(command),
@@ -517,7 +517,7 @@ fn help_argument_errors_and_bare_invocation_exit_without_configuration() {
 /// The surface resolves colour and width from the environment, so a test that inherited
 /// the developer's `NO_COLOR` or `TERM` would render differently in CI than at a desk.
 fn run_surface(config: &Path, cwd: &Path, prompt: &str, extra: &[&str]) -> Output {
-  Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+  Command::new(env!("CARGO_BIN_EXE_rupi"))
     .args(["run", "--config"])
     .arg(config)
     .arg("--cwd")
@@ -529,7 +529,7 @@ fn run_surface(config: &Path, cwd: &Path, prompt: &str, extra: &[&str]) -> Outpu
     .env_remove("CLICOLOR")
     .env_remove("CLICOLOR_FORCE")
     .output()
-    .expect("run pi-rs")
+    .expect("run rupi")
 }
 
 /// One offline turn with its own workspace, state root, config and fake provider.
@@ -780,7 +780,7 @@ fn colour_is_a_projection_and_never_touches_the_answer() {
 
   // An explicit request wins over the environment, including NO_COLOR.
   let scene = scenario(reasoning_and_long_answer());
-  let coloured = Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+  let coloured = Command::new(env!("CARGO_BIN_EXE_rupi"))
     .args(["run", "--config"])
     .arg(&scene.config)
     .arg("--cwd")
@@ -789,7 +789,7 @@ fn colour_is_a_projection_and_never_touches_the_answer() {
     .args(["--color=always"])
     .env("NO_COLOR", "1")
     .output()
-    .expect("run pi-rs");
+    .expect("run rupi");
   let coloured_stderr = String::from_utf8_lossy(&coloured.stderr);
   assert!(coloured.stderr.contains(&0x1b), "{coloured_stderr}");
   // Even forced, colour stays on the diagnostic stream; the answer stays byte-faithful.
@@ -830,7 +830,7 @@ fn a_skill_listing_reaches_the_model_as_the_system_message() {
   fs::create_dir(&workspace).unwrap();
   let server = FakeServer::answer(vec![text_response("done")]);
   let config = write_config(temp.path(), &server.base_url(), true);
-  let output = Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+  let output = Command::new(env!("CARGO_BIN_EXE_rupi"))
     .args(["run", "--config"])
     .arg(&config)
     .arg("--cwd")
@@ -839,7 +839,7 @@ fn a_skill_listing_reaches_the_model_as_the_system_message() {
     .env("HOME", fixture_home())
     .env("USERPROFILE", fixture_home())
     .output()
-    .expect("run pi-rs");
+    .expect("run rupi");
   let requests = server.requests();
   assert!(
     output.status.success(),
@@ -865,7 +865,7 @@ fn a_run_with_no_skills_nearby_sends_no_system_message() {
   fs::create_dir(&workspace).unwrap();
   let server = FakeServer::answer(vec![text_response("done")]);
   let config = write_config(temp.path(), &server.base_url(), true);
-  let output = Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+  let output = Command::new(env!("CARGO_BIN_EXE_rupi"))
     .args(["run", "--config"])
     .arg(&config)
     .arg("--cwd")
@@ -874,7 +874,7 @@ fn a_run_with_no_skills_nearby_sends_no_system_message() {
     .env("HOME", temp.path()) // a home with no skills anywhere under it
     .env("USERPROFILE", temp.path())
     .output()
-    .expect("run pi-rs");
+    .expect("run rupi");
   let requests = server.requests();
   assert!(
     output.status.success(),

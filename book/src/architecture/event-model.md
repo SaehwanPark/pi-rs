@@ -1,7 +1,7 @@
 # Typed Event Model
 
-Execution in `pi-rs` is recorded as a continuous stream of strongly typed events defined
-by the `AgentEvent` enum in `crates/pi-rs-core/src/event.rs`. The durable journal wraps
+Execution in `rupi` is recorded as a continuous stream of strongly typed events defined
+by the `AgentEvent` enum in `crates/rupi-core/src/event.rs`. The durable journal wraps
 each event in an envelope containing session/turn identity, sequence ordering, model
 attribution, and trace/span ids.
 

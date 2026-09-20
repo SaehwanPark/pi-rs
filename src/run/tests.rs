@@ -18,12 +18,12 @@ use std::{
   time::{Duration, Instant},
 };
 
-use pi_rs_core::{
+use rupi_core::{
   AgentEvent, ContentBlock, FailurePhase, ModelCapabilities, ModelEndpoint, ModelFailure,
   ModelFailureKind, ModelRef, ReasoningExposure, Role, RuntimeConfig, SessionEndReason,
   ToolExecutionState, TurnStatus,
 };
-use pi_rs_store::{StateLayout, TraceJournal, WritePolicy};
+use rupi_store::{StateLayout, TraceJournal, WritePolicy};
 use tempfile::TempDir;
 
 use super::*;
@@ -640,7 +640,7 @@ fn session_resumes_across_checkpoint_barrier_with_capsule() {
     session
       .turn("turn 1: initialize workspace")
       .map_err(|error| turn_error(&error))?;
-    let mut capsule = pi_rs_core::ContextCapsule::new("Goal: build compiler");
+    let mut capsule = rupi_core::ContextCapsule::new("Goal: build compiler");
     capsule.completed_work.push("Lexer done".into());
     capsule.current_state = "Parser in progress".into();
     let created = session
@@ -736,7 +736,7 @@ fn session_manual_failover_and_switch_back_across_turns() {
     let epoch1 = session.failover_manual().expect("manual failover succeeds");
     assert_eq!(epoch1.index, 1);
     assert_eq!(epoch1.model, ModelRef::new("fake", "backup"));
-    assert_eq!(epoch1.reason, pi_rs_core::EpochReason::ManualSwitch);
+    assert_eq!(epoch1.reason, rupi_core::EpochReason::ManualSwitch);
     assert_eq!(session.active_model(), ModelRef::new("fake", "backup"));
     assert!(session.failed_over());
 
@@ -746,7 +746,7 @@ fn session_manual_failover_and_switch_back_across_turns() {
     let epoch2 = session.switch_back_manual().expect("switch back succeeds");
     assert_eq!(epoch2.index, 2);
     assert_eq!(epoch2.model, ModelRef::new("fake", "agent"));
-    assert_eq!(epoch2.reason, pi_rs_core::EpochReason::ManualSwitchBack);
+    assert_eq!(epoch2.reason, rupi_core::EpochReason::ManualSwitchBack);
     assert_eq!(session.active_model(), ModelRef::new("fake", "agent"));
     assert!(!session.failed_over());
 

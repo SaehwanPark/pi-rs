@@ -4,18 +4,16 @@ use std::{
   path::Path,
 };
 
-use pi_rs_core::{
+use rupi_core::{
   AttributedMessage, CancelToken, CheckpointId, ContextCapsule, EpochReason, EventEnvelope,
   EventSeq, Message, ModelEpoch, ModelProvider, ModelRef, ReasoningProvenance, RuntimeConfig,
   SessionEndReason, SessionHeader, SessionId, SinkError, TraceId, TurnId, TurnStatus, now_millis,
 };
-use pi_rs_provider::{Deferred, OpenAiCompat, ProviderConfig};
-use pi_rs_runtime::{
-  ResumeState, StoreTrace, Trace, TurnError, TurnLoop, TurnProgress, TurnReport,
-};
-use pi_rs_store::{Store, WritePolicy};
-use pi_rs_tools::{Executed, ToolRegistry, Workspace};
-use pi_rs_tui::{Palette, Surface, TranscriptOptions, is_streamed, render_event, term};
+use rupi_provider::{Deferred, OpenAiCompat, ProviderConfig};
+use rupi_runtime::{ResumeState, StoreTrace, Trace, TurnError, TurnLoop, TurnProgress, TurnReport};
+use rupi_store::{Store, WritePolicy};
+use rupi_tools::{Executed, ToolRegistry, Workspace};
+use rupi_tui::{Palette, Surface, TranscriptOptions, is_streamed, render_event, term};
 
 use crate::cli::SurfaceArgs;
 
@@ -63,8 +61,8 @@ pub(crate) fn open_session(
     RuntimeConfig::parse(&config_text).map_err(|error| format!("invalid config: {error}"))?;
   // RKB normalization only enriches the cloned manager configuration with the
   // provider's read-only retrieval tool names. No MCP process is started here.
-  let mcp_servers = pi_rs_rkb::RkbSetup::normalize_configs(&config.mcp_servers);
-  let rkb_setup = pi_rs_rkb::RkbSetup::discover(&mcp_servers);
+  let mcp_servers = rupi_rkb::RkbSetup::normalize_configs(&config.mcp_servers);
+  let rkb_setup = rupi_rkb::RkbSetup::discover(&mcp_servers);
   let endpoint = config.endpoint_for(&config.primary).ok_or_else(|| {
     format!(
       "invalid config: primary model {} has no endpoint entry",
@@ -102,10 +100,10 @@ pub(crate) fn open_session(
   // request, naming what exists and telling the model to read the file. Only the
   // global locations are read — a skill is instructions for the model, and this
   // command has no trust decision to consult about the workspace, so the project's
-  // own skill files stay unread (and `pi-rs skills --project` stays how one is seen).
+  // own skill files stay unread (and `rupi skills --project` stays how one is seen).
   // The scan is two small directories, which is what lets it sit on the startup path.
   let mut skills_prompt =
-    pi_rs_compat::skill::discover(&pi_rs_compat::scan::Discovery::new(canonical_cwd.clone()))
+    rupi_compat::skill::discover(&rupi_compat::scan::Discovery::new(canonical_cwd.clone()))
       .control_prompt();
   // RKB setup is config discovery only: the MCP process remains disconnected until
   // the caller explicitly enables the discovered server. When configured, offer the
@@ -118,15 +116,15 @@ pub(crate) fn open_session(
     skills_prompt.push_str(setup.skill());
   }
 
-  let policy: Box<dyn pi_rs_core::context::ContextPolicy> =
+  let policy: Box<dyn rupi_core::context::ContextPolicy> =
     if config.adaptive_context.unwrap_or(false) {
-      Box::new(pi_rs_experiments::AdaptiveContextPolicy::new(
+      Box::new(rupi_experiments::AdaptiveContextPolicy::new(
         config.context_profile,
         provider.capabilities().context_window,
         true,
       ))
     } else {
-      let mut policy = pi_rs_core::ProfilePolicy::new(
+      let mut policy = rupi_core::ProfilePolicy::new(
         config.context_profile,
         provider.capabilities().context_window,
       );
@@ -182,7 +180,7 @@ pub(crate) fn open_session(
     None => store
       .begin(SessionHeader {
         session_id: session_id.clone(),
-        version: pi_rs_core::session::SESSION_SCHEMA_VERSION,
+        version: rupi_core::session::SESSION_SCHEMA_VERSION,
         started_at_ms: now_millis(),
         working_dir: canonical_cwd.clone(),
         model: provider.model().clone(),
@@ -217,9 +215,9 @@ pub(crate) fn open_session(
   )
   .with_working_dir(canonical_cwd)
   .with_thinking(config.thinking)
-  .with_compaction_strategy(pi_rs_runtime::CompactionStrategy::Summarize);
+  .with_compaction_strategy(rupi_runtime::CompactionStrategy::Summarize);
   if !skills_prompt.is_empty() {
-    // The skill-control prompt is the whole system prompt pi-rs speaks today, and
+    // The skill-control prompt is the whole system prompt rupi speaks today, and
     // with_system stays unset when there is nothing to offer.
     runtime = runtime.with_system(skills_prompt);
   }
@@ -236,7 +234,7 @@ pub(crate) fn open_session(
       )
     })?;
   }
-  let mut mcp_manager = pi_rs_mcp::McpManager::new(mcp_servers);
+  let mut mcp_manager = rupi_mcp::McpManager::new(mcp_servers);
   let mut session = SessionHandle {
     runtime,
     progress,
@@ -258,7 +256,7 @@ pub struct SessionHandle<'a> {
   runtime: TurnLoop<'a>,
   progress: CliProgress<'a>,
   tools: &'a ToolRegistry,
-  mcp_manager: &'a mut pi_rs_mcp::McpManager,
+  mcp_manager: &'a mut rupi_mcp::McpManager,
   /// A transcript write failure must not decide whether the session closes: the
   /// durable record is the product, so the failure is carried out and reported
   /// after the session has ended.
@@ -310,7 +308,7 @@ impl SessionHandle<'_> {
   pub fn turn_with_external_context(
     &mut self,
     prompt: &str,
-    external_context: &[pi_rs_core::ExternalContextItem],
+    external_context: &[rupi_core::ExternalContextItem],
     cancel: &CancelToken,
   ) -> Result<TurnReport, TurnError> {
     self.runtime.run_turn_with_external_context(
@@ -342,12 +340,12 @@ impl SessionHandle<'_> {
   }
 
   /// Return current statuses of all configured MCP servers.
-  pub fn mcp_statuses(&self) -> Vec<pi_rs_mcp::McpServerStatus> {
+  pub fn mcp_statuses(&self) -> Vec<rupi_mcp::McpServerStatus> {
     self.mcp_manager.statuses()
   }
 
   /// Enable and connect a configured MCP server, registering its tools into the session.
-  pub fn mcp_enable(&mut self, name: &str) -> Result<usize, pi_rs_mcp::McpError> {
+  pub fn mcp_enable(&mut self, name: &str) -> Result<usize, rupi_mcp::McpError> {
     let tools = self.mcp_manager.enable_server(name)?;
     let count = tools.len();
     for tool in tools {
@@ -357,7 +355,7 @@ impl SessionHandle<'_> {
   }
 
   /// Disable and disconnect a configured MCP server, removing its tools from the session.
-  pub fn mcp_disable(&mut self, name: &str) -> Result<usize, pi_rs_mcp::McpError> {
+  pub fn mcp_disable(&mut self, name: &str) -> Result<usize, rupi_mcp::McpError> {
     self.mcp_manager.disable_server(name)?;
     let prefix = format!("mcp__{name}__");
     Ok(self.tools.unregister_prefix(&prefix))
@@ -368,13 +366,13 @@ impl SessionHandle<'_> {
   #[allow(dead_code)]
   pub fn checkpoint(
     &mut self,
-    capsule: Option<pi_rs_core::ContextCapsule>,
-  ) -> Result<pi_rs_core::CheckpointCreated, TurnError> {
+    capsule: Option<rupi_core::ContextCapsule>,
+  ) -> Result<rupi_core::CheckpointCreated, TurnError> {
     let turn_id = TurnId::new();
     let capsule = match capsule {
       Some(c) => c,
       None => {
-        let state = pi_rs_core::ContextState::zero(64_000);
+        let state = rupi_core::ContextState::zero(64_000);
         self.runtime.synthesize_capsule(&state, "manual checkpoint")
       }
     };
@@ -390,25 +388,25 @@ impl SessionHandle<'_> {
   /// List all checkpoint capsules recorded for this session.
   pub fn list_checkpoints(
     &self,
-  ) -> Result<Vec<(pi_rs_core::CheckpointId, pi_rs_core::ContextCapsule)>, TurnError> {
+  ) -> Result<Vec<(rupi_core::CheckpointId, rupi_core::ContextCapsule)>, TurnError> {
     self.runtime.list_checkpoints()
   }
 
   /// The model currently active for generation.
   #[allow(dead_code)]
-  pub fn active_model(&self) -> pi_rs_core::ModelRef {
+  pub fn active_model(&self) -> rupi_core::ModelRef {
     self.runtime.active_model()
   }
 
   /// The backup model, if configured.
   #[allow(dead_code)]
-  pub fn backup_model(&self) -> Option<pi_rs_core::ModelRef> {
+  pub fn backup_model(&self) -> Option<rupi_core::ModelRef> {
     self.runtime.backup_model()
   }
 
   /// The primary model.
   #[allow(dead_code)]
-  pub fn primary_model(&self) -> pi_rs_core::ModelRef {
+  pub fn primary_model(&self) -> rupi_core::ModelRef {
     self.runtime.primary_model()
   }
 
@@ -419,12 +417,12 @@ impl SessionHandle<'_> {
   }
 
   /// Manually switch active generation to the backup model.
-  pub fn failover_manual(&mut self) -> Result<pi_rs_core::ModelEpoch, TurnError> {
+  pub fn failover_manual(&mut self) -> Result<rupi_core::ModelEpoch, TurnError> {
     self.runtime.failover_manual()
   }
 
   /// Manually switch active generation back to the primary model.
-  pub fn switch_back_manual(&mut self) -> Result<pi_rs_core::ModelEpoch, TurnError> {
+  pub fn switch_back_manual(&mut self) -> Result<rupi_core::ModelEpoch, TurnError> {
     self.runtime.switch_back_manual()
   }
 
@@ -507,7 +505,7 @@ fn continue_state(
   let header_model = restored.header.model.clone();
   let mut epoch_records = restored.epochs;
   if epoch_records.is_empty() {
-    epoch_records.push(pi_rs_core::SessionEpochRecord {
+    epoch_records.push(rupi_core::SessionEpochRecord {
       epoch: 0,
       model: header_model.clone(),
       reason: EpochReason::Initial,
@@ -517,7 +515,7 @@ fn continue_state(
     // header's initial epoch before validating the durable sequence.
     epoch_records.insert(
       0,
-      pi_rs_core::SessionEpochRecord {
+      rupi_core::SessionEpochRecord {
         epoch: 0,
         model: header_model.clone(),
         reason: EpochReason::Initial,
@@ -703,7 +701,7 @@ impl TurnProgress for CliProgress<'_> {
     save(&mut self.io_error, self.surface.text_delta(text));
   }
 
-  fn on_tool_requested(&mut self, call: &pi_rs_core::ToolCallBlock) {
+  fn on_tool_requested(&mut self, call: &rupi_core::ToolCallBlock) {
     let mutating = self.mutating(&call.name);
     save(
       &mut self.io_error,
@@ -713,14 +711,14 @@ impl TurnProgress for CliProgress<'_> {
     );
   }
 
-  fn on_tool_progress(&mut self, call: &pi_rs_core::ToolCallBlock, text: &str) {
+  fn on_tool_progress(&mut self, call: &rupi_core::ToolCallBlock, text: &str) {
     save(
       &mut self.io_error,
       self.surface.tool_progress(&call.name, text),
     );
   }
 
-  fn on_tool_finished(&mut self, call: &pi_rs_core::ToolCallBlock, executed: &Executed) {
+  fn on_tool_finished(&mut self, call: &rupi_core::ToolCallBlock, executed: &Executed) {
     let mutating = self.mutating(&call.name);
     save(
       &mut self.io_error,
@@ -806,7 +804,7 @@ impl Trace for ReportingTrace {
     self.inner.record_message(attributed)
   }
 
-  fn put_payload(&mut self, bytes: &[u8]) -> Result<Option<pi_rs_core::BlobRef>, SinkError> {
+  fn put_payload(&mut self, bytes: &[u8]) -> Result<Option<rupi_core::BlobRef>, SinkError> {
     self.inner.put_payload(bytes)
   }
 

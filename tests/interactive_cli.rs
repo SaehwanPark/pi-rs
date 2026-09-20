@@ -1,4 +1,4 @@
-//! End-to-end tests for `pi-rs interactive`, run where no terminal is attached.
+//! End-to-end tests for `rupi interactive`, run where no terminal is attached.
 //!
 //! The loop itself is verified by the unit tests in `src/interactive.rs`, which is
 //! where its decisions live precisely so that they can be. What these tests cover is
@@ -16,24 +16,24 @@ use std::{
 use tempfile::TempDir;
 
 fn interactive(config: &Path, cwd: &Path) -> Output {
-  Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+  Command::new(env!("CARGO_BIN_EXE_rupi"))
     .args(["interactive", "--config"])
     .arg(config)
     .arg("--cwd")
     .arg(cwd)
     .output()
-    .expect("run pi-rs")
+    .expect("run rupi")
 }
 
 #[test]
 fn interactive_help_exits_zero_without_any_argument() {
-  let output = Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+  let output = Command::new(env!("CARGO_BIN_EXE_rupi"))
     .args(["interactive", "--help"])
     .output()
-    .expect("run pi-rs");
+    .expect("run rupi");
   assert!(output.status.success(), "{output:?}");
   let stdout = String::from_utf8_lossy(&output.stdout);
-  assert!(stdout.contains("Usage: pi-rs interactive"), "{stdout}");
+  assert!(stdout.contains("Usage: rupi interactive"), "{stdout}");
   // The two facts a user needs before touching a keyboard: what quits, and that a
   // typed draft survives it.
   assert!(stdout.contains("ctrl-c"), "{stdout}");
@@ -42,12 +42,12 @@ fn interactive_help_exits_zero_without_any_argument() {
 
 #[test]
 fn top_level_help_names_the_interactive_command() {
-  let output = Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+  let output = Command::new(env!("CARGO_BIN_EXE_rupi"))
     .output()
-    .expect("run pi-rs");
+    .expect("run rupi");
   assert!(output.status.success(), "{output:?}");
   // The top-level help lists commands in a table, so the entry is the bare command
-  // name under `Commands:`, not a `pi-rs`-prefixed usage line.
+  // name under `Commands:`, not a `rupi`-prefixed usage line.
   assert!(
     String::from_utf8_lossy(&output.stdout).contains("interactive"),
     "top-level help should list the command"
@@ -56,10 +56,10 @@ fn top_level_help_names_the_interactive_command() {
 
 #[test]
 fn a_missing_path_is_an_argument_error() {
-  let output = Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+  let output = Command::new(env!("CARGO_BIN_EXE_rupi"))
     .arg("interactive")
     .output()
-    .expect("run pi-rs");
+    .expect("run rupi");
   assert_eq!(output.status.code(), Some(2), "{output:?}");
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert!(
@@ -68,7 +68,7 @@ fn a_missing_path_is_an_argument_error() {
   );
   // The command's own help, so the reader sees the flag they left out in the
   // context of the command they typed.
-  assert!(stderr.contains("Usage: pi-rs interactive"), "{stderr}");
+  assert!(stderr.contains("Usage: rupi interactive"), "{stderr}");
 }
 
 /// `stdout` is a pipe for every test in this file, because `Output` captures it.
@@ -77,14 +77,14 @@ fn a_terminal_is_required_and_asking_for_one_does_not_open_a_session() {
   let temp = TempDir::new().unwrap();
   // Deliberately not a readable config: the terminal is checked first, so this
   // invocation never gets as far as complaining about the file. A bad config is a
-  // `pi-rs run` shape of mistake, and the interactive command must not leave the
+  // `rupi run` shape of mistake, and the interactive command must not leave the
   // terminal in raw mode on the way to reporting one.
   let missing = temp.path().join("config.json");
   let output = interactive(&missing, temp.path());
   assert_eq!(output.status.code(), Some(1), "{output:?}");
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert!(stderr.contains("needs a terminal on stdout"), "{stderr}");
-  assert!(stderr.contains("pi-rs run"), "{stderr}");
+  assert!(stderr.contains("rupi run"), "{stderr}");
   // Nothing was drawn, because nothing could be.
   assert!(
     output.stdout.is_empty(),

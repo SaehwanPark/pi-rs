@@ -5,7 +5,7 @@ lifecycle events" (ROADMAP) and nothing in the repo demonstrated it end-to-end. 
 now exists and the gate is checked; the remaining text preserves the original test contract.
 
 ## Orient with grep, do not read whole files
-- `grep -n "Tool\\|Unknown\\|pub enum" crates/pi-rs-core/src/event.rs | head -40` — the lifecycle
+- `grep -n "Tool\\|Unknown\\|pub enum" crates/rupi-core/src/event.rs | head -40` — the lifecycle
   variants and their payloads.
 - `grep -rn "CARGO_BIN_EXE\\|Command::new" tests/run_cli.rs | head -10` — how a CLI-level test
   drives the real binary, and how existing tests point `--store` at a temp dir.
@@ -36,7 +36,7 @@ ignore reason.
 - No new dev-dependencies (the repo has none for integration tests; use `std::process::Command`,
   `env!("CARGO_BIN_EXE_...")`, `tempfile` only if already a dev-dep — check `Cargo.toml`).
 - Respect the redaction path; do not add raw provider payload capture.
-- 2-space indent, 100 columns, edition 2024. Do not touch `crates/pi-rs-tui` or `src/interactive.rs`
+- 2-space indent, 100 columns, edition 2024. Do not touch `crates/rupi-tui` or `src/interactive.rs`
   (another slice is live there).
 - ROADMAP: leave the gate box **unchecked**; annotate it with what this test now proves and what it
   does not.

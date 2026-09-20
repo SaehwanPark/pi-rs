@@ -1,9 +1,9 @@
-# pi-rs Documentation Index
+# rupi Documentation Index
 
-Welcome to the `pi-rs` documentation. This directory and repository contain the
+Welcome to the `rupi` documentation. This directory and repository contain the
 specifications, architectural contracts, user guides, and historical development
-records for `pi-rs`—a minimal, Pi-inspired coding-agent runtime implemented in
-Rust. The current public release is **v0.2.0 (2026-09-19)**.
+records for `rupi`—a small, observable coding harness with selected Pi compatibility.
+The current public release is **v0.2.1 (2026-09-20)**.
 
 ---
 
@@ -13,12 +13,12 @@ For end users and system integrators, the primary documentation is published via
 **GitHub Pages** (built with mdBook; deployment is validated from `book/` on pushes to
 `main`):
 
-- **Online Documentation:** [https://saehwanpark.github.io/pi-rs/](https://saehwanpark.github.io/pi-rs/)
+- **Online Documentation:** [https://saehwanpark.github.io/rupi/](https://saehwanpark.github.io/rupi/)
 - **Source Files:** [`book/src/`](../book/src/)
 - **Topics Covered:**
   - **Quickstart Guide:** Get running with local or remote models in under 60 seconds.
   - **Installation:** Cargo, source builds, prebuilt binaries.
-  - **CLI Reference:** Detailed usage of `run`, `interactive`, `trace`, `replay`, `skills`, `prompts`, `packages`, `trust`, `compat`, `import`, and `export`.
+  - **CLI Reference:** Detailed usage of `run`, `interactive`, `trace`, `replay`, `skills`, `prompts`, `packages`, `trust`, `compat`, `import-pi`, and `export`.
   - **Interactive TUI:** Keyboard shortcuts, editor buffer, syntax highlighting, status line.
   - **Provenance Model:** Understanding `[native reasoning]`, `[provider summary]`, `[declared]`, and `[reconstructed]`.
   - **Failover & Recovery:** Primary/backup model configuration and capability matching.
@@ -37,8 +37,8 @@ These documents serve as the authoritative sources of truth for the codebase:
 | [`docs/PROJECT_DESIGN_CANONICAL.md`](PROJECT_DESIGN_CANONICAL.md) | **Canonical design authority.** Explains system thesis, core contracts, lifecycle, and component invariants. |
 | [`ARCHITECTURE.md`](../ARCHITECTURE.md) | Runtime boundaries, subsystem contracts, crate breakdown, and concurrency invariants. |
 | [`COMPATIBILITY.md`](../COMPATIBILITY.md) | Upstream Pi behavioral compatibility targets, coverage status, and regression fixtures. |
-| [`docs/SCHEMA_REFERENCE.md`](SCHEMA_REFERENCE.md) | Current v0.2.0 reference for event payloads, session logs, and serialized structures; source remains authoritative. |
-| [`docs/SESSION_COMPATIBILITY.md`](SESSION_COMPATIBILITY.md) | Bidirectional mapping between Pi session JSONL and pi-rs store schemas. |
+| [`docs/SCHEMA_REFERENCE.md`](SCHEMA_REFERENCE.md) | Current v0.2.1 reference for event payloads, session logs, and serialized structures; source remains authoritative. |
+| [`docs/SESSION_COMPATIBILITY.md`](SESSION_COMPATIBILITY.md) | Bidirectional mapping between Pi session JSONL and rupi store schemas. |
 | [`docs/IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) | Implementation inventory, verified capabilities, and phase deliverables. |
 
 ---
@@ -53,7 +53,7 @@ These documents serve as the authoritative sources of truth for the codebase:
 | [`LESSONS.md`](../LESSONS.md) | Durable architectural lessons, edge cases encountered, and rationale for key design choices. |
 | [`docs/codexbar.md`](codexbar.md) | Subscription quota monitoring rules and loop boundary policies. |
 | [`docs/subagents_policy.md`](subagents_policy.md) | Subagent delegation topologies, memory conservation, and handoff protocols. |
-| [`docs/harness/pi-rs-development/team-spec.md`](harness/pi-rs-development/team-spec.md) | Delivery harness specification and specialist agent roles. |
+| [`docs/harness/rupi-development/team-spec.md`](harness/rupi-development/team-spec.md) | Delivery harness specification and specialist agent roles. |
 
 ---
 
@@ -69,3 +69,8 @@ are preserved for provenance and auditing:
   prior development sessions.
 - [`docs/archive/proposals/`](archive/proposals/): Initial project proposal,
   early MVP validation reports, and compaction event audit records.
+- [`audits/`](../audits/): Completed audit rounds, explicitly marked as historical and
+  retained for provenance; they are not current implementation instructions.
+
+The former root-level [`HANDOFF.md`](../HANDOFF.md) is now a short pointer. Its resolved
+historical record lives in [`docs/archive/handoffs/`](archive/handoffs/).

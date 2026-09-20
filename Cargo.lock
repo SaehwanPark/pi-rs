@@ -529,151 +529,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "pi-rs"
-version = "0.2.0"
-dependencies = [
- "crossterm",
- "libc",
- "pi-rs-compat",
- "pi-rs-core",
- "pi-rs-experiments",
- "pi-rs-extension",
- "pi-rs-mcp",
- "pi-rs-provider",
- "pi-rs-replay",
- "pi-rs-rkb",
- "pi-rs-runtime",
- "pi-rs-store",
- "pi-rs-tools",
- "pi-rs-tui",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "pi-rs-compat"
-version = "0.2.0"
-dependencies = [
- "libc",
- "tempfile",
-]
-
-[[package]]
-name = "pi-rs-core"
-version = "0.2.0"
-dependencies = [
- "getrandom 0.3.4",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "pi-rs-experiments"
-version = "0.2.0"
-dependencies = [
- "pi-rs-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "pi-rs-extension"
-version = "0.2.0"
-dependencies = [
- "pi-rs-core",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "pi-rs-mcp"
-version = "0.2.0"
-dependencies = [
- "pi-rs-core",
- "pi-rs-tools",
- "serde",
- "serde_json",
- "tempfile",
- "ureq",
-]
-
-[[package]]
-name = "pi-rs-provider"
-version = "0.2.0"
-dependencies = [
- "pi-rs-core",
- "serde",
- "serde_json",
- "ureq",
-]
-
-[[package]]
-name = "pi-rs-replay"
-version = "0.2.0"
-dependencies = [
- "pi-rs-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "pi-rs-rkb"
-version = "0.2.0"
-dependencies = [
- "pi-rs-core",
- "pi-rs-mcp",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "pi-rs-runtime"
-version = "0.2.0"
-dependencies = [
- "pi-rs-core",
- "pi-rs-provider",
- "pi-rs-store",
- "pi-rs-tools",
- "serde_json",
-]
-
-[[package]]
-name = "pi-rs-store"
-version = "0.2.0"
-dependencies = [
- "flate2",
- "fs4",
- "pi-rs-core",
- "rustix 0.38.44",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "pi-rs-tools"
-version = "0.2.0"
-dependencies = [
- "libc",
- "pi-rs-core",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "pi-rs-tui"
-version = "0.2.0"
-dependencies = [
- "crossterm",
- "pi-rs-core",
- "ratatui",
- "serde_json",
-]
-
-[[package]]
 name = "potential_utf"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -748,6 +603,151 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rupi"
+version = "0.2.1"
+dependencies = [
+ "crossterm",
+ "libc",
+ "rupi-compat",
+ "rupi-core",
+ "rupi-experiments",
+ "rupi-extension",
+ "rupi-mcp",
+ "rupi-provider",
+ "rupi-replay",
+ "rupi-rkb",
+ "rupi-runtime",
+ "rupi-store",
+ "rupi-tools",
+ "rupi-tui",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "rupi-compat"
+version = "0.2.1"
+dependencies = [
+ "libc",
+ "tempfile",
+]
+
+[[package]]
+name = "rupi-core"
+version = "0.2.1"
+dependencies = [
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rupi-experiments"
+version = "0.2.1"
+dependencies = [
+ "rupi-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rupi-extension"
+version = "0.2.1"
+dependencies = [
+ "rupi-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "rupi-mcp"
+version = "0.2.1"
+dependencies = [
+ "rupi-core",
+ "rupi-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
+name = "rupi-provider"
+version = "0.2.1"
+dependencies = [
+ "rupi-core",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "rupi-replay"
+version = "0.2.1"
+dependencies = [
+ "rupi-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rupi-rkb"
+version = "0.2.1"
+dependencies = [
+ "rupi-core",
+ "rupi-mcp",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rupi-runtime"
+version = "0.2.1"
+dependencies = [
+ "rupi-core",
+ "rupi-provider",
+ "rupi-store",
+ "rupi-tools",
+ "serde_json",
+]
+
+[[package]]
+name = "rupi-store"
+version = "0.2.1"
+dependencies = [
+ "flate2",
+ "fs4",
+ "rupi-core",
+ "rustix 0.38.44",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "rupi-tools"
+version = "0.2.1"
+dependencies = [
+ "libc",
+ "rupi-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "rupi-tui"
+version = "0.2.1"
+dependencies = [
+ "crossterm",
+ "ratatui",
+ "rupi-core",
+ "serde_json",
 ]
 
 [[package]]

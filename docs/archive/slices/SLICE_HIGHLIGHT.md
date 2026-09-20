@@ -6,8 +6,8 @@ only**. Wiring it into the editor/live surface is a later slice, and the status-
 
 ## What already exists — use it, do not redefine it
 
-`crates/pi-rs-tui/src/style.rs:31` `Role::Operation`, `:37` `Role::Argument`;
-`crates/pi-rs-tui/src/line.rs:21` `pub struct Segment { pub text: String, pub role: Role }`. Both are
+`crates/rupi-tui/src/style.rs:31` `Role::Operation`, `:37` `Role::Argument`;
+`crates/rupi-tui/src/line.rs:21` `pub struct Segment { pub text: String, pub role: Role }`. Both are
 re-exported at the crate root. Emit those; add no new role unless a case genuinely needs one (if it
 does, say which and why in the doc comment).
 
@@ -41,9 +41,9 @@ byte-boundary characters.
 
 ## Limits
 
-Depend on nothing new (no new crates in `pi-rs-tui`). At most **three** `read` calls, ≤40 lines each;
+Depend on nothing new (no new crates in `rupi-tui`). At most **three** `read` calls, ≤40 lines each;
 one `grep -n` per file with `| head -12`; command output ≤15 lines; `cargo test --workspace` once at the
-end, `cargo test -p pi-rs-tui` in between. **Commit before running any cargo command.** Never weaken an
+end, `cargo test -p rupi-tui` in between. **Commit before running any cargo command.** Never weaken an
 assertion. Do not wire it into the editor or live surface. Leave ROADMAP unchecked.
 No merges, rebases, pushes, PRs; stay in this worktree. `git rev-parse HEAD` before each commit — if it
 moved without your commit, stop and report.

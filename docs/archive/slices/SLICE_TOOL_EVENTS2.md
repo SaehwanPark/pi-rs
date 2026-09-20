@@ -10,7 +10,7 @@ same driving style — copy what the existing tests do; do not redesign them:
 
 Grep the existing file for how it builds the store, invokes the binary and reads the trace:
 `grep -n "fn \|CARGO_BIN_EXE\|Command::new\|read_dir\|serde_json" tests/tool_lifecycle_events.rs | head -20`.
-Then `grep -n "Unknown\|Failed\|pub enum" crates/pi-rs-core/src/event.rs | head -20`. Two reads, then write.
+Then `grep -n "Unknown\|Failed\|pub enum" crates/rupi-core/src/event.rs | head -20`. Two reads, then write.
 
 Discipline: reads ≤40 lines, command outputs ≤15 lines, `cargo test --test tool_lifecycle_events`
 after each edit, commit per case. Never weaken an assertion to get green — a reported gap with

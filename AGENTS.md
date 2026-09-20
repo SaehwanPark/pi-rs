@@ -2,7 +2,7 @@
 
 ## What
 
-- `pi-rs` is a minimal, Pi-inspired coding-agent runtime implemented in Rust.
+- `rupi` is a minimal, Pi-inspired coding-agent runtime implemented in Rust.
 - The project is a Rust 2024 workspace delivering a minimal, fast core with
   honest provenance, recoverable state, and behavioral Pi compatibility.
 - `docs/PROJECT_DESIGN_CANONICAL.md` is the canonical design authority.
@@ -35,22 +35,22 @@
 
 - Before substantial changes, read `docs/PROJECT_DESIGN_CANONICAL.md`,
   `ARCHITECTURE.md`, `COMPATIBILITY.md`, and `ROADMAP.md`.
-- Use the delivery harness in `docs/harness/pi-rs-development/team-spec.md`
+- Use the delivery harness in `docs/harness/rupi-development/team-spec.md`
   and specialized skills:
-  - `.agents/skills/pi-rs-change-orchestrator/SKILL.md` for slice ownership
+  - `.agents/skills/rupi-change-orchestrator/SKILL.md` for slice ownership
     and synthesis;
-  - `.agents/skills/pi-rs-core-contract-designer/SKILL.md` for typed state
+  - `.agents/skills/rupi-core-contract-designer/SKILL.md` for typed state
     and runtime contracts;
-  - `.agents/skills/pi-rs-compatibility-fixture-author/SKILL.md` for Pi
+  - `.agents/skills/rupi-compatibility-fixture-author/SKILL.md` for Pi
     behavioral compatibility fixtures;
-  - `.agents/skills/pi-rs-invariant-reviewer/SKILL.md` for cross-cutting
+  - `.agents/skills/rupi-invariant-reviewer/SKILL.md` for cross-cutting
     invariant review.
 - Use spaces with an indentation and tab width of 2, 100-column line limit, and
   idiomatic stable Rust. Run checks before review:
 
   ```sh
   cargo fmt --all --check
-  cargo check -p pi-rs-core --all-features
+  cargo check -p rupi-core --all-features
   cargo clippy --workspace --all-targets -- -D warnings
   cargo test --workspace
   cargo doc --workspace --no-deps
@@ -58,7 +58,7 @@
   ```
 
 - Changes affecting startup, rendering (`bash bench/render.sh`, budgets in
-  `crates/pi-rs-tui/benches/render.rs`), session resume, or context
+  `crates/rupi-tui/benches/render.rs`), session resume, or context
   reconstruction must verify performance against defined budgets.
 - Update `ROADMAP.md` only from verified evidence. Keep incomplete work active and do not mark stage gates complete until gate evidence exists.
 - Be aware of AI subscription usage limits and reset windows. The parent/current

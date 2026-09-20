@@ -1,11 +1,11 @@
 # Slice: measure keystroke latency, and put the budgets where a regression trips
 
 Phase 1 asks to "measure keystroke/render latency". Rendering and command parsing are covered by
-`bench/render.sh` + `crates/pi-rs-tui/benches/render.rs` on the branch `bench/tui-render-budgets`
+`bench/render.sh` + `crates/rupi-tui/benches/render.rs` on the branch `bench/tui-render-budgets`
 (PR #15, open). **Do not merge that branch here.** Read its shape for reference:
 
     git show origin/bench/tui-render-budgets:bench/render.sh
-    git show origin/bench/tui-render-budgets:crates/pi-rs-tui/benches/render.rs
+    git show origin/bench/tui-render-budgets:crates/rupi-tui/benches/render.rs
 
 Mirror that shape exactly: `harness = false`, std timing only, the case list and the budgets in the
 bench source, non-zero exit when a case exceeds its budget, and a thin `bench/keystroke.sh` wrapper
@@ -34,7 +34,7 @@ the bench into a coin flip. Report the medians you measured and the budgets you 
   benches, so it must stay warning-free.
 - `bench/startup.sh` must not move (this is not startup path).
 - 2-space indent, 100 columns, edition 2024.
-- `crates/pi-rs-tui/Cargo.toml`: add a second `[[bench]]` block. Note in your report that this file
+- `crates/rupi-tui/Cargo.toml`: add a second `[[bench]]` block. Note in your report that this file
   will need a take-both merge with PR #15, which adds its own `[[bench]]` block.
 
 ## Verify (paste real numbers)

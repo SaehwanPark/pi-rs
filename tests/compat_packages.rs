@@ -1,6 +1,6 @@
 //! Pi-compatible package manifest parsing, driven from committed fixture files.
 //!
-//! The unit tests in `pi-rs-compat` build their inputs in code. These fixtures are real
+//! The unit tests in `rupi-compat` build their inputs in code. These fixtures are real
 //! files in the repository, so a reviewer can read the input next to the expected
 //! outcome, and so a later change to the rules shows up as a diff in a fixture rather
 //! than only in a test.
@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use pi_rs_compat::package::{self, Warning};
+use rupi_compat::package::{self, Warning};
 
 fn fixture(name: &str) -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -132,7 +132,7 @@ fn missing_file_produces_an_unreadable_warning() {
 // Package discovery driven by committed fixture directories
 // ---------------------------------------------------------------------------
 
-use pi_rs_compat::scan::{Discovery, Source, Trust};
+use rupi_compat::scan::{Discovery, Source, Trust};
 
 fn fixture_home() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR"))

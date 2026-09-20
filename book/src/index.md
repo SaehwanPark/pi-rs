@@ -1,48 +1,54 @@
-# Introduction to pi-rs
+# Welcome to rupi
 
-`pi-rs` is a minimal, Pi-inspired coding-agent runtime implemented in Rust. The
-current public release is **v0.2.0 (2026-09-19)**.
+**rupi** is a small terminal coding harness. It connects a model to a workspace, lets the
+model inspect files and (when you allow it) change them, and records what happened so you
+can inspect or resume the session later.
 
-It delivers a fast, trustworthy runtime for coding-agent sessions that preserves the interaction ergonomics of Pi while establishing rigorous architectural boundaries for provenance, determinism, and performance.
+You do **not** need to know Claude Code, Codex, Pi, Rust, or agent terminology to try it.
+Think of rupi as three things:
 
----
+1. a terminal program you start;
+2. a model endpoint that supplies the responses;
+3. a guarded set of tools for reading, editing, and testing files.
 
-## Project Thesis
+rupi is an independent project, not a rewrite or Rust port of Pi. It does reuse selected
+Pi-compatible skills, prompts, packages, extensions, and session formats when that is useful.
 
-> **Minimal core. Compatible ecosystem. Observable execution. Honest provenance. Recoverable state.**
+## The shortest path to a first answer
 
-The project is a **clean reimplementation**, not a mechanical translation or fork. Rust is the implementation substrate, delivering predictable abstractions, thread safety, and measured low-latency startup.
+1. [Install rupi](getting-started/installation.md).
+2. [Start a local Qwen3.8-Flash-Next server](getting-started/quickstart.md#1-start-llamacpp).
+3. [Create a safe configuration](getting-started/quickstart.md#2-create-configjson).
+4. [Ask a read-only question](getting-started/quickstart.md#3-run-a-read-only-request).
+5. [Resume, inspect, or replay the session](getting-started/quickstart.md#5-find-and-reuse-a-session).
 
----
+The default configuration does **not** approve file writes, edits, or shell commands.
+Start with a read-only prompt, then decide deliberately whether a trusted workspace should
+allow mutations.
 
-## Core Principles
+## Useful mental model
 
-- **Preserve Pi's minimalist philosophy**: Keep the user-facing layer focused and keyboard-native; push higher-level orchestration outside the runtime.
-- **Context is a cache, not the record**: The append-only canonical trace remains completely independent of transient model-visible context.
-- **Honest provenance**: Never conflate raw model reasoning, provider-synthesized summaries, declared rationale, or reconstructed explanations. Never claim hidden chain-of-thought was recovered unless truly exposed.
-- **Single-model execution**: Exactly one model is active in normal operation; backup models are reserved strictly for fault recovery.
-- **Explicit mutating state**: Uncertain mutating operations (`write`, `edit`, `exec`) remain explicitly flagged and are never silently or blindly replayed.
-- **Instant before complete**: Subsystems such as MCP, Node extension hosts, and deep session hydration initialize lazily to target startup budgets under 100 ms warm and under 250 ms cold.
+```text
+You ──> rupi ──> local or remote model
+          │
+          ├── read-only tools by default
+          ├── explicit mutation policy
+          └── durable session + trace in .rupi-state/
+```
 
----
+The model's current prompt is temporary working context. The trace is the durable record.
+Compaction can shorten the next prompt without erasing the recorded history.
 
-## Key Highlights
+## Where to go next
 
-| Feature | Description |
-| :--- | :--- |
-| **Interactive TUI** | Keyboard-first terminal UI with multi-line editor, real-time streaming, and semantic statusline. |
-| **One-Shot CLI** | Headless runner (`pi-rs run`) streaming output directly to stdout/stderr with strict workspace confinement. |
-| **Deterministic Replay** | Replay any historical session identically without re-querying providers or re-executing mutating tools. |
-| **Pi Compatibility** | Tested behavioral support for Pi skills, prompt templates, packages, selected extensions, and session import/export. |
-| **Model Failover** | Automatic fallback to backup models with capability validation (tools, modalities, context limits). |
-| **MCP Integration** | Model Context Protocol client with lazy stdio initialization. |
-| **Low-Latency Startup** | Cold startup <250 ms, warm startup <100 ms budget. |
+- [Installation](getting-started/installation.md)
+- [Quickstart](getting-started/quickstart.md)
+- [Interactive terminal](user-guide/interactive-tui.md)
+- [CLI reference](reference/cli.md)
+- [Models and providers](user-guide/models-and-providers.md)
+- [Tools and safety](user-guide/tools-and-sandbox.md)
+- [Trace and replay](user-guide/trace-and-replay.md)
+- [Pi compatibility](user-guide/pi-compatibility.md)
 
----
-
-## Quick Navigation
-
-- [Installation](getting-started/installation.md): Build from source or install via Cargo.
-- [Quickstart Guide](getting-started/quickstart.md): Run your first session in 60 seconds.
-- [Interactive TUI Guide](user-guide/interactive-tui.md): Learn the keyboard commands and editor buffer.
-- [CLI Reference](reference/cli.md): Comprehensive listing of all flags and options.
+For runtime contracts and design decisions, see [Architecture](architecture/overview.md) and
+the repository's [canonical design](../../docs/PROJECT_DESIGN_CANONICAL.md).

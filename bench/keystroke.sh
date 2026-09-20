@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Entry point for the TUI keystroke benchmark, with the same interface as bench/startup.sh and
 # bench/render.sh. The measured case list, the budgets, and the pass/fail rule live in
-# crates/pi-rs-tui/benches/keystroke.rs; this script only builds and runs it.
+# crates/rupi-tui/benches/keystroke.rs; this script only builds and runs it.
 #
 # Usage: bench/keystroke.sh [--iterations <N>] [--json <path>]
 
@@ -50,4 +50,4 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$REPO_ROOT"
-exec cargo bench --quiet -p pi-rs-tui --bench keystroke -- ${ARGS[@]+"${ARGS[@]}"}
+exec cargo bench --quiet -p rupi-tui --bench keystroke -- ${ARGS[@]+"${ARGS[@]}"}

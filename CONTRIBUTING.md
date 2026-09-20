@@ -1,6 +1,6 @@
-# Contributing to pi-rs
+# Contributing to rupi
 
-pi-rs is a coding-agent runtime in Rust. The rules that actually decide whether a
+rupi is a coding-agent runtime in Rust. The rules that actually decide whether a
 change is accepted live in [`AGENTS.md`](AGENTS.md), and the plan lives in
 [`ROADMAP.md`](ROADMAP.md). This file is the short operational version: what to run,
 what shape a change should take, and what reviewers look at first.
@@ -48,8 +48,8 @@ often silently broken by a change that compiles.
 6. **Compatibility is behavioural.** Pi parity is proven by a fixture, not by an
    assertion that the shapes look similar. Silence in a compatibility report is only for
    what Pi deliberately ignores; every other decision names a path and a reason.
-7. **Layer boundaries.** `pi-rs-tui` does not import the runtime or the store.
-   `pi-rs-compat` imports nothing from this workspace. MCP stays behind its adapter.
+7. **Layer boundaries.** `rupi-tui` does not import the runtime or the store.
+   `rupi-compat` imports nothing from this workspace. MCP stays behind its adapter.
 
 ## Running the checks
 
@@ -57,7 +57,7 @@ CI runs on `ubuntu-latest` and `macos-latest`:
 
 ```sh
 cargo fmt --all --check
-cargo check -p pi-rs-core --all-features
+cargo check -p rupi-core --all-features
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo doc --workspace --no-deps

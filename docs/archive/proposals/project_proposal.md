@@ -1,11 +1,11 @@
 ---
-title: "pi-rs Proposal: A Minimal, Observable, Fault-Tolerant Agent Runtime"
+title: "rupi Proposal: A Minimal, Observable, Fault-Tolerant Agent Runtime"
 author: "Sae-Hwan Park"
 date: 2026-09-04
 ---
 
 **Status:** Proposed  
-**Working name:** `pi-rs`  
+**Working name:** `rupi`  
 **Primary language:** Rust  
 **Design lineage:** Heavily inspired by Pi  
 **Project type:** Clean reimplementation, not source rewrite or fork
@@ -14,13 +14,13 @@ date: 2026-09-04
 
 # 1. Executive Summary
 
-`pi-rs` is a proposed minimal coding-agent runtime inspired by the philosophy and interaction model of Pi, reimplemented in Rust with several deliberate architectural extensions:
+`rupi` is a proposed minimal coding-agent runtime inspired by the philosophy and interaction model of Pi, reimplemented in Rust with several deliberate architectural extensions:
 
 1. **Strong compatibility with the Pi ecosystem**, including skills, prompts, packages, and, where practical, TypeScript extensions.
 2. **First-class execution observability**, preserving model-visible reasoning when exposed, tool calls, tool results, provider events, model transitions, context transformations, and other execution provenance.
 3. **Explicit provenance for reasoning-like information**, distinguishing genuine model-emitted reasoning from provider summaries, declared rationales, and post-hoc reconstructions.
 4. **Built-in context lifecycle management**, including proactive compaction, semantic phase boundaries, checkpoint/reset workflows, durable trace preservation, and rehydratable external context.
-5. **MCP client and server support**, allowing `pi-rs` both to consume external capabilities and to serve as a composable worker within higher-level orchestration systems.
+5. **MCP client and server support**, allowing `rupi` both to consume external capabilities and to serve as a composable worker within higher-level orchestration systems.
 6. **Fault-tolerant model failover**, allowing a configured backup model to continue the same session when the primary model becomes unavailable.
 7. **First-party integrations such as `rkb-rs`**, demonstrating provenance-aware external knowledge retrieval without coupling domain-specific knowledge systems into the core runtime.
 
@@ -30,7 +30,7 @@ The central thesis is:
 
 The project is not intended to become a large autonomous-development framework or multi-agent orchestration system.
 
-Higher-level orchestration should remain outside the core and interact with `pi-rs` through stable APIs such as MCP and RPC.
+Higher-level orchestration should remain outside the core and interact with `rupi` through stable APIs such as MCP and RPC.
 
 ---
 
@@ -47,11 +47,11 @@ Its strongest ideas include:
 - user-controlled workflows;
 - packages, skills, prompts, and extensions as primary customization mechanisms.
 
-`pi-rs` should preserve these ideas as closely as practical.
+`rupi` should preserve these ideas as closely as practical.
 
 The motivation for a separate implementation is not simply to rewrite Pi in Rust. A language-only port would provide insufficient differentiation and create unnecessary ecosystem fragmentation.
 
-Instead, `pi-rs` explores several runtime properties that are easier to implement coherently when they are foundational:
+Instead, `rupi` explores several runtime properties that are easier to implement coherently when they are foundational:
 
 - execution traces that outlive working context;
 - typed event provenance;
@@ -70,7 +70,7 @@ The result should remain recognizably Pi-like while being optimized for long-run
 
 A concise project description is:
 
-> **`pi-rs` is a minimal, Pi-compatible agent runtime for local and remote coding models, designed around observable execution, bounded working context, fault tolerance, and composable orchestration.**
+> **`rupi` is a minimal, Pi-compatible agent runtime for local and remote coding models, designed around observable execution, bounded working context, fault tolerance, and composable orchestration.**
 
 Four short principles summarize the project:
 
@@ -89,7 +89,7 @@ A fifth may be added as the architecture matures:
 
 ## 4.1 Primary goals
 
-`pi-rs` should:
+`rupi` should:
 
 - preserve Pi's minimalist agent-runtime philosophy;
 - offer a familiar workflow to existing Pi users;
@@ -124,7 +124,7 @@ The following should explicitly remain outside the initial core.
 
 ## 5.1 Multi-model orchestration
 
-`pi-rs` should not automatically:
+`rupi` should not automatically:
 
 - ask multiple models the same question;
 - vote among models;
@@ -139,11 +139,11 @@ Backup-model failover is different: only one model is active at a time and anoth
 
 ## 5.2 Hidden chain-of-thought extraction
 
-`pi-rs` must never claim to recover internal reasoning that a provider or model does not expose.
+`rupi` must never claim to recover internal reasoning that a provider or model does not expose.
 
 If hidden reasoning never reaches the client, it cannot be recovered by the harness.
 
-Instead, `pi-rs` may provide:
+Instead, `rupi` may provide:
 
 - provider-supplied reasoning summaries;
 - explicitly requested compact rationales;
@@ -155,7 +155,7 @@ Their provenance must always remain distinguishable.
 
 Domain-specific systems such as `rkb-rs` should integrate deeply but remain external packages/services.
 
-`pi-rs` should contain generic knowledge/context primitives rather than CMS-specific retrieval logic.
+`rupi` should contain generic knowledge/context primitives rather than CMS-specific retrieval logic.
 
 ## 5.4 Large built-in workflow framework
 
@@ -176,7 +176,7 @@ These belong in packages, MCP services, skills, or orchestrators.
 
 ## 6.1 Reimplementation, not rewrite
 
-`pi-rs` should reproduce useful observable semantics rather than translate source architecture mechanically.
+`rupi` should reproduce useful observable semantics rather than translate source architecture mechanically.
 
 Compatibility should be measured through behavior and test fixtures.
 
@@ -271,7 +271,7 @@ A high-level architecture:
 
 ```text
 +-------------------------------------------------------+
-|                        pi-rs                          |
+|                        rupi                          |
 |                                                       |
 |   +-------------+       +------------------------+    |
 |   | Agent Loop  |<----->| Provider Abstraction   |    |
@@ -310,7 +310,7 @@ higher-level orchestrator
          MCP
           |
           v
-        pi-rs
+        rupi
           |
      coding session
 ```
@@ -322,16 +322,16 @@ higher-level orchestrator
 A possible crate organization:
 
 ```text
-pi-rs-core
-pi-rs-provider
-pi-rs-session
-pi-rs-context
-pi-rs-trace
-pi-rs-tools
-pi-rs-mcp
-pi-rs-pi-compat
-pi-rs-cli
-pi-rs-tui
+rupi-core
+rupi-provider
+rupi-session
+rupi-context
+rupi-trace
+rupi-tools
+rupi-mcp
+rupi-pi-compat
+rupi-cli
+rupi-tui
 ```
 
 This is illustrative rather than prescriptive.
@@ -515,11 +515,11 @@ Replay should eventually become a first-class capability.
 Examples:
 
 ```bash
-pi-rs replay session.jsonl
-pi-rs replay session.jsonl --tools
-pi-rs replay session.jsonl --reasoning
-pi-rs replay session.jsonl --timing
-pi-rs replay session.jsonl --until event:381
+rupi replay session.jsonl
+rupi replay session.jsonl --tools
+rupi replay session.jsonl --reasoning
+rupi replay session.jsonl --timing
+rupi replay session.jsonl --until event:381
 ```
 
 Longer-term possibilities include:
@@ -557,7 +557,7 @@ Possible levels:
 A compatibility command could expose:
 
 ```bash
-pi-rs compat package ./some-package
+rupi compat package ./some-package
 ```
 
 and report:
@@ -582,7 +582,7 @@ For maximum ecosystem compatibility, arbitrary TypeScript extensions should not 
 Instead, use a compatibility host.
 
 ```text
-                 pi-rs
+                 rupi
                    |
              extension RPC
                    |
@@ -601,7 +601,7 @@ Advantages:
 - existing Pi extension code can often run unchanged;
 - Rust remains isolated from JavaScript runtime complexity.
 
-Later, `pi-rs` may additionally offer:
+Later, `rupi` may additionally offer:
 
 ```text
 TypeScript extensions -> compatibility path
@@ -827,7 +827,7 @@ Connecting many MCP servers can create hundreds of tool schemas.
 
 Exposing all of them directly to a model is undesirable, especially for local models.
 
-`pi-rs` should support capability filtering or lazy discovery.
+`rupi` should support capability filtering or lazy discovery.
 
 Possible approaches:
 
@@ -855,7 +855,7 @@ The architectural requirement is:
 
 # 22. MCP Server
 
-`pi-rs` should also be exposable as an MCP server.
+`rupi` should also be exposable as an MCP server.
 
 This lets a higher-level orchestrator treat a coding session as one stateful worker.
 
@@ -887,7 +887,7 @@ The interface should expose useful agent-level semantics rather than every inter
 
 # 23. Orchestration Boundary
 
-`pi-rs` should deliberately avoid implementing a large multi-agent system internally.
+`rupi` should deliberately avoid implementing a large multi-agent system internally.
 
 Instead:
 
@@ -897,7 +897,7 @@ Instead:
             +----------+----------+
             |          |          |
             v          v          v
-         pi-rs A    pi-rs B    pi-rs C
+         rupi A    rupi B    rupi C
          backend    frontend    reviewer
 ```
 
@@ -954,17 +954,17 @@ forgotten
 
 `rkb-rs` should remain an independent project.
 
-It should not become a dependency of the `pi-rs` core.
+It should not become a dependency of the `rupi` core.
 
 Instead, it should serve as an official example of provenance-aware external knowledge integration.
 
 Possible structure:
 
 ```text
-pi-rs core
+rupi core
   `- generic external-context primitives
 
-pi-rs-rkb
+rupi-rkb
   `- official integration
 
 rkb-rs
@@ -1381,7 +1381,7 @@ The distinction should remain strict enough to prevent uncontrolled core growth.
 
 # 40. Testing Strategy
 
-`pi-rs` should be test-driven around externally visible semantics.
+`rupi` should be test-driven around externally visible semantics.
 
 ## 40.1 Compatibility fixtures
 
@@ -1465,11 +1465,11 @@ The same event architecture should support developer diagnostics.
 Potential outputs:
 
 ```bash
-pi-rs trace
-pi-rs trace --json
-pi-rs trace --tools
-pi-rs trace --reasoning
-pi-rs doctor
+rupi trace
+rupi trace --json
+rupi trace --tools
+rupi trace --reasoning
+rupi doctor
 ```
 
 Optional OpenTelemetry export may be added without making OpenTelemetry a conceptual dependency of the runtime.
@@ -1616,7 +1616,7 @@ Expand based on real package compatibility rather than hypothetical completeness
 
 ## Phase 9: MCP server / worker mode
 
-Expose `pi-rs` itself as a reusable worker.
+Expose `rupi` itself as a reusable worker.
 
 Implement:
 
@@ -1672,7 +1672,7 @@ The project succeeds if:
 
 ## Compatibility
 
-A Pi user can move common skills and packages to `pi-rs` with little or no modification.
+A Pi user can move common skills and packages to `rupi` with little or no modification.
 
 ## Minimalism
 
@@ -1704,7 +1704,7 @@ Working context can shrink without destroying the canonical trace or losing dura
 
 ## Composability
 
-An external orchestrator can operate `pi-rs` without scraping terminal output.
+An external orchestrator can operate `rupi` without scraping terminal output.
 
 ---
 
@@ -1772,7 +1772,7 @@ Several decisions should remain deliberately unresolved until implementation rev
 
 ### Session compatibility
 
-Should `pi-rs` use Pi's session format natively or provide import/export adapters around a stronger internal format?
+Should `rupi` use Pi's session format natively or provide import/export adapters around a stronger internal format?
 
 ### Extension host
 
@@ -1818,7 +1818,7 @@ That description understates both the purpose and the differentiation.
 
 A stronger description is:
 
-> **`pi-rs` is a Pi-inspired, Pi-compatible agent runtime built in Rust for observable, context-efficient, and fault-tolerant coding sessions across local and remote models.**
+> **`rupi` is a Pi-inspired, Pi-compatible agent runtime built in Rust for observable, context-efficient, and fault-tolerant coding sessions across local and remote models.**
 
 An even shorter tagline could be:
 
@@ -1834,7 +1834,7 @@ If the architecture works as intended, a future execution might look like this:
 User
  |
  v
-pi-rs
+rupi
  |
  +-- Qwen local model
  |      |
@@ -1886,7 +1886,7 @@ This creates an agent architecture in which:
 
 > **working memory is disposable, evidence is rehydratable, execution is traceable, and the model itself is replaceable.**
 
-That is the architectural idea at the center of `pi-rs`.
+That is the architectural idea at the center of `rupi`.
 
 ---
 
@@ -1898,7 +1898,7 @@ The following rules should be treated as invariants unless explicitly revised:
 2. **Compaction never silently destroys the canonical execution history.**
 3. **Reasoning provenance is always explicit.**
 4. **Hidden chain-of-thought is never claimed to have been recovered when it was not exposed.**
-5. **Only one model is active within a normal `pi-rs` execution role at a time.**
+5. **Only one model is active within a normal `rupi` execution role at a time.**
 6. **Backup-model activation is fault recovery, not orchestration.**
 7. **Potentially destructive tool actions are never blindly replayed across uncertain failure boundaries.**
 8. **External knowledge remains attributable to durable sources.**
@@ -1911,7 +1911,7 @@ The following rules should be treated as invariants unless explicitly revised:
 
 # 50. Conclusion
 
-`pi-rs` should preserve what makes Pi attractive: a small agentic abstraction, flexible models, extensibility, and user control.
+`rupi` should preserve what makes Pi attractive: a small agentic abstraction, flexible models, extensibility, and user control.
 
 Its main innovation should not be Rust itself.
 

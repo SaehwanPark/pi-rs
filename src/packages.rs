@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use pi_rs_compat::{
+use rupi_compat::{
   package::{self, Warning},
   scan::Trust,
 };
@@ -40,7 +40,7 @@ pub fn execute(args: PackagesArgs) -> Result<(), String> {
   if let Some(name) = &args.show {
     let pkg = scan
       .named(name)
-      .ok_or_else(|| format!("no package named '{name}'; pi-rs packages lists what there is"))?;
+      .ok_or_else(|| format!("no package named '{name}'; rupi packages lists what there is"))?;
 
     println!(
       "Package: {} ({}) [{}]",
@@ -156,7 +156,7 @@ fn display(path: &Path) -> String {
       return format!("./{}", rel.display());
     }
   }
-  if let Some(home) = pi_rs_compat::scan::home_dir() {
+  if let Some(home) = rupi_compat::scan::home_dir() {
     if let Ok(rel) = path.strip_prefix(&home) {
       return format!("~/{}", rel.display());
     }

@@ -5,7 +5,7 @@ actually defines — no invented fields, no aspirational schema.
 
 Write `docs/SCHEMA_REFERENCE.md`, three sections:
 
-1. **Events** — enumerate `AgentEvent` variants from `crates/pi-rs-core/src/event.rs`: name, payload
+1. **Events** — enumerate `AgentEvent` variants from `crates/rupi-core/src/event.rs`: name, payload
    fields with types, and one line of purpose. Include the sequencing contract (`EventSeq`, session id,
    timestamps) as the code expresses it.
 2. **Session records** — how a trace persists: the JSONL shape written by the store, the role of the

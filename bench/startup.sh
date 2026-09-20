@@ -40,14 +40,23 @@ done
 
 cd "$REPO_ROOT"
 
-cargo build --release --bin pi-rs --quiet
+cargo build --release --bin rupi --quiet
 
-BINARY="${REPO_ROOT}/target/release/pi-rs"
-if [[ -f "${REPO_ROOT}/target/release/pi-rs.exe" ]]; then
-  BINARY="${REPO_ROOT}/target/release/pi-rs.exe"
+# Keep the child path relative to the repository. Git Bash on Windows exposes the
+# checkout as `/c/...`, but native Python subprocesses require a Windows path or a
+# path relative to their current directory.
+BINARY="target/release/rupi"
+if [[ -f "target/release/rupi.exe" ]]; then
+  BINARY="target/release/rupi.exe"
 fi
 
-COLD_MODE="$COLD_MODE" BINARY="$BINARY" ITERATIONS="$ITERATIONS" JSON_OUT="$JSON_OUT" python3 - <<'EOF'
+PYTHON=python3
+if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+  # Windows App Execution Aliases expose a broken `python3` shim in Git Bash;
+  # the installed interpreter is available as `python` instead.
+  PYTHON=python
+fi
+COLD_MODE="$COLD_MODE" BINARY="$BINARY" ITERATIONS="$ITERATIONS" JSON_OUT="$JSON_OUT" "$PYTHON" - <<'EOF'
 import json
 import os
 import shutil
@@ -82,10 +91,10 @@ def stat_block(samples):
 if cold_mode == 1:
   cold_times = []
   warm_times = []
-  workdir = tempfile.mkdtemp(prefix="pi-rs-cold-start-")
+  workdir = tempfile.mkdtemp(prefix="rupi-cold-start-")
   try:
     for i in range(iterations):
-      probe = os.path.join(workdir, f"pi-rs-cold-{i}")
+      probe = os.path.join(workdir, f"rupi-cold-{i}")
       shutil.copyfile(binary, probe)
       os.chmod(probe, 0o755)
 
@@ -108,7 +117,7 @@ if cold_mode == 1:
   warm = stat_block(warm_times)
   delta_median_ms = cold["median"] - warm["median"]
 
-  print("Cold-start benchmark (pi-rs):")
+  print("Cold-start benchmark (rupi):")
   print(f"  Cold startup ({iterations} fresh inodes, first exec each):")
   print(f"    min:          {cold['min']:.2f} ms")
   print(f"    mean:         {cold['mean']:.2f} ms")
@@ -158,7 +167,7 @@ else:
   warm_min_ms = min(warm_times)
   warm_max_ms = max(warm_times)
 
-  print("Startup benchmark (pi-rs):")
+  print("Startup benchmark (rupi):")
   print(f"  Cold startup:   {cold_ms:.2f} ms")
   print(f"  Warm startup ({iterations} runs):")
   print(f"    min:          {warm_min_ms:.2f} ms")

@@ -4,15 +4,15 @@
 //! the likely next consumer is a pipe or a model, and the decisions go to stderr, because
 //! "this file was skipped" is commentary about the listing rather than part of it.
 //!
-//! `pi-rs prompt <name> <args>` is the surface half of Pi's `/name <args>`. It prints the
-//! expanded template and nothing else, so `pi-rs run --prompt "$(pi-rs prompt review)"`
-//! is possible without a model in the loop. `pi-rs interactive` invokes the same
+//! `rupi prompt <name> <args>` is the surface half of Pi's `/name <args>`. It prints the
+//! expanded template and nothing else, so `rupi run --prompt "$(rupi prompt review)"`
+//! is possible without a model in the loop. `rupi interactive` invokes the same
 //! templates from inside a running session: `/name [args]` splits its arguments the way
 //! Pi's editor does (`prompt::parse_arguments`) and sends the expansion as the turn.
 
 use std::path::Path;
 
-use pi_rs_compat::{
+use rupi_compat::{
   prompt::{self, Warning},
   scan::{Discovery, Trust},
 };
@@ -71,7 +71,7 @@ pub fn expand(args: PromptArgs) -> Result<(), String> {
   report(&scan, &discovery);
   let template = scan.named(&args.name).ok_or_else(|| {
     format!(
-      "no prompt template named '{}'; run 'pi-rs prompts' to list them",
+      "no prompt template named '{}'; run 'rupi prompts' to list them",
       args.name
     )
   })?;

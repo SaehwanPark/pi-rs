@@ -32,6 +32,6 @@ message. Empty grep means **`not found`**. If the consts or functions differ fro
 document the mismatch and write the test against real code. Never invent a help const.
 
 Tests-only, in `src/cli.rs`'s existing `mod tests`. ≤3 `read` calls at ≤40 lines; outputs ≤20 lines;
-`cargo test --bin pi-rs` while iterating, `--workspace` once at the end; commit before running cargo.
+`cargo test --bin rupi` while iterating, `--workspace` once at the end; commit before running cargo.
 No ROADMAP tick. No merges, rebases, pushes, PRs; stay in this worktree; `git rev-parse HEAD` before each
 commit — stop and report if it moved without your commit.

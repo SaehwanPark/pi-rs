@@ -1,13 +1,13 @@
-//! `pi-rs trace`: read a session's canonical trace back out of the store.
+//! `rupi trace`: read a session's canonical trace back out of the store.
 //!
 //! The command is read-only. It opens no provider, runs no tool, and creates no
 //! directory, which is why it uses [`Store::new`] rather than [`Store::open`]: asking
 //! what happened must not be able to change what is on disk.
 //!
 //! The transcript goes to stdout because it *is* the answer to this command — the
-//! opposite of `pi-rs run`, where the answer is the assistant's text and the transcript
+//! opposite of `rupi run`, where the answer is the assistant's text and the transcript
 //! is commentary. Metadata about the read (which session, how many entries, whether any
-//! line was damaged) goes to stderr, so `pi-rs trace > session.txt` writes a clean
+//! line was damaged) goes to stderr, so `rupi trace > session.txt` writes a clean
 //! transcript and nothing else.
 
 use std::{
@@ -15,9 +15,9 @@ use std::{
   io::{self, Write},
 };
 
-use pi_rs_core::{RuntimeConfig, SessionId, TraceEntry};
-use pi_rs_store::{ReadReport, Store, TraceJournal, WritePolicy};
-use pi_rs_tui::{
+use rupi_core::{RuntimeConfig, SessionId, TraceEntry};
+use rupi_store::{ReadReport, Store, TraceJournal, WritePolicy};
+use rupi_tui::{
   DiagnosticFilter, NarrowDecoration, Palette, RenderLine, RenderedEntry, Role, TranscriptOptions,
   render_trace, term::Stream,
 };

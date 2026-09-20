@@ -6,9 +6,9 @@
 
 use std::fs;
 
-use pi_rs_compat::scan::{self, Discovery};
-use pi_rs_core::trust::{Risk, TrustDecision, TrustEntry, TrustGate, TrustScope, TrustStore};
-use pi_rs_store::FileTrustStore;
+use rupi_compat::scan::{self, Discovery};
+use rupi_core::trust::{Risk, TrustDecision, TrustEntry, TrustGate, TrustScope, TrustStore};
+use rupi_store::FileTrustStore;
 
 use crate::cli::{TrustAction, TrustArgs};
 
@@ -116,7 +116,7 @@ fn project_scope(project: &std::path::Path) -> Result<TrustScope, String> {
       project.display()
     ));
   }
-  let root = pi_rs_compat::scan::project_root(&project);
+  let root = rupi_compat::scan::project_root(&project);
   let root = fs::canonicalize(&root)
     .map_err(|error| format!("cannot resolve project root '{}': {error}", root.display()))?;
   let root = root
@@ -138,7 +138,7 @@ fn decision_name(decision: TrustDecision) -> &'static str {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use pi_rs_compat::scan::Trust;
+  use rupi_compat::scan::Trust;
 
   #[test]
   fn discovery_uses_durable_grant_and_denial() {

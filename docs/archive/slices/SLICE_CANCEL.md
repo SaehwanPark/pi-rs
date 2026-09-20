@@ -1,9 +1,9 @@
 # Slice: interrupt a running turn
 
-`pi-rs interactive` can only quit. Ctrl-C while a turn is running is a plain SIGINT: the process
+`rupi interactive` can only quit. Ctrl-C while a turn is running is a plain SIGINT: the process
 dies, the closing flush is lost, and the session cannot be used again. The runtime already polls
-a `CancelToken` cooperatively (see the poll sites in `crates/pi-rs-runtime/src/turn.rs` and
-`crates/pi-rs-provider/src/openai.rs`); the token is simply not reachable from a caller — the
+a `CancelToken` cooperatively (see the poll sites in `crates/rupi-runtime/src/turn.rs` and
+`crates/rupi-provider/src/openai.rs`); the token is simply not reachable from a caller — the
 composition root constructs one internally. Make it reachable, then wire the loop.
 
 ## Required
@@ -17,7 +17,7 @@ composition root constructs one internally. Make it reachable, then wire the loo
 5. The canonical trace records the cancellation as a semantic event, not a log line.
 
 ## Constraints
-- No new crate. `pi-rs-tui` imports neither runtime nor store. Keep `src/cli.rs` diffs small.
+- No new crate. `rupi-tui` imports neither runtime nor store. Keep `src/cli.rs` diffs small.
 - Startup path unchanged: `bash bench/startup.sh` must not move.
 - The interrupt decision (idle → quit, running → cancel) must stay a pure tty-free function in
   `src/interactive.rs` and be unit-tested. No test may need a tty.

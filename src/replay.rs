@@ -1,7 +1,7 @@
-//! `pi-rs replay`: deterministic inspection of recorded execution.
+//! `rupi replay`: deterministic inspection of recorded execution.
 //!
 //! This command is deliberately read-only. It parses an existing trace and its optional
-//! semantic session projection, then delegates all state reconstruction to `pi-rs-replay`.
+//! semantic session projection, then delegates all state reconstruction to `rupi-replay`.
 //! No provider, tool, workspace, or store writer is opened.
 
 use std::{
@@ -10,8 +10,8 @@ use std::{
   path::{Path, PathBuf},
 };
 
-use pi_rs_core::{EventId, EventSeq, SessionRecord, TraceEntry};
-use pi_rs_replay::{
+use rupi_core::{EventId, EventSeq, SessionRecord, TraceEntry};
+use rupi_replay::{
   ContinuationComparison, HistoricalBranchPlan, HistoricalTarget, RedactedTraceExportEntry,
   ReplayFilters, ReplayOptions, ReplayReport, ReplayedEvent, replay_trace_with_session,
 };
@@ -30,7 +30,7 @@ struct ReplayCorpus {
 struct ReplayOutput {
   report: ReplayReport,
   #[serde(skip_serializing_if = "Option::is_none")]
-  context: Option<pi_rs_replay::ContextReconstruction>,
+  context: Option<rupi_replay::ContextReconstruction>,
   #[serde(skip_serializing_if = "Option::is_none")]
   branch: Option<HistoricalBranchPlan>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -73,7 +73,7 @@ pub fn execute(args: ReplayArgs) -> Result<(), String> {
   let branch = branch
     .as_ref()
     .map(|target| {
-      pi_rs_replay::plan_historical_branch(&corpus.trace, &corpus.session, target.clone())
+      rupi_replay::plan_historical_branch(&corpus.trace, &corpus.session, target.clone())
     })
     .transpose()
     .map_err(|error| error.to_string())?;
@@ -85,7 +85,7 @@ pub fn execute(args: ReplayArgs) -> Result<(), String> {
       .map(|plan| plan.branch_point.clone())
       .or_else(|| report.events.last().map(|event| event.reference.clone()))
       .ok_or_else(|| "cannot compare an empty replay base".to_string())?;
-    Some(pi_rs_replay::compare_continuations(
+    Some(rupi_replay::compare_continuations(
       base,
       &corpus.trace,
       &other.trace,
@@ -96,7 +96,7 @@ pub fn execute(args: ReplayArgs) -> Result<(), String> {
 
   let exported = args.export.as_ref().map(|path| {
     let selected = selected_entries(&corpus.trace, &report.events);
-    let values = pi_rs_replay::export_redacted_trace(&selected, &ReplayFilters::all());
+    let values = rupi_replay::export_redacted_trace(&selected, &ReplayFilters::all());
     write_export(path, &values)?;
     Ok::<_, String>(values)
   });
@@ -163,7 +163,7 @@ fn read_corpus(path: &Path) -> Result<ReplayCorpus, String> {
   }
 
   // A normal session state file is paired with `<id>.trace.jsonl`. Loading the sibling keeps
-  // `pi-rs replay sessions/<id>.jsonl` useful while still allowing a standalone trace fixture.
+  // `rupi replay sessions/<id>.jsonl` useful while still allowing a standalone trace fixture.
   if trace.is_empty() {
     if let Some(sibling) = trace_sibling(path) {
       if sibling.exists() {
@@ -263,8 +263,8 @@ fn parse_target(value: &str) -> Result<HistoricalTarget, String> {
 fn context_at(
   corpus: &ReplayCorpus,
   target: &HistoricalTarget,
-) -> Result<pi_rs_replay::ContextReconstruction, String> {
-  let plan = pi_rs_replay::plan_historical_branch(&corpus.trace, &corpus.session, target.clone())
+) -> Result<rupi_replay::ContextReconstruction, String> {
+  let plan = rupi_replay::plan_historical_branch(&corpus.trace, &corpus.session, target.clone())
     .map_err(|error| error.to_string())?;
   Ok(plan.context)
 }
@@ -325,16 +325,16 @@ fn write_human(report: &ReplayReport, sequence: bool, timing: bool) -> Result<()
         .unwrap_or("event"),
     );
     match &event.event {
-      pi_rs_core::AgentEvent::ReasoningDelta(delta) => {
+      rupi_core::AgentEvent::ReasoningDelta(delta) => {
         line.push_str(&format!(" [{}] {}", delta.provenance.as_str(), delta.text));
       }
-      pi_rs_core::AgentEvent::AssistantDelta(delta) => line.push_str(&format!(": {}", delta.text)),
-      pi_rs_core::AgentEvent::UserMessage(message) => line.push_str(&format!(": {}", message.text)),
-      pi_rs_core::AgentEvent::ToolRequested(tool) => line.push_str(&format!(" {}", tool.name)),
-      pi_rs_core::AgentEvent::ToolStarted(tool) => line.push_str(&format!(" {}", tool.name)),
-      pi_rs_core::AgentEvent::ToolCompleted(tool) => line.push_str(&format!(" {}", tool.name)),
-      pi_rs_core::AgentEvent::ToolFailed(tool) => line.push_str(&format!(" {}", tool.name)),
-      pi_rs_core::AgentEvent::ToolUnknown(tool) => line.push_str(&format!(" {}", tool.name)),
+      rupi_core::AgentEvent::AssistantDelta(delta) => line.push_str(&format!(": {}", delta.text)),
+      rupi_core::AgentEvent::UserMessage(message) => line.push_str(&format!(": {}", message.text)),
+      rupi_core::AgentEvent::ToolRequested(tool) => line.push_str(&format!(" {}", tool.name)),
+      rupi_core::AgentEvent::ToolStarted(tool) => line.push_str(&format!(" {}", tool.name)),
+      rupi_core::AgentEvent::ToolCompleted(tool) => line.push_str(&format!(" {}", tool.name)),
+      rupi_core::AgentEvent::ToolFailed(tool) => line.push_str(&format!(" {}", tool.name)),
+      rupi_core::AgentEvent::ToolUnknown(tool) => line.push_str(&format!(" {}", tool.name)),
       _ => {}
     }
     if timing {

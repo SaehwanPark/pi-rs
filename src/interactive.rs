@@ -1,6 +1,6 @@
-//! `pi-rs interactive`: one durable session, many turns, one terminal.
+//! `rupi interactive`: one durable session, many turns, one terminal.
 //!
-//! The buffer ([`pi_rs_tui::editor`]), the keymap ([`pi_rs_tui::keys`]), and the
+//! The buffer ([`rupi_tui::editor`]), the keymap ([`rupi_tui::keys`]), and the
 //! transcript renderer already exist. What they deliberately do not contain is the
 //! loop: reading keys, owning raw mode, and deciding whether a keystroke means
 //! "leave" are composition and terminal plumbing, and a crate that renders events
@@ -66,10 +66,10 @@ use crossterm::{
   terminal::{self, Clear, ClearType},
 };
 
-use pi_rs_compat::prompt;
-use pi_rs_core::{CancelToken, TurnStatus};
-use pi_rs_runtime::{TurnError, TurnReport};
-use pi_rs_tui::{
+use rupi_compat::prompt;
+use rupi_core::{CancelToken, TurnStatus};
+use rupi_runtime::{TurnError, TurnReport};
+use rupi_tui::{
   ColorChoice, Editor, Input, Intent, Outcome, Palette, RenderLine, display_width, highlight,
   keys::intent, statusline, style::Role, term, truncate,
 };
@@ -137,7 +137,7 @@ enum Submitted {
   Unknown(String),
 }
 
-/// Which of those one submitted line is. Parsing is [`pi_rs_tui::command`]'s,
+/// Which of those one submitted line is. Parsing is [`rupi_tui::command`]'s,
 /// so `/help x` is help with an argument and `/123` is prose, exactly as the
 /// highlighter already decided while the line was being typed. A name the loop
 /// answers itself outranks a template of the same name: `/quit` quits even when a
@@ -485,7 +485,7 @@ struct Loop {
   /// [`Palette::monochrome`], which emits exactly the bytes this loop wrote before
   /// the classifier was wired in.
   palette: Palette,
-  /// The prompt templates this session loaded, in `pi-rs prompts` order. Builtin
+  /// The prompt templates this session loaded, in `rupi prompts` order. Builtin
   /// commands outrank them, and their names join what Tab completes.
   templates: prompt::Scan,
   /// How many lines the cursor sits below the row the current frame starts on.
@@ -602,7 +602,7 @@ impl Loop {
           "tab         complete the command the caret sits on".to_string(),
         ];
         if !self.templates.templates.is_empty() {
-          lines.push("/<name>     expand a prompt template (pi-rs prompts lists them)".to_string());
+          lines.push("/<name>     expand a prompt template (rupi prompts lists them)".to_string());
         }
         self.write_note(&lines)?;
         Ok(Submitted::Help)
@@ -1098,14 +1098,13 @@ fn segment_row(decoration: &str, line: &str, row: Range<usize>, runs: &[Run]) ->
   out
 }
 
-/// `pi-rs interactive`: a session that holds many turns.
+/// `rupi interactive`: a session that holds many turns.
 pub fn execute(args: InteractiveArgs) -> Result<(), String> {
   if !term::Stream::Stdout.is_terminal() {
     // Checked before anything is opened, so a piped invocation is one clear line
     // rather than a terminal that nobody put back.
     return Err(
-      "interactive needs a terminal on stdout; for one turn in a script use `pi-rs run`"
-        .to_string(),
+      "interactive needs a terminal on stdout; for one turn in a script use `rupi run`".to_string(),
     );
   }
   // The surface is not configurable here. Colour and width come from the terminal
@@ -1119,9 +1118,9 @@ pub fn execute(args: InteractiveArgs) -> Result<(), String> {
     let columns = term::Stream::Stdout.width().unwrap_or(FALLBACK_COLUMNS);
     // Pi loads prompt templates before the editor opens, and so this does: the scan
     // is two small directories. Project locations need trust, and this command has
-    // no trust decision to consult, so — like `pi-rs prompts` without --project —
+    // no trust decision to consult, so — like `rupi prompts` without --project —
     // they are not read.
-    let templates = prompt::discover(&pi_rs_compat::scan::Discovery::new(args.cwd.clone()));
+    let templates = prompt::discover(&rupi_compat::scan::Discovery::new(args.cwd.clone()));
     let result = Loop::new(session.model().to_string(), columns)
       .with_templates(templates)
       .run(session);
@@ -1139,7 +1138,7 @@ fn terminal_failure(error: io::Error) -> String {
 
 #[cfg(unix)]
 pub(crate) mod interrupt {
-  use pi_rs_core::CancelToken;
+  use rupi_core::CancelToken;
   use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
   static ACTIVE_FLAG: AtomicPtr<AtomicBool> = AtomicPtr::new(std::ptr::null_mut());
@@ -1197,7 +1196,7 @@ pub(crate) mod interrupt {
 
 #[cfg(windows)]
 pub(crate) mod interrupt {
-  use pi_rs_core::CancelToken;
+  use rupi_core::CancelToken;
   use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
   const CTRL_C_EVENT: u32 = 0;
@@ -1288,7 +1287,7 @@ pub(crate) mod interrupt {
 
 #[cfg(all(not(unix), not(windows)))]
 pub(crate) mod interrupt {
-  use pi_rs_core::CancelToken;
+  use rupi_core::CancelToken;
 
   pub struct TurnInterruptGuard;
 
@@ -1324,7 +1323,7 @@ mod tests {
           description_from_body: false,
           argument_hint: None,
           path: std::path::PathBuf::from(format!("/prompts/{name}.md")),
-          source: pi_rs_compat::scan::Source::Global,
+          source: rupi_compat::scan::Source::Global,
           body: format!("run the {name} on $@"),
           package: None,
         })
@@ -1847,7 +1846,7 @@ mod tests {
   const FRAMES: [(&str, usize); 9] = [
     ("", 80),
     ("read", 80),
-    ("read crates/pi-rs-tui/src/lib.rs --offset=10", 80),
+    ("read crates/rupi-tui/src/lib.rs --offset=10", 80),
     ("가나다 라마바", 80),
     ("\u{1f41a} build --all", 80),
     ("quote \"unterminated tail", 80),
@@ -1907,7 +1906,7 @@ mod tests {
   /// lines that wrap more than twice.
   const WRAPPING_FRAMES: [(&str, usize); 7] = [
     // One argument, no spaces to break on, longer than the whole terminal.
-    ("read crates/pi-rs-tui/src/interactive.rs", 12),
+    ("read crates/rupi-tui/src/interactive.rs", 12),
     // Two columns a glyph at an odd width: nine columns for glyphs worth two.
     ("가나다라마바사아자차카타", 11),
     ("한글 입력 테스트 입니다", 7),

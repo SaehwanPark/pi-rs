@@ -1,6 +1,6 @@
 # Tools & Sandbox Safety
 
-`pi-rs` includes five core built-in tools for agent coding tasks, designed around strict confinement, bounded output, and approval contracts.
+`rupi` includes five core built-in tools for agent coding tasks, designed around strict confinement, bounded output, and approval contracts.
 
 ---
 
@@ -56,4 +56,4 @@ explicit refusal event, preventing unintended side effects. Enable it only for a
 trusted workspace.
 
 ### The Shell Escape Hatch
-`exec` intentionally spawns a shell process (`sh -c` on Unix) to enable compiler builds, test suites, and git operations. It is not an OS-level sandbox. If running untrusted agent code, execute `pi-rs` within Docker, a VM, or an isolated container sandbox.
+`exec` intentionally spawns a shell process (`sh -c` on Unix) to enable compiler builds, test suites, and git operations. It is not an OS-level sandbox. If running untrusted agent code, execute `rupi` within Docker, a VM, or an isolated container sandbox.

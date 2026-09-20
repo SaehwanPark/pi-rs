@@ -1,11 +1,11 @@
-//! `pi-rs packages` as a process: listing and inspection on stdout, diagnostics on stderr.
+//! `rupi packages` as a process: listing and inspection on stdout, diagnostics on stderr.
 
 use std::{fs, path::Path, process::Command};
 
 use tempfile::TempDir;
 
 fn binary() -> &'static str {
-  env!("CARGO_BIN_EXE_pi-rs")
+  env!("CARGO_BIN_EXE_rupi")
 }
 
 fn fixture_home() -> &'static str {
@@ -24,7 +24,7 @@ fn run(args: &[&str], home: &str, cwd: &str) -> (String, String, bool) {
     .current_dir(Path::new(cwd))
     .env("NO_COLOR", "1")
     .output()
-    .expect("run pi-rs");
+    .expect("run rupi");
   (
     String::from_utf8_lossy(&output.stdout).into_owned(),
     String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -106,7 +106,7 @@ fn packages_show_unknown_package_exits_nonzero() {
 fn packages_help_flag_displays_help() {
   let (stdout, _stderr, success) = run(&["packages", "--help"], fixture_home(), fixture_project());
   assert!(success);
-  assert!(stdout.contains("Usage: pi-rs packages"));
+  assert!(stdout.contains("Usage: rupi packages"));
   assert!(stdout.contains("packages install"));
 }
 

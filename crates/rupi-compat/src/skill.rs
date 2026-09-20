@@ -1,0 +1,1164 @@
+//! Finding Pi-style skills, and saying honestly what was not a skill.
+//!
+//! A skill is a directory with a `SKILL.md`, or in some locations a bare `.md` file
+//! with skill frontmatter. Pi scans several places, warns about what it does not
+//! understand, and loads the rest. This module reproduces that behavior for the two
+//! families Pi documents as file locations -- per-user and per-project -- and reports
+//! every decision it made about a candidate file.
+//!
+//! # Locations, and the order they are read in
+//!
+//! ```text
+//! $HOME/.pi/agent/skills      root *.md files count as individual skills
+//! $HOME/.agents/skills        root *.md files ignored; nested ones in grouping dirs count
+//! <ancestor>/.pi/skills       as above, project family
+//! <ancestor>/.agents/skills   as above, project family
+//! ```
+//!
+//! Ancestors run from `cwd` upward through the git root (or the filesystem root when
+//! `cwd` is not in a repository), nearest first. Scan order matters: a name declared
+//! twice resolves to whoever was found first, and Pi documents first-found-wins, so
+//! the order above and the sorting described below are what make that resolution the
+//! same on every machine rather than whatever `readdir` returned.
+//!
+//! Package `skills/` directories, `package.json` entries, the `skills` array in
+//! settings, and `--skill` paths are other sources in Pi and are not implemented yet.
+//!
+//! # Trust
+//!
+//! Project locations are read only when the caller says the project is trusted. Pi
+//! loads project skills only after the project is trusted, and for good reason: a
+//! skill is instructions for the model, so reading one from an untrusted checkout is
+//! handing that checkout the keyboard. [`Trust`] is an input rather than a filesystem
+//! lookup because `rupi` has no trust decision to consult yet -- whoever grows one
+//! passes its answer here.
+//!
+//! # Bounds
+//!
+//! Directory walks stop at [`MAX_DEPTH`] with a warning. Symbolic links are followed,
+//! because linking in a skill kept elsewhere is a normal way to share one and the trust
+//! decision was already made about the directory holding the link; the depth bound is
+//! what stops a link that points back at an ancestor, and it reports rather than
+//! stopping quietly. A skill's own subdirectories are its resources and are not scanned
+//! for further skills: `references/foo/SKILL.md` inside a skill is a reference, not a
+//! second skill wearing the first one's clothes.
+
+use std::{
+  collections::BTreeSet,
+  fs,
+  path::{Path, PathBuf},
+};
+
+use crate::{
+  frontmatter::{self, Extract},
+  scan::{Discovery, Source, Trust, is_dir, is_file, project_dirs},
+};
+
+/// Longest `name` the Agent Skills standard allows.
+pub const MAX_NAME_CHARS: usize = 64;
+/// Longest `description` the Agent Skills standard allows.
+pub const MAX_DESCRIPTION_CHARS: usize = 1024;
+/// How deep a skill location is walked before the scan gives up and says so.
+pub const MAX_DEPTH: usize = 8;
+
+/// A skill that was loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skill {
+  pub name: String,
+  pub description: String,
+  /// The file it was read from: `SKILL.md`, or a `.md` file in a location that accepts
+  /// them. Relative references inside the skill resolve against its parent directory.
+  pub path: PathBuf,
+  pub source: Source,
+  pub license: Option<String>,
+  pub compatibility: Option<String>,
+  /// `allowed-tools`, split on spaces. Pi calls this experimental; nothing here acts
+  /// on it, it records it so a later authorization step has something to authorize.
+  pub allowed_tools: Vec<String>,
+  /// `disable-model-invocation`. Such a skill never enters the model-facing prompt and
+  /// is reachable only by explicit request.
+  pub disable_model_invocation: bool,
+  /// Name of the package that declared or contained this skill, if loaded from a package.
+  pub package: Option<String>,
+}
+
+/// Something worth telling the operator about a candidate that was not loaded, or was
+/// loaded with a defect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillWarning {
+  /// No `name`, so there is nothing to call the skill by. Not loaded.
+  MissingName { path: PathBuf },
+  /// Pi does not load a declared skill that cannot say what it does, and neither does
+  /// this: the description is the only thing the model sees before deciding to read the
+  /// file, so a skill without one is a skill that is never usable.
+  MissingDescription { path: PathBuf },
+  /// A `---` block that never closed. Not loaded: the body would have been read as
+  /// frontmatter, and a name could then be found anywhere in the file.
+  MalformedFrontmatter { path: PathBuf },
+  /// The name breaks the standard's spelling rules. Loaded anyway, as Pi does.
+  InvalidName {
+    path: PathBuf,
+    name: String,
+    reason: &'static str,
+  },
+  /// Longer than the standard allows. Loaded anyway.
+  NameTooLong { path: PathBuf, name: String },
+  /// Longer than the standard allows. Loaded anyway.
+  DescriptionTooLong { path: PathBuf, name: String },
+  /// Two locations declared one name. The first found was kept, this one was dropped.
+  Duplicate {
+    name: String,
+    kept: PathBuf,
+    ignored: PathBuf,
+  },
+  /// The file exists and could not be read: permissions, or bytes that are not text.
+  Unreadable { path: PathBuf, reason: String },
+  /// The walk stopped at the depth limit, so anything below it went unseen.
+  TooDeep { path: PathBuf },
+}
+
+impl Skill {
+  /// The instructions themselves: the file with its frontmatter block removed.
+  ///
+  /// Read at call time, never during a scan. Pi works the same way — a scan carries
+  /// names and descriptions, and the body is read when a skill is actually used — and
+  /// it is also what the startup rules want: bodies are off the path where the user
+  /// can type. If the file changed after the scan, whatever it says now is what a
+  /// reader gets; `frontmatter::strip` returns the whole text when there is no block
+  /// to remove, which is the honest reading of a file that no longer has one.
+  pub fn body(&self) -> Result<String, SkillBodyError> {
+    let text = std::fs::read_to_string(&self.path).map_err(|error| SkillBodyError {
+      path: self.path.clone(),
+      reason: error.to_string(),
+    })?;
+    Ok(frontmatter::strip(&text).to_string())
+  }
+}
+
+/// A skill body that could not be read at the moment it was asked for.
+///
+/// The scan read the same file successfully; this error is about the file moving or
+/// breaking afterwards, which is why it names the path rather than retrying anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillBodyError {
+  pub path: PathBuf,
+  pub reason: String,
+}
+
+impl std::fmt::Display for SkillBodyError {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      formatter,
+      "cannot read the body of '{}': {}",
+      self.path.display(),
+      self.reason
+    )
+  }
+}
+
+/// What a scan found, and everything it declined.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Scan {
+  pub skills: Vec<Skill>,
+  pub warnings: Vec<SkillWarning>,
+}
+
+impl Scan {
+  /// The kept skill with this name, if one was loaded.
+  pub fn named(&self, name: &str) -> Option<&Skill> {
+    self.skills.iter().find(|skill| skill.name == name)
+  }
+
+  /// The skill-control prompt for this scan; see [`control_prompt`].
+  pub fn control_prompt(&self) -> String {
+    control_prompt(&self.skills)
+  }
+}
+
+/// The skill-control prompt: the block a session adds to its system prompt so the
+/// model knows what skills exist and may load one with the read tool.
+///
+/// Reproduced from Pi's `formatSkillsForPrompt` (the `read` tool variant), including
+/// the XML shape the Agent Skills standard prescribes and the escaping it applies.
+/// Two deliberate differences, both structural rather than textual:
+///
+/// - the separator newlines Pi puts before the block when appending it to a base
+///   prompt are not part of what this returns — the caller joins; and
+/// - `location` is [`Skill::path`], the file the read tool must be given, which is
+///   what Pi's `filePath` is.
+pub fn control_prompt(skills: &[Skill]) -> String {
+  // disable-model-invocation skills are invisible here by definition: the flag says
+  // the model may not decide to load this skill, and a listing is exactly that
+  // decision being offered.
+  let visible: Vec<&Skill> = skills
+    .iter()
+    .filter(|skill| !skill.disable_model_invocation)
+    .collect();
+  if visible.is_empty() {
+    return String::new();
+  }
+  let mut lines = vec![
+    "The following skills provide specialized instructions for specific tasks.".to_string(),
+    "Use the read tool to load a skill's file when the task matches its description."
+      .to_string(),
+    "When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands."
+      .to_string(),
+    String::new(),
+    "<available_skills>".to_string(),
+  ];
+  for skill in visible {
+    lines.push("  <skill>".to_string());
+    lines.push(format!("    <name>{}</name>", escape_xml(&skill.name)));
+    lines.push(format!(
+      "    <description>{}</description>",
+      escape_xml(&skill.description)
+    ));
+    lines.push(format!(
+      "    <location>{}</location>",
+      escape_xml(&skill.path.display().to_string())
+    ));
+    lines.push("  </skill>".to_string());
+  }
+  lines.push("</available_skills>".to_string());
+  lines.join("\n")
+}
+
+/// The five entities Pi escapes, and nothing else.
+fn escape_xml(text: &str) -> String {
+  text
+    .replace('&', "&amp;")
+    .replace('<', "&lt;")
+    .replace('>', "&gt;")
+    .replace('"', "&quot;")
+    .replace('\'', "&apos;")
+}
+
+/// Options for skill discovery, including explicit skill paths.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillOptions {
+  /// Explicit skill paths (directories with `SKILL.md` or single `.md` files)
+  /// provided on the command line via `--skill <path>`.
+  pub extra_skills: Vec<PathBuf>,
+}
+
+/// Scan the documented locations.
+pub fn discover(discovery: &Discovery) -> Scan {
+  discover_with_options(discovery, &SkillOptions::default())
+}
+
+/// Scan the documented locations plus explicit options.
+pub fn discover_with_options(discovery: &Discovery, options: &SkillOptions) -> Scan {
+  let mut scanner = Scanner::default();
+
+  // 1. Explicit skills (--skill <path>) take highest priority
+  for path in &options.extra_skills {
+    scanner.explicit_path(path);
+  }
+
+  // 2. Global standalone skills:
+  //    $HOME/.pi/agent/skills
+  //    $HOME/.agents/skills
+  if let Some(home) = &discovery.home {
+    scanner.location(
+      &home.join(".pi/agent/skills"),
+      Source::Global,
+      Family::DotPi,
+    );
+    scanner.location(&home.join(".agents/skills"), Source::Global, Family::Agents);
+  }
+
+  // 3. Global package skills
+  let package_scan = crate::package::discover(discovery);
+  for pkg in &package_scan.packages {
+    if pkg.source == Source::Global {
+      scanner.package_skills(pkg);
+    }
+  }
+
+  // 4. Project standalone skills (trusted only)
+  //    <ancestor>/.pi/skills
+  //    <ancestor>/.agents/skills
+  if discovery.trust == Trust::Trusted {
+    for project in project_dirs(&discovery.cwd) {
+      scanner.location(&project.join(".pi/skills"), Source::Project, Family::DotPi);
+      scanner.location(
+        &project.join(".agents/skills"),
+        Source::Project,
+        Family::Agents,
+      );
+    }
+
+    // 5. Project package skills (trusted only)
+    for pkg in &package_scan.packages {
+      if pkg.source == Source::Project {
+        scanner.package_skills(pkg);
+      }
+    }
+  }
+
+  scanner.finish()
+}
+
+/// How a file is treated inside one location family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+  /// `.pi/skills`, `~/.pi/agent/skills`: root `.md` files are individual skills.
+  DotPi,
+  /// `.agents/skills`, `~/.agents/skills`: shared with other tools, so a loose `.md` at
+  /// the root is a note, and only files inside a grouping directory are candidates.
+  Agents,
+}
+
+impl Family {
+  /// Whether a `.md` file at this depth is a candidate.
+  fn accepts(&self, at_root: bool) -> bool {
+    match self {
+      Self::DotPi => at_root,
+      Self::Agents => !at_root,
+    }
+  }
+}
+
+#[derive(Default)]
+struct Scanner {
+  skills: Vec<Skill>,
+  warnings: Vec<SkillWarning>,
+  names: BTreeSet<String>,
+}
+
+impl Scanner {
+  fn location(&mut self, root: &Path, source: Source, family: Family) {
+    if root.is_dir() {
+      self.walk(root, true, 0, source, family, None);
+    }
+  }
+
+  fn package_skills(&mut self, pkg: &crate::package::Package) {
+    for loc in pkg.skill_locations() {
+      let kind = loc.metadata().ok();
+      if is_dir(&kind) {
+        let skill_md = loc.join("SKILL.md");
+        if skill_md.is_file() {
+          self.collect(&skill_md, pkg.source, Some(&pkg.name));
+        } else {
+          self.walk(&loc, true, 0, pkg.source, Family::DotPi, Some(&pkg.name));
+        }
+      } else if is_file(&kind) {
+        self.collect(&loc, pkg.source, Some(&pkg.name));
+      } else {
+        self.warnings.push(SkillWarning::Unreadable {
+          path: loc,
+          reason: "declared package skill path does not exist".to_string(),
+        });
+      }
+    }
+  }
+
+  fn explicit_path(&mut self, path: &Path) {
+    let kind = path.metadata().ok();
+    if is_dir(&kind) {
+      let skill_md = path.join("SKILL.md");
+      if skill_md.is_file() {
+        self.collect(&skill_md, Source::Global, None);
+      } else {
+        self.walk(path, true, 0, Source::Global, Family::DotPi, None);
+      }
+    } else if is_file(&kind) {
+      self.collect(path, Source::Global, None);
+    } else {
+      self.warnings.push(SkillWarning::Unreadable {
+        path: path.to_path_buf(),
+        reason: "file or directory does not exist".to_string(),
+      });
+    }
+  }
+
+  fn walk(
+    &mut self,
+    dir: &Path,
+    at_root: bool,
+    depth: usize,
+    source: Source,
+    family: Family,
+    package: Option<&str>,
+  ) {
+    if depth > MAX_DEPTH {
+      self.warnings.push(SkillWarning::TooDeep {
+        path: dir.to_path_buf(),
+      });
+      return;
+    }
+    let entries = match fs::read_dir(dir) {
+      Ok(entries) => entries,
+      Err(error) => {
+        self.warnings.push(SkillWarning::Unreadable {
+          path: dir.to_path_buf(),
+          reason: error.to_string(),
+        });
+        return;
+      }
+    };
+    // Directory order is whatever the filesystem returns. Sorting makes first-found
+    // collision resolution -- and therefore every test -- reproducible.
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+      let path = entry.path();
+      // `metadata`, not the directory entry's file type: this one follows symbolic
+      // links, so a skill kept elsewhere and linked in is a skill. Refusing links would
+      // break the normal way to share a skill between checkouts, and the trust decision
+      // was already made about the directory holding the link. A link that points back
+      // at an ancestor is a cycle, and the depth bound is what stops the walk -- and
+      // says so -- rather than a visited set this scan does not need for any other
+      // reason. Still only regular files and directories are read: `is_file` is false
+      // for a fifo, and opening one would block this scan forever.
+      let kind = path.metadata().ok();
+      if is_dir(&kind) {
+        let skill_md = path.join("SKILL.md");
+        if skill_md.is_file() {
+          // A skill's own subdirectories hold its scripts and references.
+          self.collect(&skill_md, source, package);
+        } else {
+          self.walk(&path, false, depth + 1, source, family, package);
+        }
+      } else if is_file(&kind) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // `SKILL.md` is the canonical skill file and counts wherever it appears; the
+        // family rule decides what any other `.md` file is.
+        if name == "SKILL.md" || (name.ends_with(".md") && family.accepts(at_root)) {
+          self.collect(&path, source, package);
+        }
+      }
+    }
+  }
+
+  fn collect(&mut self, path: &Path, source: Source, package: Option<&str>) {
+    let text = match fs::read_to_string(path) {
+      Ok(text) => text,
+      Err(error) => {
+        self.warnings.push(SkillWarning::Unreadable {
+          path: path.to_path_buf(),
+          reason: error.to_string(),
+        });
+        return;
+      }
+    };
+    let frontmatter = match frontmatter::extract(&text) {
+      Extract::Found(frontmatter) => frontmatter,
+      // Most `.md` files in a skills directory are documentation, and Pi ignores them.
+      Extract::Absent => return,
+      Extract::Malformed(_) => {
+        self.warnings.push(SkillWarning::MalformedFrontmatter {
+          path: path.to_path_buf(),
+        });
+        return;
+      }
+    };
+    let name = frontmatter.get("name").map(str::trim).unwrap_or("");
+    if name.is_empty() {
+      self.warnings.push(SkillWarning::MissingName {
+        path: path.to_path_buf(),
+      });
+      return;
+    }
+    // Pi warns about a name that breaks the standard and loads the skill anyway. A name
+    // that is *absent* is different: naming it for the author would put a name in front
+    // of the user that nobody wrote, and `/skill:<name>` is spelled by hand.
+    self.check_name(path, name);
+    let description = frontmatter.get("description").map(str::trim).unwrap_or("");
+    if description.is_empty() {
+      self.warnings.push(SkillWarning::MissingDescription {
+        path: path.to_path_buf(),
+      });
+      return;
+    }
+    if description.chars().count() > MAX_DESCRIPTION_CHARS {
+      self.warnings.push(SkillWarning::DescriptionTooLong {
+        path: path.to_path_buf(),
+        name: name.to_string(),
+      });
+    }
+    if !self.names.insert(name.to_string()) {
+      let kept = self
+        .skills
+        .iter()
+        .find(|skill| skill.name == name)
+        .map(|skill| skill.path.clone())
+        .unwrap_or_default();
+      self.warnings.push(SkillWarning::Duplicate {
+        name: name.to_string(),
+        kept,
+        ignored: path.to_path_buf(),
+      });
+      return;
+    }
+    self.skills.push(Skill {
+      name: name.to_string(),
+      description: description.to_string(),
+      path: path.to_path_buf(),
+      source,
+      license: nonempty(frontmatter.get("license")),
+      compatibility: nonempty(frontmatter.get("compatibility")),
+      allowed_tools: frontmatter
+        .get("allowed-tools")
+        .map(|value| value.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default(),
+      disable_model_invocation: frontmatter.is_true("disable-model-invocation"),
+      package: package.map(str::to_string),
+    });
+  }
+
+  /// Warnings about a name, without rejecting it.
+  fn check_name(&mut self, path: &Path, name: &str) {
+    if name.chars().count() > MAX_NAME_CHARS {
+      self.warnings.push(SkillWarning::NameTooLong {
+        path: path.to_path_buf(),
+        name: name.to_string(),
+      });
+      return;
+    }
+    let reason = if !name
+      .chars()
+      .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    {
+      Some("lowercase letters, digits and hyphens only")
+    } else if name.starts_with('-') || name.ends_with('-') {
+      Some("must not start or end with a hyphen")
+    } else if name.contains("--") {
+      Some("must not contain consecutive hyphens")
+    } else {
+      None
+    };
+    if let Some(reason) = reason {
+      self.warnings.push(SkillWarning::InvalidName {
+        path: path.to_path_buf(),
+        name: name.to_string(),
+        reason,
+      });
+    }
+  }
+
+  fn finish(self) -> Scan {
+    Scan {
+      skills: self.skills,
+      warnings: self.warnings,
+    }
+  }
+}
+
+fn nonempty(value: Option<&str>) -> Option<String> {
+  value
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn slash_path(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+  }
+
+  /// A skill file written where the caller says, named after its directory.
+  fn skill_file(dir: &Path, file: &str, name: &str, description: &str) -> PathBuf {
+    let path = dir.join(file);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+      &path,
+      format!("---\nname: {name}\ndescription: {description}\n---\n\nBody\n"),
+    )
+    .unwrap();
+    path
+  }
+
+  /// A skill that only an explicit request may reach.
+  fn skill_file_hidden(dir: &Path, file: &str, name: &str, description: &str) -> PathBuf {
+    let path = dir.join(file);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+      &path,
+      format!("---\nname: {name}\ndescription: {description}\ndisable-model-invocation: true\n---\n\nBody\n"),
+    )
+    .unwrap();
+    path
+  }
+
+  /// A scenario with its own fake `$HOME`, its own project, and no shared state.
+  struct Fixture {
+    /// The scenario's root. Held so the directories outlive the scan.
+    _root: tempfile::TempDir,
+    home: PathBuf,
+    project: PathBuf,
+  }
+
+  impl Fixture {
+    fn new() -> Self {
+      let temp = tempfile::TempDir::new().unwrap();
+      let home = temp.path().join("home");
+      let project = temp.path().join("project");
+      fs::create_dir_all(&home).unwrap();
+      fs::create_dir_all(&project).unwrap();
+      Self {
+        _root: temp,
+        home,
+        project,
+      }
+    }
+
+    fn discovery(&self) -> Discovery {
+      Discovery {
+        home: Some(self.home.clone()),
+        cwd: self.project.clone(),
+        trust: Trust::Untrusted,
+      }
+    }
+  }
+
+  #[test]
+  fn a_directory_with_a_skill_md_is_a_skill() {
+    let fixture = Fixture::new();
+    skill_file(
+      &fixture.home.join(".agents/skills/pdf-tools"),
+      "SKILL.md",
+      "pdf-tools",
+      "Extracts text from PDFs.",
+    );
+    let scan = discover(&fixture.discovery());
+    let skill = scan.named("pdf-tools").expect("skill loaded");
+    assert_eq!(skill.source, Source::Global);
+    assert!(skill.path.ends_with(".agents/skills/pdf-tools/SKILL.md"));
+    assert!(scan.warnings.is_empty(), "{:?}", scan.warnings);
+  }
+
+  #[test]
+  fn the_dot_pi_family_takes_root_markdown_files_the_agents_family_does_not() {
+    let fixture = Fixture::new();
+    skill_file(
+      &fixture.home.join(".pi/agent/skills"),
+      "loose.md",
+      "dot-pi-loose",
+      "A root file in a .pi location.",
+    );
+    skill_file(
+      &fixture.home.join(".agents/skills"),
+      "loose.md",
+      "agents-loose",
+      "A root file in a shared location.",
+    );
+    let scan = discover(&fixture.discovery());
+    assert!(
+      scan.named("dot-pi-loose").is_some(),
+      "root files count in .pi"
+    );
+    assert!(
+      scan.named("agents-loose").is_none(),
+      "a loose note at the root of a shared directory is not a skill: {:?}",
+      scan.skills
+    );
+    // It is skipped without comment, exactly as Pi skips it.
+    assert!(scan.warnings.is_empty(), "{:?}", scan.warnings);
+  }
+
+  #[test]
+  fn a_grouping_directory_holds_skills_for_the_shared_family() {
+    let fixture = Fixture::new();
+    skill_file(
+      &fixture.home.join(".agents/skills/team-tools"),
+      "notes.md",
+      "team-notes",
+      "Notes-shaped skill inside a grouping directory.",
+    );
+    let scan = discover(&fixture.discovery());
+    assert!(scan.named("team-notes").is_some(), "{:?}", scan.skills);
+  }
+
+  #[test]
+  fn documentation_inside_a_skill_is_not_a_second_skill() {
+    let fixture = Fixture::new();
+    let skill = fixture.home.join(".agents/skills/pdf-tools");
+    skill_file(&skill, "SKILL.md", "pdf-tools", "Extracts text from PDFs.");
+    skill_file(
+      &skill.join("references"),
+      "api.md",
+      "api-reference",
+      "Looks like a skill, is a reference.",
+    );
+    let scan = discover(&fixture.discovery());
+    assert_eq!(scan.skills.len(), 1, "{:?}", scan.skills);
+    assert!(scan.named("api-reference").is_none());
+  }
+
+  #[test]
+  fn prose_without_frontmatter_is_ignored_in_silence() {
+    let fixture = Fixture::new();
+    let readme = fixture.home.join(".agents/skills/README.md");
+    fs::create_dir_all(readme.parent().unwrap()).unwrap();
+    fs::write(&readme, "# Skills here\n\nNothing to load.\n").unwrap();
+    let scan = discover(&fixture.discovery());
+    assert!(scan.skills.is_empty());
+    assert!(scan.warnings.is_empty(), "{:?}", scan.warnings);
+  }
+
+  #[test]
+  fn a_project_skill_is_read_only_when_the_project_is_trusted() {
+    let fixture = Fixture::new();
+    skill_file(
+      &fixture.project.join(".agents/skills/repo-helper"),
+      "SKILL.md",
+      "repo-helper",
+      "Helps in this repo.",
+    );
+    let untrusted = discover(&fixture.discovery());
+    assert!(untrusted.skills.is_empty(), "{:?}", untrusted.skills);
+    let discovery = fixture.discovery().trusted();
+    let trusted = discover(&discovery);
+    let skill = trusted.named("repo-helper").expect("trusted project skill");
+    assert_eq!(skill.source, Source::Project);
+  }
+
+  #[test]
+  fn ancestors_are_read_up_to_the_git_root_and_no_further() {
+    let fixture = Fixture::new();
+    let outer = fixture.project.join("outer");
+    let inner = outer.join("inner");
+    fs::create_dir_all(inner.join(".git")).unwrap();
+    skill_file(
+      &inner.join(".agents/skills/inner-helper"),
+      "SKILL.md",
+      "inner-helper",
+      "Inside the repository.",
+    );
+    skill_file(
+      &outer.join(".agents/skills/outer-helper"),
+      "SKILL.md",
+      "outer-helper",
+      "Outside the repository.",
+    );
+    let mut discovery = fixture.discovery();
+    discovery.cwd = inner;
+    discovery.trust = Trust::Trusted;
+    let scan = discover(&discovery);
+    assert!(scan.named("inner-helper").is_some(), "{:?}", scan.skills);
+    assert!(
+      scan.named("outer-helper").is_none(),
+      "the repository boundary ends the walk: {:?}",
+      scan.skills
+    );
+  }
+
+  #[test]
+  fn the_first_skill_to_claim_a_name_keeps_it() {
+    let fixture = Fixture::new();
+    let kept = fixture.home.join(".pi/agent/skills/clash.md");
+    fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    fs::write(&kept, "---\nname: clash\ndescription: Global first.\n---\n").unwrap();
+    skill_file(
+      &fixture.home.join(".agents/skills/clash"),
+      "SKILL.md",
+      "clash",
+      "Same name, later location.",
+    );
+    let scan = discover(&fixture.discovery());
+    assert_eq!(scan.skills.len(), 1);
+    assert_eq!(
+      scan.warnings,
+      vec![SkillWarning::Duplicate {
+        name: "clash".into(),
+        kept,
+        ignored: fixture.home.join(".agents/skills/clash/SKILL.md"),
+      }]
+    );
+  }
+
+  #[test]
+  fn the_depth_limit_is_a_warning_not_silence() {
+    let fixture = Fixture::new();
+    let mut deep = fixture.home.join(".agents/skills");
+    for level in 0..=MAX_DEPTH {
+      deep = deep.join(format!("g{level}"));
+    }
+    skill_file(&deep, "buried.md", "buried", "Below the depth limit.");
+    let scan = discover(&fixture.discovery());
+    assert!(scan.skills.is_empty(), "{:?}", scan.skills);
+    assert!(
+      matches!(&scan.warnings[..], [SkillWarning::TooDeep { .. }]),
+      "{:?}",
+      scan.warnings
+    );
+  }
+
+  #[test]
+  fn a_skill_without_a_description_is_not_loaded_and_says_why() {
+    let fixture = Fixture::new();
+    let path = fixture.home.join(".agents/skills/quiet/SKILL.md");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, "---\nname: quiet\n---\n\nNo description.\n").unwrap();
+    let scan = discover(&fixture.discovery());
+    assert!(scan.skills.is_empty());
+    assert_eq!(
+      scan.warnings,
+      vec![SkillWarning::MissingDescription { path }]
+    );
+  }
+
+  #[test]
+  fn a_name_that_breaks_the_standard_loads_with_a_warning() {
+    let fixture = Fixture::new();
+    let path = fixture.home.join(".agents/skills/bad/SKILL.md");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+      &path,
+      "---\nname: PDF-Processing\ndescription: Badly named.\n---\n",
+    )
+    .unwrap();
+    let scan = discover(&fixture.discovery());
+    assert!(
+      scan.named("PDF-Processing").is_some(),
+      "warn, do not reject"
+    );
+    assert!(
+      matches!(&scan.warnings[..],
+        [SkillWarning::InvalidName { reason, .. }]
+          if reason == &"lowercase letters, digits and hyphens only"),
+      "{:?}",
+      scan.warnings
+    );
+  }
+
+  #[test]
+  fn an_open_frontmatter_block_is_reported() {
+    let fixture = Fixture::new();
+    let path = fixture.home.join(".agents/skills/broken/SKILL.md");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, "---\nname: broken\ndescription: never closes\n").unwrap();
+    let scan = discover(&fixture.discovery());
+    assert_eq!(
+      scan.warnings,
+      vec![SkillWarning::MalformedFrontmatter { path }]
+    );
+  }
+
+  #[test]
+  fn an_oversized_description_warns_and_loads() {
+    let fixture = Fixture::new();
+    let long = "x".repeat(MAX_DESCRIPTION_CHARS + 1);
+    skill_file(
+      &fixture.home.join(".agents/skills/wordy"),
+      "SKILL.md",
+      "wordy",
+      &long,
+    );
+    let scan = discover(&fixture.discovery());
+    assert!(scan.named("wordy").is_some());
+    assert!(matches!(
+      &scan.warnings[..],
+      [SkillWarning::DescriptionTooLong { .. }]
+    ));
+  }
+
+  #[test]
+  fn the_optional_fields_are_recorded_rather_than_dropped() {
+    let fixture = Fixture::new();
+    let path = fixture.home.join(".agents/skills/private/SKILL.md");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+      &path,
+      "---\nname: private\ndescription: Only on request.\ndisable-model-invocation: true\nlicense: MIT\nallowed-tools: read grep\n---\n",
+    )
+    .unwrap();
+    let scan = discover(&fixture.discovery());
+    let skill = scan.named("private").expect("loaded");
+    assert!(skill.disable_model_invocation);
+    assert_eq!(skill.license.as_deref(), Some("MIT"));
+    assert_eq!(skill.allowed_tools, vec!["read", "grep"]);
+  }
+
+  #[test]
+  fn a_missing_home_is_not_a_failure() {
+    let fixture = Fixture::new();
+    let mut discovery = fixture.discovery();
+    discovery.home = None;
+    let scan = discover(&discovery);
+    assert!(scan.skills.is_empty());
+    assert!(scan.warnings.is_empty(), "{:?}", scan.warnings);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn a_linked_skill_is_a_skill() {
+    // The normal way to share one skill between checkouts: keep it somewhere else and
+    // link it into the location. Refusing links would silently lose it.
+    let fixture = Fixture::new();
+    let elsewhere = fixture._root.path().join("shared/pdf-tools");
+    skill_file(
+      &elsewhere,
+      "SKILL.md",
+      "pdf-tools",
+      "Lives elsewhere, linked in.",
+    );
+    let linked = fixture.home.join(".agents/skills/pdf");
+    fs::create_dir_all(linked.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &linked).expect("symlink");
+    let scan = discover(&fixture.discovery());
+    assert!(scan.named("pdf-tools").is_some(), "{:?}", scan.skills);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn a_link_that_points_at_its_own_ancestor_terminates_with_a_warning() {
+    let fixture = Fixture::new();
+    let loop_dir = fixture.home.join(".agents/skills/loop");
+    skill_file(
+      &loop_dir.join("real"),
+      "SKILL.md",
+      "real",
+      "Found before the loop.",
+    );
+    std::os::unix::fs::symlink(&loop_dir, loop_dir.join("self")).expect("symlink");
+    let scan = discover(&fixture.discovery());
+    // Reaching a fixed point is the property; the warning is how the operator learns the
+    // walk stopped rather than finding nothing.
+    assert!(scan.named("real").is_some(), "{:?}", scan.skills);
+    assert!(
+      scan
+        .warnings
+        .iter()
+        .any(|warning| matches!(warning, SkillWarning::TooDeep { .. })),
+      "{:?}",
+      scan.warnings
+    );
+  }
+
+  #[test]
+  fn the_control_prompt_lists_the_body_of_a_skill_as_its_location() {
+    let fixture = Fixture::new();
+    let path = skill_file(
+      &fixture.home.join(".agents/skills/pdf-tools"),
+      "SKILL.md",
+      "pdf-tools",
+      "Extracts text from PDFs.",
+    );
+    let scan = discover(&fixture.discovery());
+    let prompt = scan.control_prompt();
+    // The three sentences a model needs before it can decide to load anything, then the
+    // entry per skill. Pi emits exactly this shape; the sentences are pinned with it.
+    for expected in [
+      "The following skills provide specialized instructions for specific tasks.",
+      "Use the read tool to load a skill's file when the task matches its description.",
+      "<available_skills>",
+      "<name>pdf-tools</name>",
+      "<description>Extracts text from PDFs.</description>",
+      "</available_skills>",
+    ] {
+      assert!(prompt.contains(expected), "missing '{expected}':\n{prompt}");
+    }
+    let normalized_prompt = prompt.replace('\\', "/");
+    assert!(
+      normalized_prompt.contains(&format!("<location>{}</location>", slash_path(&path))),
+      "the model is told to read a file, so it has to be given the one path that works:\n{prompt}"
+    );
+    assert!(!prompt.starts_with('\n'), "the caller joins:\n{prompt}");
+  }
+
+  #[test]
+  fn a_skill_the_model_may_not_invoke_is_not_offered_to_it() {
+    let fixture = Fixture::new();
+    skill_file(
+      &fixture.home.join(".agents/skills/visible"),
+      "SKILL.md",
+      "visible",
+      "Always offered.",
+    );
+    skill_file_hidden(
+      &fixture.home.join(".agents/skills/private"),
+      "SKILL.md",
+      "private",
+      "Only on explicit request.",
+    );
+    let scan = discover(&fixture.discovery());
+    assert!(scan.named("private").is_some(), "loaded, just not offered");
+    let prompt = scan.control_prompt();
+    assert!(prompt.contains("<name>visible</name>"), "{prompt}");
+    assert!(
+      !prompt.contains("private"),
+      "disable-model-invocation means the model never sees the name either:\n{prompt}"
+    );
+  }
+
+  #[test]
+  fn a_scan_with_nothing_to_offer_offers_no_block() {
+    // An empty block is how a caller learns there is no reason to add a system prompt at
+    // all, so this is a contract rather than an edge case.
+    let fixture = Fixture::new();
+    assert_eq!(discover(&fixture.discovery()).control_prompt(), "");
+    let hidden_only = {
+      let mut scan = discover(&fixture.discovery());
+      scan.skills = vec![Skill {
+        name: "private".to_string(),
+        description: "Only on explicit request.".to_string(),
+        path: PathBuf::from("/home/me/.agents/skills/private/SKILL.md"),
+        source: Source::Global,
+        license: None,
+        compatibility: None,
+        allowed_tools: Vec::new(),
+        disable_model_invocation: true,
+        package: None,
+      }];
+      scan
+    };
+    assert_eq!(hidden_only.control_prompt(), "");
+  }
+
+  #[test]
+  fn the_five_xml_entities_pi_escapes_are_the_five_escaped_here() {
+    let skill = Skill {
+      name: "a&b".to_string(),
+      description: "Reads <xml> and \"quotes\" or 'apostrophes'".to_string(),
+      path: PathBuf::from("/tmp/SKILL.md"),
+      source: Source::Global,
+      license: None,
+      compatibility: None,
+      allowed_tools: Vec::new(),
+      disable_model_invocation: false,
+      package: None,
+    };
+    let prompt = control_prompt(&[skill]);
+    assert!(prompt.contains("<name>a&amp;b</name>"), "{prompt}");
+    assert!(
+      prompt
+        .contains("<description>Reads &lt;xml&gt; and &quot;quotes&quot; or &apos;apostrophes&apos;</description>"),
+      "{prompt}"
+    );
+  }
+
+  #[test]
+  fn a_skill_body_is_the_file_with_its_frontmatter_removed() {
+    let fixture = Fixture::new();
+    let fixture_path = skill_file(
+      &fixture.home.join(".agents/skills/pdf-tools"),
+      "SKILL.md",
+      "pdf-tools",
+      "Extracts text from PDFs.",
+    );
+    let scan = discover(&fixture.discovery());
+    let skill = scan.named("pdf-tools").expect("skill loaded");
+    assert_eq!(fixture_path, skill.path);
+    assert_eq!(skill.body().expect("body reads"), "Body\n");
+  }
+
+  #[test]
+  fn a_body_that_cannot_be_read_names_the_file() {
+    let fixture = Fixture::new();
+    let path = skill_file(
+      &fixture.home.join(".agents/skills/pdf-tools"),
+      "SKILL.md",
+      "pdf-tools",
+      "Extracts text from PDFs.",
+    );
+    let scan = discover(&fixture.discovery());
+    let skill = scan.named("pdf-tools").expect("skill loaded");
+    fs::remove_file(&path).expect("remove the file after the scan");
+    let error = skill.body().expect_err("a vanished body is an error");
+    assert!(
+      error.to_string().contains("pdf-tools"),
+      "the error has to name the skill whose body went missing: {error}"
+    );
+  }
+
+  #[test]
+  fn package_skills_are_discovered_from_global_packages() {
+    let fixture = Fixture::new();
+    let pkg_dir = fixture.home.join(".pi/packages/pack-a");
+    fs::create_dir_all(pkg_dir.join("skills/skill-from-pack")).expect("create pkg skill dir");
+    fs::write(
+      pkg_dir.join("package.json"),
+      r#"{"name": "pack-a", "pi": {"skills": ["skills/"]}}"#,
+    )
+    .expect("write package.json");
+    fs::write(
+      pkg_dir.join("skills/skill-from-pack/SKILL.md"),
+      "---\nname: skill-from-pack\ndescription: A package skill.\n---\nBody\n",
+    )
+    .expect("write SKILL.md");
+
+    let scan = discover(&fixture.discovery());
+    let skill = scan.named("skill-from-pack").expect("pkg skill found");
+    assert_eq!(skill.source, Source::Global);
+    assert_eq!(skill.package.as_deref(), Some("pack-a"));
+    assert_eq!(skill.description, "A package skill.");
+  }
+
+  #[test]
+  fn conventional_package_skill_md_is_discovered() {
+    let fixture = Fixture::new();
+    let pkg_dir = fixture.home.join(".pi/packages/pack-single");
+    fs::create_dir_all(&pkg_dir).expect("create pkg dir");
+    fs::write(
+      pkg_dir.join("package.json"),
+      r#"{"name": "pack-single", "version": "1.0.0"}"#,
+    )
+    .expect("write package.json");
+    fs::write(
+      pkg_dir.join("SKILL.md"),
+      "---\nname: single-skill\ndescription: Single conventional skill.\n---\nBody\n",
+    )
+    .expect("write SKILL.md");
+
+    let scan = discover(&fixture.discovery());
+    let skill = scan.named("single-skill").expect("single skill found");
+    assert_eq!(skill.source, Source::Global);
+    assert_eq!(skill.package.as_deref(), Some("pack-single"));
+  }
+
+  #[test]
+  fn project_package_skills_are_gated_by_trust() {
+    let fixture = Fixture::new();
+    let pkg_dir = fixture.project.join(".pi/packages/proj-pack");
+    fs::create_dir_all(pkg_dir.join("skills/proj-skill")).expect("create proj pkg dir");
+    fs::write(
+      pkg_dir.join("package.json"),
+      r#"{"name": "proj-pack", "pi": {"skills": ["skills/"]}}"#,
+    )
+    .expect("write package.json");
+    fs::write(
+      pkg_dir.join("skills/proj-skill/SKILL.md"),
+      "---\nname: proj-skill\ndescription: Project package skill.\n---\nBody\n",
+    )
+    .expect("write SKILL.md");
+
+    let untrusted = discover(&fixture.discovery());
+    assert!(
+      untrusted.named("proj-skill").is_none(),
+      "untrusted project package skill must not be read"
+    );
+
+    let trusted = discover(&fixture.discovery().trusted());
+    let skill = trusted
+      .named("proj-skill")
+      .expect("trusted pkg skill found");
+    assert_eq!(skill.source, Source::Project);
+    assert_eq!(skill.package.as_deref(), Some("proj-pack"));
+  }
+
+  #[test]
+  fn explicit_skill_options_take_precedence() {
+    let fixture = Fixture::new();
+    let extra_dir = fixture.project.join("custom-skill");
+    fs::create_dir_all(&extra_dir).expect("create extra skill dir");
+    fs::write(
+      extra_dir.join("SKILL.md"),
+      "---\nname: custom\ndescription: Explicit custom skill.\n---\nBody\n",
+    )
+    .expect("write custom SKILL.md");
+
+    let options = SkillOptions {
+      extra_skills: vec![extra_dir.join("SKILL.md")],
+    };
+    let scan = discover_with_options(&fixture.discovery(), &options);
+    let skill = scan.named("custom").expect("explicit skill found");
+    assert_eq!(skill.source, Source::Global);
+    assert_eq!(skill.package, None);
+  }
+}

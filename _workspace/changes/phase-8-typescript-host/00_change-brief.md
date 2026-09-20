@@ -11,8 +11,8 @@ completion.
 
 ## Owned paths
 
-- `crates/pi-rs-extension/` (new optional host/protocol/tool adapter crate)
-- `crates/pi-rs-compat/` extension surface diagnostics and package status
+- `crates/rupi-extension/` (new optional host/protocol/tool adapter crate)
+- `crates/rupi-compat/` extension surface diagnostics and package status
 - `tests/compat/extensions/` and focused integration tests
 - root workspace wiring and Phase 8 documentation/ROADMAP evidence
 

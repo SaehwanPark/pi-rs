@@ -9,7 +9,7 @@ A previous run died twice on context while trying to *review* ~295 lines of high
    function(s) the wiring added. Read at most 40 lines around one of them.
 2. Add a table-driven test **in the existing test module of `src/interactive.rs`** asserting, for each
    input: the styled path's plain text equals the input, and its rendered display width equals
-   `pi_rs_tui::width::display_width(input)` (use whatever width helper the file already uses — grep for
+   `rupi_tui::width::display_width(input)` (use whatever width helper the file already uses — grep for
    it, do not add one). Table must include: `"status"`, `"status --all"`, a double-quoted argument with
    a space, an unterminated quote `"unterminated`, a CJK argument, an emoji argument, leading whitespace.
 3. Add one test that the no-colour path yields the same characters as the plain path.
@@ -20,6 +20,6 @@ A previous run died twice on context while trying to *review* ~295 lines of high
 ## Limits
 
 At most **three** `read` calls, ≤40 lines each; one grep per file `| head -20`; output ≤15 lines;
-`cargo test --bin pi-rs` only, never `--workspace`. Commit before running cargo. No merges, rebases,
+`cargo test --bin rupi` only, never `--workspace`. Commit before running cargo. No merges, rebases,
 pushes, PRs; stay in this worktree. `git rev-parse HEAD` before each commit — if it moved without your
 commit, stop and report.

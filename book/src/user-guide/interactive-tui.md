@@ -1,14 +1,14 @@
 # Interactive TUI
 
-`pi-rs interactive` provides a high-efficiency terminal interface inspired by Pi, built
+`rupi interactive` provides a high-efficiency terminal interface inspired by Pi, built
 with a terminal-native semantic renderer and `crossterm`. The renderer stays separate
 from runtime state and does not start optional providers.
 
 ```bash
-pi-rs interactive --config config.json
+rupi interactive --config config.json
 ```
 
-![pi-rs Interactive TUI](../assets/screenshots/interactive-tui.png)
+![rupi Interactive TUI](../assets/screenshots/interactive-tui.png)
 
 ---
 
@@ -22,9 +22,9 @@ The terminal interface consists of three distinct visual zones:
 2. **Bottom Statusline**:
    - Single-line persistent snapshot:
      ```text
-     qwen2.5-coder · idle · turn 4 · 1.2k tokens
+     qwen3.8-flash-next · idle · turn 1 · ctx 262,144
      ```
-   - Segment roles: active model name, activity (`idle` vs `working`), current turn counter, cumulative token usage.
+   - Segment roles: active model name, activity (`idle` vs `working`), current turn counter, and context budget.
    - Automatically collapses or truncates cleanly on narrow terminal windows down to a minimum column width without wrapping or crashing.
 3. **Editor Buffer**:
    - Multi-line text entry with cursor navigation, word-wrapping, and slash-command completions.
@@ -51,7 +51,7 @@ The terminal interface consists of three distinct visual zones:
 
 ## Semantic Visual Hierarchy
 
-`pi-rs` avoids distracting, decorative UI chrome in favor of high-signal semantic color coding:
+`rupi` avoids distracting, decorative UI chrome in favor of high-signal semantic color coding:
 
 - **Reasoning**: Dim italic or bordered block tagged with explicit provenance (e.g. `[native reasoning]`).
 - **Tool Requests**: Cyan action indicator showing tool name (`read`, `write`, `edit`, `exec`) and canonicalized path.

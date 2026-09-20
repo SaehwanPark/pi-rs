@@ -1,16 +1,16 @@
 # Implementation Status
 
-Working status for the `pi-rs` runtime. Roadmap intent lives in [`ROADMAP.md`](../ROADMAP.md);
+Working status for the `rupi` runtime. Roadmap intent lives in [`ROADMAP.md`](../ROADMAP.md);
 this document records **what exists, what is proven, and what is deliberately deferred or not
 yet exercised**.
 
-Verification for everything marked *done* below is rerun for the v0.2.0 release
-(`2026-09-19`); the release PR records the exact host output and any platform-specific
+Verification for everything marked *done* below is rerun for the v0.2.1 release
+(`2026-09-20`); the release PR records the exact host output and any platform-specific
 limitations:
 
 ```
 cargo fmt --all --check
-cargo check -p pi-rs-core --all-features
+cargo check -p rupi-core --all-features
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo doc --workspace --no-deps
@@ -21,28 +21,28 @@ mdbook build book
 
 | Layer | Crate | State | Tests |
 | --- | --- | --- | --- |
-| Contracts | `pi-rs-core` | done | 86 |
-| Durability | `pi-rs-store` | done, incl. payload bounding, externalized fields, retention | 138 |
-| Model I/O | `pi-rs-provider` | done, verified against a real endpoint | 82 |
-| Native tools | `pi-rs-tools` | done, lifecycle + failure/unknown outcomes | 92 |
-| Turn loop + recovery | `pi-rs-runtime` | done (failover, cancel, handles, provider-overflow recovery) | 72 |
-| Surface | `pi-rs-tui` | done (raw terminal, editor, status, highlighting, wrap) | 179 |
-| Pi compatibility readers | `pi-rs-compat` | skills, prompts, packages; fixture suites | 100 |
-| MCP client | `pi-rs-mcp` | done, lazy stdio/HTTP transport, discovery, and tool normalization | 19 |
-| RKB integration | `pi-rs-rkb` | done, lazy citation-preserving MCP adapter, references, and rehydration | focused gate fixtures |
-| TypeScript host | `pi-rs-extension` | done, lazy Node RPC, selected Pi APIs, tool wrapper, failure isolation | focused gate fixtures |
-| Replay | `pi-rs-replay` | done, deterministic read-only projections, context reconstruction, branch plans, analysis, export | 12 + CLI fixtures |
-| Optimization experiments | `pi-rs-experiments` | done, context knee detection, adaptive thresholds, standby backup trade-offs, MCP exposure | 6 + benchmarks |
-| Composition root | `pi-rs` | run, interactive, replay, trace, compatibility, import/export, resume, RKB skill discovery | 245 |
+| Contracts | `rupi-core` | done | 86 |
+| Durability | `rupi-store` | done, incl. payload bounding, externalized fields, retention | 138 |
+| Model I/O | `rupi-provider` | done, verified against the supplied llama.cpp endpoint | 93 |
+| Native tools | `rupi-tools` | done, lifecycle + failure/unknown outcomes | 92 |
+| Turn loop + recovery | `rupi-runtime` | done (failover, cancel, handles, provider-overflow recovery) | 72 |
+| Surface | `rupi-tui` | done (raw terminal, editor, status, highlighting, wrap) | 179 |
+| Pi compatibility readers | `rupi-compat` | skills, prompts, packages; fixture suites | 100 |
+| MCP client | `rupi-mcp` | done, lazy stdio/HTTP transport, discovery, and tool normalization | 19 |
+| RKB integration | `rupi-rkb` | done, lazy citation-preserving MCP adapter, references, and rehydration | focused gate fixtures |
+| TypeScript host | `rupi-extension` | done, lazy Node RPC, selected Pi APIs, tool wrapper, failure isolation | focused gate fixtures |
+| Replay | `rupi-replay` | done, deterministic read-only projections, context reconstruction, branch plans, analysis, export | 12 + CLI fixtures |
+| Optimization experiments | `rupi-experiments` | done, context knee detection, adaptive thresholds, standby backup trade-offs, MCP exposure | 6 + benchmarks |
+| Composition root | `rupi` | run, interactive, replay, trace, compatibility, import/export, resume, RKB skill discovery | 245 |
 
 ## What the merge series added on top of the one-shot command
 
-* `pi-rs interactive` — one process, many turns: raw-mode terminal, editable buffer
+* `rupi interactive` — one process, many turns: raw-mode terminal, editable buffer
   with wide-character-safe wrap, projected status line, semantic highlighting
   (operation vs arguments), Ctrl-C split between in-flight turn and idle draft.
-* `pi-rs run --resume <id|prefix>` — continues a recorded session; id resolution is
-  shared with `pi-rs trace` so two commands cannot disagree about one session id.
-* `pi-rs import-pi` / `pi-rs export` — Pi session files in and out, with a
+* `rupi run --resume <id|prefix>` — continues a recorded session; id resolution is
+  shared with `rupi trace` so two commands cannot disagree about one session id.
+* `rupi import-pi` / `rupi export` — Pi session files in and out, with a
   round-trip fixture and an explicit report of what could not be carried.
 * Failover made readable: model epochs, takeover reasons, and the epoch that served
   the answer are durable events, not prose.
@@ -57,7 +57,7 @@ as durable context events with epoch tracking (see `ROADMAP.md`, “Current prio
 
 ## What the one-shot command added
 
-`pi-rs run --config <file> --cwd <workspace> --prompt <text>` composes the
+`rupi run --config <file> --cwd <workspace> --prompt <text>` composes the
 configured primary `OpenAiCompat` provider, profile context policy,
 workspace-confined built-ins, durable store session, and `TurnLoop`. It streams
 assistant text to stdout and sends provenance-labeled reasoning, tool activity,
@@ -72,7 +72,7 @@ projection remain separate files.
 
 ## What the runtime slice added
 
-`crates/pi-rs-runtime/src/failover.rs` — the availability-failure policy.
+`crates/rupi-runtime/src/failover.rs` — the availability-failure policy.
 
 * `FailoverPolicy::decide(kind, attempts, partial_output_emitted) -> Recovery`.
 * Order is retry-then-takeover; a takeover is gated on the backup's capabilities
@@ -80,7 +80,7 @@ projection remain separate files.
 * Explicitly not triggers: `Semantic`, `Authentication`, `ContextOverflow`, `Cancelled`.
 * `partial_output_emitted` forbids retry unconditionally, whatever the retry budget says.
 
-`crates/pi-rs-runtime/src/turn.rs` — the canonical event producer.
+`crates/rupi-runtime/src/turn.rs` — the canonical event producer.
 
 * Emits the documented turn shape and owns session/turn identity rather than trusting
   the store's defaults, so every event's `EventMeta` is correct at construction.
@@ -166,7 +166,7 @@ beside them.
 
 ## Pi session import
 
-`pi-rs import-pi <session.jsonl>` reads one Pi session file and reports what a pi-rs
+`rupi import-pi <session.jsonl>` reads one Pi session file and reports what a rupi
 session would hold; `--write --store <dir>` (or `--config <file>`, which also supplies
 the write policy) files it as a new session. The report is stdout, the destination line
 is stderr, and a dry run creates no byte on disk.
@@ -177,7 +177,7 @@ is stderr, and a dry run creates no byte on disk.
 * The entry tree is honoured. The path from the newest-written entry back to the root is
   the import; entries off that path are counted per type and named, never silently folded
   in. Duplicate ids, dangling parents, and cycles are errors, not repairs.
-* Pi's stored thinking becomes `ReasoningProvenance::ProviderSummary`, because pi-rs never
+* Pi's stored thinking becomes `ReasoningProvenance::ProviderSummary`, because rupi never
   streamed it. A request that stored no reasoning gets no provenance at all.
 * `model_change` and `thinking_level_change` become info diagnostics rather than a model
   epoch, which would claim capabilities Pi never recorded.
@@ -190,24 +190,24 @@ is stderr, and a dry run creates no byte on disk.
   re-imports.
 * Tool output follows the same inline rule as a native session's: filed as a blob past the
   store's inline threshold, otherwise held by its message record. Filing every imported
-  output would store the same bytes twice, and `reduced` stays false because pi-rs reduced
+  output would store the same bytes twice, and `reduced` stays false because rupi reduced
   nothing.
 * Timestamps are parsed without a date library (`Z`, `±HH:MM`, zone-less read as UTC by
   documented convention).
 * Damage is named: an unreadable line is skipped and reported as `line N: …`.
 
-`pi-rs trace` reads an imported session back with no knowledge of Pi, which is the proof
+`rupi trace` reads an imported session back with no knowledge of Pi, which is the proof
 that the import is a session rather than a transcription.
 
 ## Not yet exercised or deliberately deferred
 
 The following items are not blockers for the canonical initial MVP, but remain explicit:
 
-1. `pi-rs-tui` uses a terminal-native semantic renderer; a ratatui widget/backend
+1. `rupi-tui` uses a terminal-native semantic renderer; a ratatui widget/backend
    integration is not currently used.
-2. The end-to-end agent loop against a real local endpoint has not been exercised: the
-   one-shot tool loop is covered against a fake OpenAI server, while single completions
-   and tool schema serialization have been verified live.
+2. The end-to-end agent loop against the supplied local endpoint is now smoke-tested with
+   a read-only one-shot turn. The deterministic tool loop remains covered against a fake
+   OpenAI server; the live smoke test does not enable mutating tools.
 3. Surface write errors are not yet routed through the runtime's fallible event channel;
    stdout/stderr failures remain an interactive-surface concern rather than being silently
    reclassified as model or storage failures.
@@ -221,41 +221,43 @@ The following items are not blockers for the canonical initial MVP, but remain e
    ordering tests.
 7. A resumed imported session has not been exercised against a live provider; store-level
    restoration proves the resume projection, not a real request.
-8. Project trust is explicit at compatibility-reader call sites, and `pi-rs trust` now
+8. Project trust is explicit at compatibility-reader call sites, and `rupi trust` now
    persists exact project decisions with fail-closed storage; interactive once/always
    resolution remains open. The bounded MCP HTTP transport and local package-install path
    are implemented; remote package resolution/dependency execution remains deferred. The
-   independent `pi-rs-rkb` adapter is covered by focused fake-MCP and runtime/store gate
+   independent `rupi-rkb` adapter is covered by focused fake-MCP and runtime/store gate
    fixtures; direct dependency linkage to the external `rkb-rs` crate remains intentionally
    absent.
 9. Optional trace compression is implemented for content-addressed payload blobs (opt-in
    raw Deflate; plain JSONL remains appendable). Reconstructed-rationale production remains
    unimplemented; no producer may infer hidden chain-of-thought or relabel it as recovered.
 10. The selected TypeScript extension host is implemented as an explicit optional
-    `pi-rs-extension` boundary with focused fixtures. The typed MCP worker boundary is
-    implemented in `pi-rs-mcp::worker` with an injected headless engine, asynchronous
+    `rupi-extension` boundary with focused fixtures. The typed MCP worker boundary is
+    implemented in `rupi-mcp::worker` with an injected headless engine, asynchronous
     run/cancel handles, coarse `session://` resources, and stdio JSON-RPC fixtures;
-    read-only replay/history analysis is implemented in `pi-rs-replay`; adaptive
+    read-only replay/history analysis is implemented in `rupi-replay`; adaptive
     optimization and telemetry remain deferred. GitHub Pages deployment is configured
     in `.github/workflows/pages.yml` and remains a hosted-site operational concern, not
     a runtime dependency.
 
 ## Real-endpoint verification
 
-Verified in the provider slice against `http://127.0.0.1:8080/v1` (llama.cpp,
-model `qwen3.8-flash`, `reasoning_content` exposed):
+Verified on 2026-09-20 against the supplied llama.cpp endpoint
+`http://127.0.0.1:8000/v1` (model `qwen3.8-flash-next`, `reasoning_content` exposed):
 
-* SSE parsing, `reasoning_content` → `Native` provenance, finish reason `stop`.
+* SSE parsing, `reasoning_content` → `Native` provenance, finish reason `stop`, and usage.
 * Tool schema serialization and request body shape.
+* A read-only one-shot `rupi run` that invoked `read`, separated stdout from the
+  provenance/tool transcript, and wrote a durable session.
+* `rupi trace` and `rupi replay` reading that session without another provider call.
 
-The runtime's tool loop is covered by scripted-provider unit tests and the one-shot
-command's fake OpenAI server integration test. It has not yet been exercised against a
-live model.
+Mutating tools were not enabled during the live smoke test. The deterministic tool loop
+remains covered by the scripted-provider and fake OpenAI integration fixtures.
 
 ## Interactive session
 
-`pi-rs interactive` holds one durable session in one process: raw mode, crossterm events
-mapped through `pi-rs-tui::keys::intent`, the `pi-rs-tui::editor` buffer drawn with one status
+`rupi interactive` holds one durable session in one process: raw mode, crossterm events
+mapped through `rupi-tui::keys::intent`, the `rupi-tui::editor` buffer drawn with one status
 line, and one turn per submit through `run::SessionHandle`, so the second turn carries the
 first. On Unix, Ctrl-C is handled before the keymap: while a turn is running,
 `interrupt::TurnInterruptGuard` flags the runtime cancellation token; while idle, an empty

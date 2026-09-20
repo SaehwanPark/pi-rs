@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use pi_rs_compat::{
+use rupi_compat::{
   scan::Trust,
   skill::{self, SkillWarning},
 };
@@ -32,7 +32,7 @@ pub fn execute(args: SkillsArgs) -> Result<(), String> {
     // this path — it gates only what the *model* may reach for.
     let skill = scan
       .named(name)
-      .ok_or_else(|| format!("no skill named '{name}'; pi-rs skills lists what there is"))?;
+      .ok_or_else(|| format!("no skill named '{name}'; rupi skills lists what there is"))?;
     print!("{}", skill.body().map_err(|error| error.to_string())?);
   } else if args.control_prompt {
     // Empty stdout when nothing may be offered is the answer, not a failure: it is the

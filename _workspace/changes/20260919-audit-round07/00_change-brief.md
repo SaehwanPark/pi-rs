@@ -16,7 +16,7 @@ Bring live execution, interactive lifecycle handling, and Windows interrupt beha
 
 ## Owned paths
 
-- `crates/pi-rs-core/`, `crates/pi-rs-provider/`, `crates/pi-rs-runtime/`, `crates/pi-rs-store/`
+- `crates/rupi-core/`, `crates/rupi-provider/`, `crates/rupi-runtime/`, `crates/rupi-store/`
 - `src/interactive.rs`, `src/run.rs`
 - relevant integration/unit tests and architecture/roadmap notes
 

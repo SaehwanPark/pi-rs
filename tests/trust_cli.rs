@@ -5,7 +5,7 @@ use std::{fs, process::Command};
 use tempfile::TempDir;
 
 fn binary() -> &'static str {
-  env!("CARGO_BIN_EXE_pi-rs")
+  env!("CARGO_BIN_EXE_rupi")
 }
 
 fn run(args: &[&str]) -> (String, String, bool) {
@@ -13,7 +13,7 @@ fn run(args: &[&str]) -> (String, String, bool) {
     .args(args)
     .env("NO_COLOR", "1")
     .output()
-    .expect("run pi-rs");
+    .expect("run rupi");
   (
     String::from_utf8_lossy(&output.stdout).into_owned(),
     String::from_utf8_lossy(&output.stderr).into_owned(),

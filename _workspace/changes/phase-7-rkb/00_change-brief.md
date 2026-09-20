@@ -4,12 +4,12 @@
 
 Implement the smallest complete Phase 7 vertical slice:
 
-1. Add generic, typed `ExternalContextRef` semantics without making `pi-rs-core`
+1. Add generic, typed `ExternalContextRef` semantics without making `rupi-core`
    depend on `rkb-rs`.
 2. Preserve retrieved external context in the durable session projection and
    canonical trace, including source/citation metadata; provide an explicit
    inline-to-reference transformation and a resolver boundary for rehydration.
-3. Add a standalone `pi-rs-rkb` integration crate that understands the verified
+3. Add a standalone `rupi-rkb` integration crate that understands the verified
    `rkb-rs` MCP contract, provides setup/discovery and a bundled RKB skill,
    lazily activates the existing MCP client, parses citation-bearing
    `get_agent_context` results, creates external-context items, and rehydrates
@@ -35,7 +35,7 @@ linkage is required or permitted for this integration.
 
 ## Boundary and invariants
 
-- `pi-rs-core` remains provider/MCP/RKB independent; `pi-rs-rkb` is downstream.
+- `rupi-core` remains provider/MCP/RKB independent; `rupi-rkb` is downstream.
 - RKB setup and discovery are pure/config-driven and perform no process, network,
   filesystem, or index work during normal startup.
 - MCP activation remains explicit/lazy; no RKB server is connected merely because
@@ -54,13 +54,13 @@ linkage is required or permitted for this integration.
   compaction, metadata preservation, and retrieval-event round trips.
 - Store/runtime tests prove external context is session-persisted and resumes with
   its reference/source metadata.
-- `pi-rs-rkb` tests cover verified MCP JSON parsing, citation rendering, setup and
+- `rupi-rkb` tests cover verified MCP JSON parsing, citation rendering, setup and
   discovery, lazy activation, exact resource-id rehydration, and unavailable
   resource failure.
 - A gate fixture demonstrates retrieve -> inline context -> compacted reference
   -> on-demand rehydration with unchanged provenance/source metadata.
 - Workspace checks and the relevant startup/restore checks pass; no `rkb-rs`
-  dependency appears in `pi-rs-core`.
+  dependency appears in `rupi-core`.
 
 ## Non-goals
 

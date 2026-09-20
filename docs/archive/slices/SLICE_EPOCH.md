@@ -19,22 +19,22 @@ that is correct.
    system), and what stands in for that range (an opaque reference to the summary, not the summary
    body).
 2. Canonical history is **never** rewritten: the record is appended, and the replaced range stays
-   readable through `pi-rs trace`. Say so in the doc comment.
+   readable through `rupi trace`. Say so in the doc comment.
 3. The epoch ordinal must be derivable from the trace, not from in-memory counters, so a resume sees the
    same epoch numbering.
-4. `pi-rs trace` shows the epoch in a way that makes clear the canonical trace is intact — reuse the
+4. `rupi trace` shows the epoch in a way that makes clear the canonical trace is intact — reuse the
    existing rendering path (`trace::render_trace`), no new surface format.
 5. Ordering: an epoch record must never sort before the records it summarises.
 
 Derive the variant name, field names, and serialization from what
-`crates/pi-rs-core/src/event.rs` (and the store's record encoding) already does. Follow the existing
+`crates/rupi-core/src/event.rs` (and the store's record encoding) already does. Follow the existing
 shape; do not redesign it.
 
 ## Required tests
 
 * unit: an epoch record round-trips through the existing event serialization;
 * unit: ordinal derivation from a trace with N epoch records yields the next ordinal;
-* integration: a store containing an epoch record is rendered by `pi-rs trace` without dropping any
+* integration: a store containing an epoch record is rendered by `rupi trace` without dropping any
   canonical record (assert on counts and on the replaced range still being present).
 
 ## Context discipline

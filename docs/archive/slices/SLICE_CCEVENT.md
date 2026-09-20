@@ -1,17 +1,17 @@
 # Slice (historical): pin the compaction event shapes, and say which have producers
 
-At the time this slice was written, `crates/pi-rs-core/src/event.rs` carried more than one
+At the time this slice was written, `crates/rupi-core/src/event.rs` carried more than one
 context-compaction variant without a producer audit. Runtime producers now exist; their status is
 recorded in `docs/COMPACT_EVENT_AUDIT.md`. The remaining text preserves the original test contract.
 
-`crates/pi-rs-core/src/event.rs` carries more than one context-compaction variant. One of them was
+`crates/rupi-core/src/event.rs` carries more than one context-compaction variant. One of them was
 added recently, one was already there, and nobody has established which of them anything actually
 **constructs**. That ambiguity is worse than a missing feature: a schema variant with no producer reads
 like a guarantee.
 
 ## Do this
 
-1. Enumerate every context-compaction variant in `crates/pi-rs-core/src/event.rs` (one grep with
+1. Enumerate every context-compaction variant in `crates/rupi-core/src/event.rs` (one grep with
    `head -12`).
 2. For each, determine whether anything in `src/`, `crates/` (excluding the variant's own definition),
    or `tests/` **constructs** it. Record `file:line` for producers, or "no producer".

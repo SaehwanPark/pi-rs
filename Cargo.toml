@@ -1,41 +1,41 @@
 [workspace]
 resolver = "3"
 members = [
-  "crates/pi-rs-core",
-  "crates/pi-rs-store",
-  "crates/pi-rs-provider",
-  "crates/pi-rs-tools",
-  "crates/pi-rs-compat",
-  "crates/pi-rs-runtime",
-  "crates/pi-rs-tui",
-  "crates/pi-rs-mcp",
-  "crates/pi-rs-rkb",
-  "crates/pi-rs-extension",
-  "crates/pi-rs-replay",
-  "crates/pi-rs-experiments",
+  "crates/rupi-core",
+  "crates/rupi-store",
+  "crates/rupi-provider",
+  "crates/rupi-tools",
+  "crates/rupi-compat",
+  "crates/rupi-runtime",
+  "crates/rupi-tui",
+  "crates/rupi-mcp",
+  "crates/rupi-rkb",
+  "crates/rupi-extension",
+  "crates/rupi-replay",
+  "crates/rupi-experiments",
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-repository = "https://github.com/SaehwanPark/pi-rs"
-authors = ["pi-rs contributors"]
+repository = "https://github.com/SaehwanPark/rupi"
+authors = ["rupi contributors"]
 
 [workspace.dependencies]
-pi-rs-core = { path = "crates/pi-rs-core" }
-pi-rs-store = { path = "crates/pi-rs-store" }
-pi-rs-provider = { path = "crates/pi-rs-provider" }
-pi-rs-tools = { path = "crates/pi-rs-tools" }
-pi-rs-compat = { path = "crates/pi-rs-compat" }
-pi-rs-runtime = { path = "crates/pi-rs-runtime" }
-pi-rs-tui = { path = "crates/pi-rs-tui" }
-pi-rs-mcp = { path = "crates/pi-rs-mcp" }
-pi-rs-rkb = { path = "crates/pi-rs-rkb" }
-pi-rs-extension = { path = "crates/pi-rs-extension" }
-pi-rs-replay = { path = "crates/pi-rs-replay" }
-pi-rs-experiments = { path = "crates/pi-rs-experiments" }
+rupi-core = { path = "crates/rupi-core", version = "0.2.1" }
+rupi-store = { path = "crates/rupi-store", version = "0.2.1" }
+rupi-provider = { path = "crates/rupi-provider", version = "0.2.1" }
+rupi-tools = { path = "crates/rupi-tools", version = "0.2.1" }
+rupi-compat = { path = "crates/rupi-compat", version = "0.2.1" }
+rupi-runtime = { path = "crates/rupi-runtime", version = "0.2.1" }
+rupi-tui = { path = "crates/rupi-tui", version = "0.2.1" }
+rupi-mcp = { path = "crates/rupi-mcp", version = "0.2.1" }
+rupi-rkb = { path = "crates/rupi-rkb", version = "0.2.1" }
+rupi-extension = { path = "crates/rupi-extension", version = "0.2.1" }
+rupi-replay = { path = "crates/rupi-replay", version = "0.2.1" }
+rupi-experiments = { path = "crates/rupi-experiments", version = "0.2.1" }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -50,7 +50,7 @@ ratatui = { version = "0.29", default-features = false, features = ["crossterm"]
 libc = "0.2"
 
 [package]
-name = "pi-rs"
+name = "rupi"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -59,18 +59,18 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-pi-rs-core.workspace = true
-pi-rs-store.workspace = true
-pi-rs-provider.workspace = true
-pi-rs-tools.workspace = true
-pi-rs-compat.workspace = true
-pi-rs-runtime.workspace = true
-pi-rs-tui.workspace = true
-pi-rs-mcp.workspace = true
-pi-rs-rkb.workspace = true
-pi-rs-extension.workspace = true
-pi-rs-replay.workspace = true
-pi-rs-experiments.workspace = true
+rupi-core.workspace = true
+rupi-store.workspace = true
+rupi-provider.workspace = true
+rupi-tools.workspace = true
+rupi-compat.workspace = true
+rupi-runtime.workspace = true
+rupi-tui.workspace = true
+rupi-mcp.workspace = true
+rupi-rkb.workspace = true
+rupi-extension.workspace = true
+rupi-replay.workspace = true
+rupi-experiments.workspace = true
 crossterm.workspace = true
 serde.workspace = true
 serde_json.workspace = true

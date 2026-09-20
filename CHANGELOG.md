@@ -6,6 +6,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.1] - 2026-09-20
+
+`rupi` is the new project identity. This release clarifies that the runtime is an
+independent implementation with selected Pi compatibility, not a Pi rewrite or Rust port.
+
+### Changed
+
+- Renamed the GitHub repository, binary, workspace crates, state/config examples,
+  environment variables, CI commands, and public URLs from the former project identity to
+  `rupi`.
+- Updated the beginner guide, examples, and screenshots for the real llama.cpp endpoint
+  at `127.0.0.1:8000` serving `qwen3.8-flash-next`; the local smoke evidence covers provider,
+  one-shot run, trace, and replay.
+- Curated resolved audit and proposal material into explicit historical archives.
+- Made `import-pi` the documented session-import command while retaining `import` as a
+  compatibility alias.
+- Removed one redundant CLI stdout assertion after reviewing the suite; boundary, failure,
+  provenance, compatibility, and recovery coverage remains intact.
+
+### Fixed
+
+- Preserved the request-line separator in the cancellable HTTP relay so strict local
+  llama.cpp servers receive a valid `HTTP/1.1` request.
+
+### Migration
+
+Update scripts and local configuration to call `rupi` and use `.rupi-state`. Upstream Pi
+paths such as `.pi/skills` and Pi JSONL session files remain unchanged for compatibility.
+
 ## [0.2.0] - 2026-09-19
 
 `v0.2.0` packages the audited mainline after the Round 9 sign-off. The audit cycle
@@ -43,12 +72,12 @@ bounded transports, conservative tool state, and clearer public documentation.
 ### Added
 
 #### Core Runtime & Presentation
-- **Interactive TUI (`pi-rs interactive`)**: High-performance terminal user interface with a terminal-native semantic renderer and `crossterm`, featuring a multi-line editing buffer, ANSI-clean line rendering, live stream display, and real-time statusline.
-- **One-Shot Runner (`pi-rs run`)**: Headless command-line runner with strict stream separation (assistant answer on `stdout`; provenance, tool lifecycle, and diagnostics on `stderr`).
+- **Interactive TUI (`rupi interactive`)**: High-performance terminal user interface with a terminal-native semantic renderer and `crossterm`, featuring a multi-line editing buffer, ANSI-clean line rendering, live stream display, and real-time statusline.
+- **One-Shot Runner (`rupi run`)**: Headless command-line runner with strict stream separation (assistant answer on `stdout`; provenance, tool lifecycle, and diagnostics on `stderr`).
 - **Workspace Confinement**: Strict realpath confinement to `--cwd` for built-in file operations (`read`, `write`, `edit`). Mutating operations require explicit `auto_approve_mutating` configuration.
-- **Durable Event Store**: Append-only event logging (`trace.jsonl`), session index, and blob storage under `.pi-rs-state`.
-- **Deterministic Replay (`pi-rs replay`)**: Replay recorded sessions identically to live runs without network calls or mutating side-effects.
-- **Trace Inspection (`pi-rs trace`)**: Chronological structured event log viewer.
+- **Durable Event Store**: Append-only event logging (`trace.jsonl`), session index, and blob storage under `.rupi-state`.
+- **Deterministic Replay (`rupi replay`)**: Replay recorded sessions identically to live runs without network calls or mutating side-effects.
+- **Trace Inspection (`rupi trace`)**: Chronological structured event log viewer.
 
 #### Honest Reasoning Provenance
 - Explicit typed labels for reasoning streams:
@@ -59,16 +88,17 @@ bounded transports, conservative tool state, and clearer public documentation.
 - Invariant enforced: hidden chain-of-thought is never falsely claimed as recovered.
 
 #### Model Providers & Failover
-- Unified provider abstraction supporting local endpoints (Ollama, vLLM, LM Studio) and cloud endpoints (OpenAI, DeepSeek, Together).
+- Unified provider abstraction supporting OpenAI-compatible local endpoints (including llama.cpp)
+  and cloud endpoints.
 - Resilient primary/backup failover with pre-flight capability matching (tools, modalities, context limits) and lazy adapter initialization.
 
 #### Pi Ecosystem Compatibility
-- **Skills (`pi-rs skills`)**: Behavioral-compatible discovery for user (`~/.pi/agent/skills`, `~/.agents/skills`) and project-level skills (`.pi/skills`, `.agents/skills`) guarded by explicit `--project` trust checks.
-- **Prompt Templates (`pi-rs prompts`, `pi-rs prompt`)**: Template discovery and positional argument expansion (`$1`, `$@`, `${1:-default}`).
-- **Packages (`pi-rs packages`)**: Manifest discovery and local package installation.
-- **Session Migration (`pi-rs import`, `pi-rs export`)**: Loss-diagnostic bidirectional migration between `pi-rs` store and Pi JSONL formats.
-- **Trust Store (`pi-rs trust`)**: Per-project allow/deny trust record management.
-- **Compatibility Diagnostics (`pi-rs compat`)**: Compatibility auditing for external packages and artifacts.
+- **Skills (`rupi skills`)**: Behavioral-compatible discovery for user (`~/.pi/agent/skills`, `~/.agents/skills`) and project-level skills (`.pi/skills`, `.agents/skills`) guarded by explicit `--project` trust checks.
+- **Prompt Templates (`rupi prompts`, `rupi prompt`)**: Template discovery and positional argument expansion (`$1`, `$@`, `${1:-default}`).
+- **Packages (`rupi packages`)**: Manifest discovery and local package installation.
+- **Session Migration (`rupi import`, `rupi export`)**: Loss-diagnostic bidirectional migration between `rupi` store and Pi JSONL formats.
+- **Trust Store (`rupi trust`)**: Per-project allow/deny trust record management.
+- **Compatibility Diagnostics (`rupi compat`)**: Compatibility auditing for external packages and artifacts.
 
 #### Integrations & Latency
 - **Model Context Protocol (MCP)**: Lazy stdio client architecture initializing servers on demand.

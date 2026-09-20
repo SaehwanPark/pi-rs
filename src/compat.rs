@@ -1,6 +1,6 @@
 //! The `compat` subcommand: inspect an artifact or package for Pi compatibility.
 
-use pi_rs_compat::compat::{self, CompatReport};
+use rupi_compat::compat::{self, CompatReport};
 
 use crate::{cli::CompatArgs, trust};
 

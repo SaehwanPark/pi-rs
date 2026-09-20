@@ -1,6 +1,6 @@
 # Reasoning Provenance
 
-One of the central tenets of `pi-rs` is **honest provenance**.
+One of the central tenets of `rupi` is **honest provenance**.
 
 Modern AI providers expose "reasoning" or "thinking" through very different mechanisms: some stream the model's authentic, unedited tokens; others stream a synthetic summary generated after the fact; and some conceal the chain-of-thought entirely.
 
@@ -10,7 +10,7 @@ Treating all of these as identical "thinking" misleads users and corrupts sessio
 
 ## The Four Provenance Labels
 
-`pi-rs` strictly labels every chunk of reasoning text with its verified origin:
+`rupi` strictly labels every chunk of reasoning text with its verified origin:
 
 | Provenance Label | Meaning | When Used |
 | :--- | :--- | :--- |

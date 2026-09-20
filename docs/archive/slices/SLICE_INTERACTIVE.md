@@ -1,16 +1,16 @@
-# Slice: `pi-rs interactive`
+# Slice: `rupi interactive`
 
 A session that holds many turns, driven from a terminal. Closes Phase 3's gate:
 *"a user can hold a session across turns in one process."*
 
 ## Existing pieces (do not rewrite)
-- `pi_rs_tui::editor::{Editor, Intent, Outcome}` — text, cursor, history, `apply(Intent) -> Outcome`, `display(prefix) -> Layout`.
-- `pi_rs_tui::keys::intent(&Event) -> Intent` — keymap. Maps Ctrl-C to `Intent::Noop` **on purpose**.
+- `rupi_tui::editor::{Editor, Intent, Outcome}` — text, cursor, history, `apply(Intent) -> Outcome`, `display(prefix) -> Layout`.
+- `rupi_tui::keys::intent(&Event) -> Intent` — keymap. Maps Ctrl-C to `Intent::Noop` **on purpose**.
 - `run::open_session(config, cwd, surface, turns)` — opens a durable session and hands a
   `SessionHandle` to a closure that may call `handle.turn(prompt)` many times, then `close()`.
 
 ## Required behaviour
-1. `pi-rs interactive [--config P] [--cwd D]` (see `src/cli.rs` `Command`, `parse`; keep that diff tiny —
+1. `rupi interactive [--config P] [--cwd D]` (see `src/cli.rs` `Command`, `parse`; keep that diff tiny —
    `feat/pi-import` collides with it).
 2. Enter raw mode; read crossterm events; draw `Editor::display(prefix)` plus ONE status line
    (model id, turn state); redraw only when something changed.
@@ -23,7 +23,7 @@ A session that holds many turns, driven from a terminal. Closes Phase 3's gate:
 6. Turn interruption/cancel is OUT of scope (separate runtime slice). Quit is the only exit.
 
 ## Constraints
-- `pi-rs-tui` must not import runtime/store; the loop lives in the composition root (root crate).
+- `rupi-tui` must not import runtime/store; the loop lives in the composition root (root crate).
 - No new crate. crossterm is already a root dependency (workspace 0.28).
 - Nothing heavy before the first frame: `bash bench/startup.sh` must be unchanged.
 - Put decisions in PURE tty-free functions — `event -> LoopAction`, and status-line content

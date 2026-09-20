@@ -1,12 +1,12 @@
-//! `pi-rs export`: write one session's canonical trace back out in Pi's shape.
+//! `rupi export`: write one session's canonical trace back out in Pi's shape.
 //!
-//! The shape is not a guess at a specification: it is the set of fields `pi-rs import-pi`
+//! The shape is not a guess at a specification: it is the set of fields `rupi import-pi`
 //! reads, which is what makes `export | import-pi` a round trip that can be tested instead
 //! of a parity claim that has to be argued. Anything Pi's shape cannot hold is named on
 //! stderr as dropped, so an export is never a quieter story than the trace it came from.
 //!
 //! The command is read-only with respect to the store. It uses [`Store::new`] rather than
-//! [`Store::open`] for the same reason `pi-rs trace` does: asking for a file must not be able
+//! [`Store::open`] for the same reason `rupi trace` does: asking for a file must not be able
 //! to mint a state root. What it reads has already passed through the redaction policy on the
 //! way into the trace, so an export is redacted output and never the bytes a provider sent.
 
@@ -17,8 +17,8 @@ use std::{
   path::Path,
 };
 
-use pi_rs_core::{AgentEvent, ModelRef, RuntimeConfig, SessionId, TraceEntry};
-use pi_rs_store::{Store, TraceJournal, WritePolicy};
+use rupi_core::{AgentEvent, ModelRef, RuntimeConfig, SessionId, TraceEntry};
+use rupi_store::{Store, TraceJournal, WritePolicy};
 use serde_json::{Map, Value, json};
 
 use crate::cli::ExportArgs;
@@ -318,7 +318,7 @@ fn write_output(out: Option<&Path>, bytes: &[u8]) -> Result<(), String> {
   let Some(out) = out else {
     let mut stdout = io::stdout();
     return match stdout.write_all(bytes) {
-      // A closed pipe is how `pi-rs export s | head` ends. It is not an export failure.
+      // A closed pipe is how `rupi export s | head` ends. It is not an export failure.
       Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
       Err(error) => Err(format!("cannot write stdout: {error}")),
       Ok(()) => stdout
@@ -350,12 +350,12 @@ fn write_output(out: Option<&Path>, bytes: &[u8]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-  use pi_rs_core::{
+  use rupi_core::{
     AgentEvent, AssistantDelta, EventEnvelope, EventMeta, ModelCapabilities, ModelRef,
     ModelRequestCompleted, ModelRequestStarted, ReasoningDelta, ReasoningExposure,
     ReasoningProvenance, SessionId, SessionStarted, TraceEntry, TraceId, UserMessage,
   };
-  use pi_rs_store::pi_import;
+  use rupi_store::pi_import;
 
   use super::{Exported, pi_timestamp, render};
 
