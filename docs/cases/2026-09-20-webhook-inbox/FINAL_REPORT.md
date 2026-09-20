@@ -8,22 +8,22 @@ Draft PR: https://github.com/SaehwanPark/rupi/pull/111
 
 ## Result
 
-Complete. Webhook Inbox is a bounded dependency-free Python service that adds
-HMAC-authenticated admission and lease-expiry worker recovery to the prior
-Event Outbox surface. The independent fresh-process oracle passed, including a
-worker killed after a committed lease and a later reclaim with attempts
-incremented. No rupi runtime/source/tests or canonical documents changed.
+The committed Webhook Inbox project remains complete as a bounded
+dependency-free Python service through the earlier tester repair, and its
+independent fresh-process oracle passed. That result is not a claim that a
+model turn completed T. The parent-fix retry in
+[`RETRY_REPORT.md`](RETRY_REPORT.md) again produced no model-authored project
+files, so the high rupi implementation stopgate remains unresolved.
 
-The live model implementation attempts did not write project files. The
-tester completed the project locally under the case directory after recording
-those failures as a major rupi progress stopgate. Therefore the acceptance
-result is a project result, not a claim that the model turns completed T.
+No rupi runtime/source/tests or canonical documents changed.
 
 ## Commits and changed paths
 
 - `e4a4ceb` — plan/specification/oracle/config/ignore baseline, pushed before
   implementation; draft PR opened as #111.
 - `3ae8bb0` — project implementation, tests, observations, and report.
+- `96ca4b3` — parent-fix retry configs: 30,000 ms request timeout, initial
+  request limit 8, recovery request limit 3, and `thinking: off`.
 
 All changed files are under
 `docs/cases/2026-09-20-webhook-inbox/`. The runtime, Rust crates, repository
@@ -40,6 +40,8 @@ unchanged.
 - final verification trace: 704 entries, replay exit 0;
 - interrupted implementation traces: R-01 14,216 entries/replay exit 0; R-02
   5,389 entries/replay exit 0;
+- parent-fix retry traces: R-03 788 entries/replay exit 0; R-04 237
+  entries/replay exit 0; neither retry wrote project files;
 - source import review found only Python standard-library modules;
 - no file outside the case directory was modified.
 
@@ -56,7 +58,8 @@ unchanged.
 ## Parent retry request
 
 Use this exact case as the next runtime retry after adding a supported
-per-request deadline/progress boundary: rerun the same initial and recovery
-prompts, record time to first write and request/tool counts, and require the
-model to complete the project suite and README without tester repair. Keep the
-independent oracle unchanged and verify trace/replay again.
+first-write/progress boundary: rerun the same initial and recovery prompts in a
+fresh missing-project workspace, require the model to create the package and
+README and pass the project suite without tester repair, then run the unchanged
+oracle and verify trace/replay again. The parent fix reduced wall-time exposure
+but did not resolve the high stopgate.

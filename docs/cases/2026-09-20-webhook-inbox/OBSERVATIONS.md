@@ -299,3 +299,25 @@ to first project write, (2) requests/tool calls before that write, (3) whether
 the model completes the project suite and README without tester repair, and
 (4) whether the interrupted trace still replays. Do not change the case oracle
 or pre-create project implementation files to make that retry pass.
+
+## Parent-fix retry (2026-09-20)
+
+The retry requested after parent commit `96ca4b3` is recorded in
+[`RETRY_REPORT.md`](RETRY_REPORT.md). It used a fresh ignored workspace with
+only copied specs/configs/ignore rules and an unchanged copied oracle; the
+committed tester-repaired project was not used as implementation output.
+
+All three configs parsed successfully before running. The initial retry used
+session `01a0c02b-9f19-74d4-8d96-5e57b53e0297`: 82,234 ms, 5 model requests
+started/completed, 7 tool requests, 6 completions, 1 failure, and no project
+write. It exited `1` with typed `turn_completed` timeout. The focused recovery
+used session `01a0c02d-836d-749b-ab4f-17801a8dd9a9`: 51,713 ms, 3 model
+requests started/completed, 2 tool requests, 2 completions, 0 failures, and no
+project write; it also exited `1` with typed timeout.
+
+Neither retry produced `webhookinbox/`, `README.md`, or `tests/`, so the
+model-authored project suite and unchanged independent oracle were not run.
+Running them against the prior tester repair would have invalidated the retry
+measurement. Both final trace reads and tool replays exited `0` (788 and 237
+trace entries respectively). The high stopgate remains: wall-time exposure was
+reduced, but the first-write/implementation failure was not resolved.
