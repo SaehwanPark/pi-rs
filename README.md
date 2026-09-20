@@ -198,6 +198,26 @@ The [Event Outbox walkthrough](https://saehwanpark.github.io/rupi/getting-starte
 covers restart recovery, sink failures, retry state, and bounded trace/replay
 evidence.
 
+## Live example: Webhook Inbox
+
+[Webhook Inbox](https://saehwanpark.github.io/rupi/getting-started/webhook-inbox.html)
+is a fourth dependency-free Python example: an HMAC-authenticated HTTP/SQLite
+inbox with expiring delivery leases, crash reclaim, and a direct-argv sink
+worker. Verify both the project suite and its independent fresh-process oracle:
+
+```bash
+cd docs/cases/2026-09-20-webhook-inbox/project
+python -W error::ResourceWarning -m unittest discover -s tests -p "test_*.py" -v
+cd ..
+python -W error::ResourceWarning -m unittest discover -s acceptance -p "test_*.py" -v
+```
+
+The [Webhook Inbox walkthrough](https://saehwanpark.github.io/rupi/getting-started/webhook-inbox.html)
+covers exact-byte HMAC admission, idempotency, lease expiry, worker reclaim,
+and bounded trace/replay evidence. The checked-in implementation passes; the
+case reports separately record that the final local-model implementation
+attempt remained incomplete.
+
 ## Commands
 
 | Command | Purpose |

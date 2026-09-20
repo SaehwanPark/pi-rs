@@ -25,6 +25,9 @@ For end users and system integrators, the primary documentation is published via
       fresh-process acceptance oracle.
   - **Event Outbox:** a live HTTP/SQLite outbox with idempotency, retry state,
       a separate sink process, and an independent acceptance oracle.
+  - **Webhook Inbox:** a live HMAC-authenticated HTTP/SQLite inbox with
+      expiring leases, crash reclaim, a direct-argv sink, and an independent
+      acceptance oracle.
   - **CLI Reference:** Detailed usage of `run`, `interactive`, `trace`, `replay`, `skills`, `prompts`, `packages`, `trust`, `compat`, `import-pi`, and `export`.
   - **Interactive TUI:** Keyboard shortcuts, editor buffer, syntax highlighting, status line.
   - **Provenance Model:** Understanding `[native reasoning]`, `[provider summary]`, `[declared]`, and `[reconstructed]`.
