@@ -110,6 +110,62 @@ the typed timeout. No stdout final answer was present.
 The incomplete model-authored file is preserved in the workspace and is not
 counted as a completed implementation.
 
+### A-02 — bounded recovery model-authoring turn
+
+Exact command, run from `project/` with stdout and stderr combined:
+
+```text
+& 'C:\Users\saehwan\repos\pi-rs\target\debug\rupi.exe' run --config rupi.recovery.config.json --cwd . --prompt (Get-Content -Raw ..\prompts\recovery.txt) --no-color 2>&1
+```
+
+Configuration and prompt:
+
+- config: `project/rupi.recovery.config.json`;
+- prompt: `prompts/recovery.txt`;
+- fresh state directory: `.rupi-state-recovery`;
+- six-request turn budget, one-request no-progress boundary, 120,000 ms
+  provider request timeout.
+
+Observed result:
+
+- session: `01a0c0b5-6491-79ec-8bf7-9ae7546e1f17`;
+- trace turn duration: 203,505 ms;
+- process exit: 1;
+- six model requests completed; the turn ended with
+  `turn aborted: model request budget exhausted` and an incomplete finalization
+  answer;
+- first tool was a Windows `cmd.exe`-shaped directory probe, which succeeded
+  but cost a mutating `exec` call and listed rupi state files;
+- the model wrote a one-line `README.md` placeholder and a temporary
+  `_tmp_SPEC_capture.md`, then removed the temporary file; it did not write
+  implementation modules or tests;
+- the final model text accurately stated that the task was incomplete; no
+  acceptance command was run and no functional project was produced.
+
+Read-only post-turn checks:
+
+```text
+& 'C:\Users\saehwan\repos\pi-rs\target\debug\rupi.exe' trace --config rupi.recovery.config.json 01a0c0b5-6491-79ec-8bf7-9ae7546e1f17 --quiet --no-reasoning
+```
+
+Result: exit 0; `1677 entries read · 1 shown`; the request-budget diagnostic
+was rendered without contacting the provider.
+
+```text
+& 'C:\Users\saehwan\repos\pi-rs\target\debug\rupi.exe' replay .rupi-state-recovery\sessions\01a0c0b5-6491-79ec-8bf7-9ae7546e1f17.trace.jsonl --tools --sequence
+```
+
+Result: exit 0; replay projected the recorded directory `exec`, two README/
+temporary-file writes, subsequent reads/exec, and no unrecorded historical
+execution. The model-authored project remains incomplete evidence.
+
+## Tester repair boundary
+
+Tester repair is now required to evaluate T itself. It will be performed only
+inside `project/`, after both model attempts and their read-only trace/replay
+checks. The repair will be listed file-by-file and will not be called model
+completion.
+
 ## Independent verification
 
 Pending model authoring and any separately labelled tester repair.
