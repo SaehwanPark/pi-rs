@@ -364,11 +364,18 @@ impl OpenAiCompat {
     let active_request = Arc::clone(&self.active_request);
     let request = request.clone();
     let model = request.model.clone();
-    let worker_cancel = cancel.clone();
+    // Keep a local token for the worker as well as the caller's token. The
+    // outer loop translates caller cancellation and total-deadline expiry into
+    // this token before stopping the relay, so the blocking worker can observe
+    // the same boundary without issuing a second POST.
+    let request_cancel = CancelToken::new();
+    let worker_cancel = request_cancel.clone();
+    let channel_cancel = request_cancel.clone();
+    let done_cancel = request_cancel.clone();
     let worker_handle = thread::spawn(move || {
       let mut channel_sink = ChannelSink {
         sender: sender.clone(),
-        cancel: worker_cancel.clone(),
+        cancel: channel_cancel,
       };
       let result = worker.stream_blocking(&request, &mut channel_sink, &worker_cancel);
       active_request.store(false, Ordering::Release);
@@ -377,7 +384,7 @@ impl OpenAiCompat {
         match sender.try_send(done) {
           Ok(()) | Err(TrySendError::Disconnected(_)) => break,
           Err(TrySendError::Full(next)) => {
-            if worker_cancel.is_cancelled() {
+            if worker_cancel.is_cancelled() || done_cancel.is_cancelled() {
               break;
             }
             done = next;
@@ -389,18 +396,46 @@ impl OpenAiCompat {
 
     let mut emitted = false;
     let idle_budget = Duration::from_millis(self.config.read_timeout_ms.max(1));
+    let total_budget = self.config.request_timeout_ms.map(Duration::from_millis);
+    let request_started = Instant::now();
     let mut last_activity = Instant::now();
     loop {
       if cancel.is_cancelled() {
+        request_cancel.cancel();
         self.quarantined.store(true, Ordering::Release);
         relay.stop();
         let _ = worker_handle.join();
+        drain_worker_events(&receiver, sink, &mut emitted);
         // Keep the adapter quarantined: the POST may have reached the provider
         // before cancellation, so issuing another attempt through this adapter
         // could duplicate an uncertain request. Recovery must choose a fresh
         // adapter or an explicitly separate model.
         self.active_request.store(false, Ordering::Release);
         return Err(decode::cancelled(emitted).with_model(model));
+      }
+      if let Some(budget) = total_budget.filter(|budget| request_started.elapsed() >= *budget) {
+        request_cancel.cancel();
+        self.quarantined.store(true, Ordering::Release);
+        relay.stop();
+        let _ = worker_handle.join();
+        drain_worker_events(&receiver, sink, &mut emitted);
+        self.active_request.store(false, Ordering::Release);
+        return Err(
+          ModelFailure::new(
+            ModelFailureKind::Timeout,
+            if emitted {
+              FailurePhase::Streaming
+            } else {
+              FailurePhase::WaitingForResponse
+            },
+            format!(
+              "provider request exceeded its configured total timeout ({} ms)",
+              budget.as_millis()
+            ),
+          )
+          .with_model(model.clone())
+          .with_partial_output(emitted),
+        );
       }
       match receiver.recv_timeout(Duration::from_millis(50)) {
         Ok(WorkerMessage::Event(event)) => {
@@ -431,16 +466,20 @@ impl OpenAiCompat {
           });
         }
         Err(mpsc::RecvTimeoutError::Timeout) if cancel.is_cancelled() => {
+          request_cancel.cancel();
           self.quarantined.store(true, Ordering::Release);
           relay.stop();
           let _ = worker_handle.join();
+          drain_worker_events(&receiver, sink, &mut emitted);
           self.active_request.store(false, Ordering::Release);
           return Err(decode::cancelled(emitted).with_model(model));
         }
         Err(mpsc::RecvTimeoutError::Timeout) if last_activity.elapsed() >= idle_budget => {
+          request_cancel.cancel();
           self.quarantined.store(true, Ordering::Release);
           relay.stop();
           let _ = worker_handle.join();
+          drain_worker_events(&receiver, sink, &mut emitted);
           self.active_request.store(false, Ordering::Release);
           return Err(
             ModelFailure::new(
@@ -454,6 +493,7 @@ impl OpenAiCompat {
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {}
         Err(mpsc::RecvTimeoutError::Disconnected) => {
+          request_cancel.cancel();
           relay.stop();
           let _ = worker_handle.join();
           self.quarantined.store(true, Ordering::Release);
@@ -482,6 +522,19 @@ enum WorkerMessage {
 struct ChannelSink {
   sender: SyncSender<WorkerMessage>,
   cancel: CancelToken,
+}
+
+fn drain_worker_events(
+  receiver: &mpsc::Receiver<WorkerMessage>,
+  sink: &mut dyn ProviderEventSink,
+  emitted: &mut bool,
+) {
+  while let Ok(message) = receiver.try_recv() {
+    if let WorkerMessage::Event(event) = message {
+      *emitted = true;
+      sink.emit(&event);
+    }
+  }
 }
 
 impl ProviderEventSink for ChannelSink {

@@ -67,7 +67,8 @@ with mutations refused:
         "exposed_reasoning": "native",
         "context_window": 262144,
         "max_output_tokens": 32768
-      }
+      },
+      "request_timeout_ms": 900000
     }
   ],
   "tools": {
@@ -80,7 +81,12 @@ with mutations refused:
 
 `primary` is the model rupi uses. `base_url` stops at `/v1`; rupi adds
 `/chat/completions`. `exposed_reasoning: "native"` is a claim about what the endpoint
-exposes, not a promise that every response contains reasoning text.
+exposes, not a promise that every response contains reasoning text. The optional
+`request_timeout_ms` is a total wall-clock budget for one provider request; it is
+different from the provider's idle-read timeout. For a bounded coding slice, lower
+the output cap and use a shorter deadline such as `120000`. A timeout is an incomplete
+turn: inspect the trace and resume with a smaller prompt rather than treating it as
+project verification.
 
 ## 3. Run a read-only request
 

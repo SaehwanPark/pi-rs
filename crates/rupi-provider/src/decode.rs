@@ -731,6 +731,33 @@ mod tests {
   }
 
   #[test]
+  fn output_limit_finish_reason_survives_for_runtime_classification() {
+    let mut collector = Collector::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
+    decoder
+      .chunk(
+        &json!({
+          "choices": [{
+            "index": 0,
+            "delta": {"content": "partial"},
+            "finish_reason": "length"
+          }],
+          "usage": {"prompt_tokens": 11, "completion_tokens": 8192}
+        }),
+        &mut collector,
+      )
+      .unwrap();
+
+    let usage = decoder
+      .finish(StreamEnd::DoneSentinel, &mut collector)
+      .expect("the adapter observed the provider boundary");
+    assert_eq!(usage.finish_reason.as_deref(), Some("length"));
+    assert!(usage.is_certain());
+    assert!(usage.stopped_at_output_limit());
+    assert_eq!(collector.text(), "partial");
+  }
+
+  #[test]
   fn emitted_output_is_reported_honestly() {
     let mut collector = Collector::default();
     let mut decoder = Decoder::new(ReasoningExposure::Native);

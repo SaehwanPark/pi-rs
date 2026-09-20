@@ -63,6 +63,9 @@ pub struct ProviderConfig {
   /// event. The adapter's worker boundary keeps cancellation independent from
   /// this potentially long blocking socket timeout.
   pub read_timeout_ms: u64,
+  /// Optional total budget for one provider request, including model
+  /// generation. `None` keeps long-running sessions unbounded.
+  pub request_timeout_ms: Option<u64>,
 }
 
 impl fmt::Debug for ProviderConfig {
@@ -84,6 +87,7 @@ impl fmt::Debug for ProviderConfig {
       .field("stream", &self.stream)
       .field("connect_timeout_ms", &self.connect_timeout_ms)
       .field("read_timeout_ms", &self.read_timeout_ms)
+      .field("request_timeout_ms", &self.request_timeout_ms)
       .finish()
   }
 }
@@ -115,6 +119,7 @@ impl Default for ProviderConfig {
       // intervals, so this remains a generous logical idle budget for callers
       // while cancellation is still observed promptly.
       read_timeout_ms: 300_000,
+      request_timeout_ms: None,
     }
   }
 }
@@ -230,6 +235,7 @@ impl ProviderConfig {
       read_timeout_ms: endpoint
         .read_timeout_ms
         .unwrap_or(Self::default().read_timeout_ms),
+      request_timeout_ms: endpoint.request_timeout_ms,
       api_key: endpoint.api_key.clone(),
       api_key_env: endpoint.api_key_env.clone(),
       ..Self::default()
@@ -283,6 +289,11 @@ impl ProviderConfig {
     }
     if !self.capabilities.text {
       return Err(BuildError::MissingCapability(CapabilityGap::Text));
+    }
+    if self.request_timeout_ms == Some(0) {
+      return Err(BuildError::Invalid(
+        "request_timeout_ms must be greater than zero",
+      ));
     }
     Ok(())
   }
@@ -369,7 +380,7 @@ pub(crate) fn agent_for_proxy(
   Ok(
     ureq::builder()
       .timeout_connect(Duration::from_millis(config.connect_timeout_ms.max(1)))
-      .timeout_read(Duration::from_millis(config.read_timeout_ms.max(1)))
+      .timeout_read(Duration::from_millis(effective_read_timeout_ms(config)))
       .user_agent(&format!("rupi-relay/{relay_nonce}"))
       .proxy(proxy)
       .build(),
@@ -381,9 +392,10 @@ type AgentCache = BTreeMap<AgentCacheKey, ureq::Agent>;
 
 pub(crate) fn agent_for(config: &ProviderConfig) -> ureq::Agent {
   static AGENTS: OnceLock<Mutex<AgentCache>> = OnceLock::new();
+  let read_timeout_ms = effective_read_timeout_ms(config);
   let key = (
     config.connect_timeout_ms,
-    config.read_timeout_ms,
+    read_timeout_ms,
     proxy_environment_fingerprint(),
   );
   let agents = AGENTS.get_or_init(|| Mutex::new(BTreeMap::new()));
@@ -393,11 +405,25 @@ pub(crate) fn agent_for(config: &ProviderConfig) -> ureq::Agent {
   }
   let agent = ureq::builder()
     .timeout_connect(Duration::from_millis(config.connect_timeout_ms.max(1)))
-    .timeout_read(Duration::from_millis(config.read_timeout_ms.max(1)))
+    .timeout_read(Duration::from_millis(read_timeout_ms))
     .try_proxy_from_env(true)
     .build();
   agents.insert(key, agent.clone());
   agent
+}
+
+/// A total request deadline must also shorten the blocking socket poll. The
+/// outer worker owns the wall-clock accounting, but a socket configured with a
+/// much longer idle timeout could otherwise keep teardown waiting after that
+/// deadline has fired. This remains a poll, not a replacement for the outer
+/// total-budget check: streamed responses are still bounded by elapsed time.
+fn effective_read_timeout_ms(config: &ProviderConfig) -> u64 {
+  config
+    .request_timeout_ms
+    .map_or(config.read_timeout_ms, |total| {
+      config.read_timeout_ms.min(total)
+    })
+    .max(1)
 }
 
 fn proxy_environment_fingerprint() -> u64 {
@@ -474,12 +500,26 @@ mod tests {
     let endpoint = ModelEndpoint {
       api_key: None,
       api_key_env: Some("RUPI_TEST_NEVER_SET_KEY".into()),
+      request_timeout_ms: Some(120_000),
       ..ModelEndpoint::local("local", "qwen", "http://127.0.0.1:8080/v1", 4_096)
     };
     let derived = ProviderConfig::from_endpoint(&endpoint).unwrap();
     assert_eq!(derived.credential(), None);
     assert_eq!(derived.max_output_tokens, None);
+    assert_eq!(derived.request_timeout_ms, Some(120_000));
     assert_eq!(derived.id, "local");
+  }
+
+  #[test]
+  fn zero_request_timeout_is_rejected() {
+    let mut broken = config();
+    broken.request_timeout_ms = Some(0);
+    assert_eq!(
+      broken.validate(),
+      Err(BuildError::Invalid(
+        "request_timeout_ms must be greater than zero"
+      ))
+    );
   }
 
   #[test]

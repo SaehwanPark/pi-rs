@@ -1,0 +1,8 @@
+.rupi-state/
+.rupi-state-retry/
+.rupi-state-deadline-retry/
+__pycache__/
+*.py[cod]
+*.sqlite3
+*.sqlite3-*
+var/

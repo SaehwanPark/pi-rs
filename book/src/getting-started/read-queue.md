@@ -39,8 +39,11 @@ responses, then restarts the service against the same SQLite database.
 The checked-in configs target the local Qwen endpoint and enable mutations for
 the original case study. For a read-only review, copy one config and set
 `tools.auto_approve_mutating` to `false` first. Keep implementation and
-verification in separate turns; a request-budget exhaustion is an incomplete
-turn, not evidence that the project passed.
+verification in separate turns; a request-budget exhaustion or provider request
+deadline is an incomplete turn, not evidence that the project passed. For an
+implementation slice, use a copied config with a bounded `request_timeout_ms`
+(for example `120000`) and a modest output cap; inspect and resume after a timeout
+instead of letting one local-model request consume the whole session.
 
 ```bash
 rupi run --config rupi.recovery.config.json --cwd . \

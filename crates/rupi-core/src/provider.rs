@@ -222,6 +222,19 @@ impl CompletionUsage {
   pub fn is_certain(&self) -> bool {
     self.certainty == CompletionCertainty::Certain
   }
+
+  /// `true` when the provider stopped because the configured output budget was
+  /// reached rather than because it produced a complete answer.
+  ///
+  /// OpenAI-compatible endpoints conventionally report `length`; a few local
+  /// adapters use the more literal `max_tokens` label. Both are observed
+  /// completion boundaries, but neither is a usable final answer for a coding
+  /// turn. Keeping this predicate on the shared usage type prevents provider
+  /// adapters and the runtime from silently assigning different meanings to the
+  /// same finish reason.
+  pub fn stopped_at_output_limit(&self) -> bool {
+    matches!(self.finish_reason.as_deref(), Some("length" | "max_tokens"))
+  }
 }
 
 /// One normalized streaming fact from a provider.
@@ -438,6 +451,27 @@ mod tests {
       )]
     );
     assert_eq!(usage.finish_reason.as_deref(), Some("stop"));
+    assert!(!usage.stopped_at_output_limit());
+  }
+
+  #[test]
+  fn output_limit_finish_reasons_are_not_usable_answers() {
+    for reason in ["length", "max_tokens"] {
+      let usage = CompletionUsage {
+        input_tokens: None,
+        output_tokens: Some(8_192),
+        finish_reason: Some(reason.into()),
+        certainty: CompletionCertainty::Certain,
+      };
+      assert!(usage.stopped_at_output_limit(), "{reason}");
+    }
+    let normal = CompletionUsage {
+      input_tokens: None,
+      output_tokens: Some(4),
+      finish_reason: Some("stop".into()),
+      certainty: CompletionCertainty::Certain,
+    };
+    assert!(!normal.stopped_at_output_limit());
   }
 
   #[test]

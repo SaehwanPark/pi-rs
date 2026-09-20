@@ -180,6 +180,24 @@ Run the independent HTTP/restart check from
 [Read Queue walkthrough](https://saehwanpark.github.io/rupi/getting-started/read-queue.html)
 covers Windows direct-argv verification, bounded turns, trace, and replay.
 
+## Live example: Event Outbox
+
+[Event Outbox](https://saehwanpark.github.io/rupi/getting-started/event-outbox.html)
+is a third dependency-free Python example: a durable HTTP/SQLite outbox with
+idempotent admission, retryable delivery, and a separate direct-argv sink
+worker. Verify both the project suite and its independent fresh-process oracle:
+
+```bash
+cd docs/cases/2026-09-20-event-outbox/project
+python -W error::ResourceWarning -m unittest discover -s tests -p "test_*.py" -v
+cd ..
+python -W error::ResourceWarning -m unittest discover -s acceptance -p "test_*.py" -v
+```
+
+The [Event Outbox walkthrough](https://saehwanpark.github.io/rupi/getting-started/event-outbox.html)
+covers restart recovery, sink failures, retry state, and bounded trace/replay
+evidence.
+
 ## Commands
 
 | Command | Purpose |
