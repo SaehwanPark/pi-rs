@@ -21,7 +21,8 @@ Pi-compatible skills, prompts, packages, extensions, and session formats when th
 3. [Create a safe configuration](getting-started/quickstart.md#2-create-configjson).
 4. [Ask a read-only question](getting-started/quickstart.md#3-run-a-read-only-request).
 5. [Resume, inspect, or replay the session](getting-started/quickstart.md#5-find-and-reuse-a-session).
-6. [Try the Test Ledger live example](getting-started/test-ledger.md).
+6. [Try the Test Ledger live example](getting-started/test-ledger.md), then the
+   [Read Queue live example](getting-started/read-queue.md).
 
 The default configuration does **not** approve file writes, edits, or shell commands.
 Start with a read-only prompt, then decide deliberately whether a trusted workspace should
@@ -45,6 +46,7 @@ Compaction can shorten the next prompt without erasing the recorded history.
 - [Installation](getting-started/installation.md)
 - [Quickstart](getting-started/quickstart.md)
 - [Test Ledger live example](getting-started/test-ledger.md)
+- [Read Queue live example](getting-started/read-queue.md)
 - [Interactive terminal](user-guide/interactive-tui.md)
 - [CLI reference](reference/cli.md)
 - [Models and providers](user-guide/models-and-providers.md)

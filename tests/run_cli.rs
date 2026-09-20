@@ -466,7 +466,11 @@ fn provider_and_durable_state_failures_exit_nonzero() {
   let output = run(&config, &workspace, "hello");
   server.requests();
   assert!(!output.status.success());
-  assert!(String::from_utf8_lossy(&output.stderr).contains("provider failure"));
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(stderr.contains("provider failure"));
+  assert!(stderr.contains("provider_unavailable"), "{stderr}");
+  assert!(stderr.contains("http 503"), "{stderr}");
+  assert!(stderr.contains("offline"), "{stderr}");
 
   let blocked_root = temp.path().join("state-is-a-file");
   fs::write(&blocked_root, "not a directory").unwrap();

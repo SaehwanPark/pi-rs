@@ -38,6 +38,12 @@ pub struct ExecTool {
   runtime: Runtime,
 }
 
+const EXEC_COMMAND_DESCRIPTION: &str = concat!(
+  "Shell command to run. Uses cmd.exe /C on Windows and sh -c on Unix-like ",
+  "systems; use dir rather than Unix ls on Windows; prefer process for a known ",
+  "executable."
+);
+
 pub(crate) struct CommandExecution<'a> {
   pub(crate) cwd: &'a Path,
   pub(crate) runtime: &'a Runtime,
@@ -58,7 +64,12 @@ impl Tool for ExecTool {
     // act, not a repeat of the same one.
     ToolMetadata::mutating(
       "exec",
-      "Run a shell command in the workspace and return its output. Shell: cmd.exe /C on Windows, sh -c on Unix-like systems. Mutating and not idempotent. Prefer process for a known executable and argv list.",
+      concat!(
+        "Run a shell command in the workspace and return its output. Shell: ",
+        "cmd.exe /C on Windows, sh -c on Unix-like systems. On Windows use ",
+        "dir rather than Unix ls. Prefer process for a known executable and ",
+        "argv list. Mutating and not idempotent."
+      ),
       false,
     )
   }
@@ -67,7 +78,7 @@ impl Tool for ExecTool {
     json!({
       "type": "object",
       "properties": {
-        "command": { "type": "string", "description": "Shell command to run. Uses cmd.exe /C on Windows and sh -c on Unix-like systems; prefer process for a known executable." },
+        "command": { "type": "string", "description": EXEC_COMMAND_DESCRIPTION },
         "cwd": { "type": "string", "description": "Working directory, relative to the workspace." },
         "timeout_ms": { "type": "integer", "description": "Override the configured timeout." }
       },
@@ -816,6 +827,7 @@ mod tests {
     let meta = ExecTool::new(runtime(&dir)).metadata();
     assert!(!meta.read_only);
     assert!(!meta.idempotent, "a second commit is a different act");
+    assert!(meta.description.contains("dir rather than Unix ls"));
   }
 
   #[test]

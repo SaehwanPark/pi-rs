@@ -161,6 +161,25 @@ mutations; set `auto_approve_mutating` to `false` before a read-only first run e
 The [Test Ledger walkthrough](https://saehwanpark.github.io/rupi/getting-started/test-ledger.html)
 shows the full test, trace, replay, and bounded-edit workflow.
 
+## Live example: Read Queue
+
+[Read Queue](https://saehwanpark.github.io/rupi/getting-started/read-queue.html) is a
+second dependency-free Python example: a small HTTP/SQLite service with a
+fresh-process restart oracle. Verify it independently, then ask rupi for a bounded
+review from its project directory:
+
+```bash
+cd docs/cases/2026-09-20-reading-queue/project
+python -W error::ResourceWarning -m unittest discover -s tests -p "test_*.py" -v
+rupi run --config rupi.recovery.config.json --cwd . \
+  --prompt "Inspect SPEC.md and the project. Run the project tests in a bounded slice and report exact results; do not edit files or run the independent oracle."
+```
+
+Run the independent HTTP/restart check from
+`docs/cases/2026-09-20-reading-queue` afterward. The
+[Read Queue walkthrough](https://saehwanpark.github.io/rupi/getting-started/read-queue.html)
+covers Windows direct-argv verification, bounded turns, trace, and replay.
+
 ## Commands
 
 | Command | Purpose |

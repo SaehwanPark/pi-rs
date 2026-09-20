@@ -30,7 +30,12 @@ impl Tool for ProcessTool {
   fn metadata(&self) -> ToolMetadata {
     ToolMetadata::mutating(
       "process",
-      "Run a program directly with an argument list in the workspace; no shell quoting or expansion. Mutating and not idempotent.",
+      concat!(
+        "Run a program directly with an argument list in the workspace; no ",
+        "shell quoting or expansion. On Windows use cmd.exe with /C only when ",
+        "shell syntax is required; otherwise pass the executable and argv ",
+        "directly. Mutating and not idempotent."
+      ),
       false,
     )
   }
@@ -39,7 +44,7 @@ impl Tool for ProcessTool {
     json!({
       "type": "object",
       "properties": {
-        "program": { "type": "string", "description": "Executable to run directly; no shell is inserted." },
+        "program": { "type": "string", "description": "Executable to run directly; no shell is inserted. On Windows use cmd.exe only when shell syntax is required." },
         "args": {
           "type": "array",
           "items": { "type": "string" },
@@ -188,6 +193,7 @@ mod tests {
     assert!(!metadata.read_only);
     assert!(!metadata.idempotent);
     assert!(metadata.description.contains("no shell"));
+    assert!(metadata.description.contains("cmd.exe"));
     assert_eq!(tool.arguments_schema()["required"], json!(["program"]));
   }
 
