@@ -775,6 +775,14 @@ Do not begin until stable baselines exist.
       preserved bounded provider diagnostics, and re-ran the case with 67 project
       tests, the HTTP/restart oracle, trace, replay, and all three CI platforms
       green (2026-09-20).
+- [x] Validate the next live project, Event Outbox: a dependency-free Python
+      HTTP/SQLite outbox with idempotent admission, retryable delivery, and a
+      direct-argv NDJSON sink worker. The first bounded run exposed output-limit
+      completion ambiguity, a timeout recovery retry, and slow in-flight teardown;
+      the runtime now preserves output-limit failures, bounds provider requests,
+      and includes recovery in the request budget. Final live evidence recorded
+      one typed timeout with no retry/failover, six project tests, the independent
+      HTTP/restart/sink oracle, trace, and replay green (PR #110, 2026-09-20).
 
 ### P2 — Later / deliberately deferred
 

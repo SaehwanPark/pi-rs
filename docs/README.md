@@ -22,7 +22,9 @@ For end users and system integrators, the primary documentation is published via
   - **Test Ledger:** a live first-project walkthrough with independent verification,
     trace, and replay.
   - **Read Queue:** a live HTTP/SQLite project with restart recovery and a
-    fresh-process acceptance oracle.
+      fresh-process acceptance oracle.
+  - **Event Outbox:** a live HTTP/SQLite outbox with idempotency, retry state,
+      a separate sink process, and an independent acceptance oracle.
   - **CLI Reference:** Detailed usage of `run`, `interactive`, `trace`, `replay`, `skills`, `prompts`, `packages`, `trust`, `compat`, `import-pi`, and `export`.
   - **Interactive TUI:** Keyboard shortcuts, editor buffer, syntax highlighting, status line.
   - **Provenance Model:** Understanding `[native reasoning]`, `[provider summary]`, `[declared]`, and `[reconstructed]`.
