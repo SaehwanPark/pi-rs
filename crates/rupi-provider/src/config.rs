@@ -380,7 +380,7 @@ pub(crate) fn agent_for_proxy(
   Ok(
     ureq::builder()
       .timeout_connect(Duration::from_millis(config.connect_timeout_ms.max(1)))
-      .timeout_read(Duration::from_millis(config.read_timeout_ms.max(1)))
+      .timeout_read(Duration::from_millis(effective_read_timeout_ms(config)))
       .user_agent(&format!("rupi-relay/{relay_nonce}"))
       .proxy(proxy)
       .build(),
@@ -392,9 +392,10 @@ type AgentCache = BTreeMap<AgentCacheKey, ureq::Agent>;
 
 pub(crate) fn agent_for(config: &ProviderConfig) -> ureq::Agent {
   static AGENTS: OnceLock<Mutex<AgentCache>> = OnceLock::new();
+  let read_timeout_ms = effective_read_timeout_ms(config);
   let key = (
     config.connect_timeout_ms,
-    config.read_timeout_ms,
+    read_timeout_ms,
     proxy_environment_fingerprint(),
   );
   let agents = AGENTS.get_or_init(|| Mutex::new(BTreeMap::new()));
@@ -404,11 +405,25 @@ pub(crate) fn agent_for(config: &ProviderConfig) -> ureq::Agent {
   }
   let agent = ureq::builder()
     .timeout_connect(Duration::from_millis(config.connect_timeout_ms.max(1)))
-    .timeout_read(Duration::from_millis(config.read_timeout_ms.max(1)))
+    .timeout_read(Duration::from_millis(read_timeout_ms))
     .try_proxy_from_env(true)
     .build();
   agents.insert(key, agent.clone());
   agent
+}
+
+/// A total request deadline must also shorten the blocking socket poll. The
+/// outer worker owns the wall-clock accounting, but a socket configured with a
+/// much longer idle timeout could otherwise keep teardown waiting after that
+/// deadline has fired. This remains a poll, not a replacement for the outer
+/// total-budget check: streamed responses are still bounded by elapsed time.
+fn effective_read_timeout_ms(config: &ProviderConfig) -> u64 {
+  config
+    .request_timeout_ms
+    .map_or(config.read_timeout_ms, |total| {
+      config.read_timeout_ms.min(total)
+    })
+    .max(1)
 }
 
 fn proxy_environment_fingerprint() -> u64 {

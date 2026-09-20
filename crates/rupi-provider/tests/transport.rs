@@ -620,7 +620,14 @@ fn total_request_deadline_is_distinct_from_idle_timeout() {
   assert_eq!(failure.kind, ModelFailureKind::Timeout);
   assert_eq!(failure.phase, FailurePhase::WaitingForResponse);
   assert!(failure.message.contains("total timeout"), "{failure:?}");
-  assert!(started.elapsed() < Duration::from_secs(5), "{failure:?}");
+  let elapsed = started.elapsed();
+  // The logical budget is 200 ms; allow bounded scheduling/teardown grace when
+  // the integration-test process is running the other transport cases in
+  // parallel, while still catching the old multi-second socket teardown.
+  assert!(
+    elapsed < Duration::from_secs(4),
+    "elapsed={elapsed:?} {failure:?}"
+  );
   server.join().expect("server");
   let second = adapter.stream(
     &request("must not retry after total timeout"),

@@ -107,9 +107,11 @@ impl CancellableHttpRelay {
 
   pub(crate) fn stop(&mut self) {
     self.stop.store(true, Ordering::Release);
-    // Wake a listener blocked in accept. An active connection is woken by its
-    // short read/write polls and observes the same flag.
-    let _ = TcpStream::connect(self.address);
+    if self.handle.is_some() {
+      // Wake a listener blocked in accept. An active connection is woken by
+      // short read/write polls and observes the same flag.
+      let _ = TcpStream::connect(self.address);
+    }
     if let Some(handle) = self.handle.take() {
       let _ = handle.join();
     }

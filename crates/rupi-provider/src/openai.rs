@@ -364,13 +364,14 @@ impl OpenAiCompat {
     let active_request = Arc::clone(&self.active_request);
     let request = request.clone();
     let model = request.model.clone();
-    // Keep the provider's cancellation token tied to the caller. A separate
-    // channel-stop token lets a total deadline unblock a saturated event queue
-    // without turning that deadline into a user `Cancelled` result.
-    let worker_cancel = cancel.clone();
-    let channel_stop = CancelToken::new();
-    let channel_cancel = channel_stop.clone();
-    let done_cancel = channel_stop.clone();
+    // Keep a local token for the worker as well as the caller's token. The
+    // outer loop translates caller cancellation and total-deadline expiry into
+    // this token before stopping the relay, so the blocking worker can observe
+    // the same boundary without issuing a second POST.
+    let request_cancel = CancelToken::new();
+    let worker_cancel = request_cancel.clone();
+    let channel_cancel = request_cancel.clone();
+    let done_cancel = request_cancel.clone();
     let worker_handle = thread::spawn(move || {
       let mut channel_sink = ChannelSink {
         sender: sender.clone(),
@@ -400,7 +401,7 @@ impl OpenAiCompat {
     let mut last_activity = Instant::now();
     loop {
       if cancel.is_cancelled() {
-        channel_stop.cancel();
+        request_cancel.cancel();
         self.quarantined.store(true, Ordering::Release);
         relay.stop();
         let _ = worker_handle.join();
@@ -412,7 +413,7 @@ impl OpenAiCompat {
         return Err(decode::cancelled(emitted).with_model(model));
       }
       if let Some(budget) = total_budget.filter(|budget| request_started.elapsed() >= *budget) {
-        channel_stop.cancel();
+        request_cancel.cancel();
         self.quarantined.store(true, Ordering::Release);
         relay.stop();
         let _ = worker_handle.join();
@@ -463,7 +464,7 @@ impl OpenAiCompat {
           });
         }
         Err(mpsc::RecvTimeoutError::Timeout) if cancel.is_cancelled() => {
-          channel_stop.cancel();
+          request_cancel.cancel();
           self.quarantined.store(true, Ordering::Release);
           relay.stop();
           let _ = worker_handle.join();
@@ -471,7 +472,7 @@ impl OpenAiCompat {
           return Err(decode::cancelled(emitted).with_model(model));
         }
         Err(mpsc::RecvTimeoutError::Timeout) if last_activity.elapsed() >= idle_budget => {
-          channel_stop.cancel();
+          request_cancel.cancel();
           self.quarantined.store(true, Ordering::Release);
           relay.stop();
           let _ = worker_handle.join();
@@ -488,7 +489,7 @@ impl OpenAiCompat {
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {}
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-          channel_stop.cancel();
+          request_cancel.cancel();
           relay.stop();
           let _ = worker_handle.join();
           self.quarantined.store(true, Ordering::Release);

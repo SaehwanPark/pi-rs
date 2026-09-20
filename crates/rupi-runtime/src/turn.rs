@@ -1820,6 +1820,13 @@ impl<'a> TurnLoop<'a> {
         }
         return Err(TurnFailure::ProviderOverflow(failure));
       }
+      // The request budget covers retries and takeovers as well as ordinary
+      // tool rounds. Do not let the inner recovery loop spend a second request
+      // after the outer turn budget has already been consumed; doing so turns a
+      // configured one-request stopgate into a misleading quarantine failure.
+      if self.requests.load(Ordering::SeqCst) >= self.max_requests {
+        return Err(TurnFailure::Fatal(failure));
+      }
       match self
         .recover(turn_id.clone(), &failure, turn_history_start, cancel)
         .map_err(TurnFailure::from)?
@@ -5612,6 +5619,34 @@ mod tests {
     assert!(trace.find("model_retry").is_none());
     // The turn still ends, so the session can say what happened to it.
     assert!(trace.kinds().iter().any(|k| k == "turn_completed"));
+  }
+
+  #[test]
+  fn request_budget_covers_recovery_attempts() {
+    let provider = Scripted::new("timeout", Vec::new()).always_fails(ModelFailureKind::Timeout);
+    let tools = registry_with(Vec::new());
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_max_requests(1)
+    .run_turn("bounded request", &CancelToken::new(), &mut SilentProgress)
+    .expect_err("the one-request budget must stop before retry");
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::Timeout));
+    assert_eq!(trace.count("model_request_started"), 1);
+    assert_eq!(trace.count("model_request_completed"), 1);
+    assert_eq!(trace.count("model_retry"), 0);
   }
 
   #[test]
