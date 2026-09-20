@@ -1,8 +1,8 @@
 # Loop 2 live case: Event Outbox
 
-Status: planned
-Date: 2026-09-20  
-Test operator: Codex acting as a fresh `rupi` user  
+Status: complete; acceptance passed
+Date: 2026-09-20
+Test operator: Codex acting as a fresh `rupi` user
 Model target: local `qwen3.8-flash-next`
 
 ## T and why it is next
@@ -81,3 +81,11 @@ or PR, a repeated provider failure, or a project requirement that conflicts with
 the spec. A model request-budget exhaustion is evidence to record, not proof of
 acceptance and not by itself a reason to abandon the bounded repair/verification
 path.
+
+## Completion note
+
+The endpoint was available. Three bounded implementation attempts did not write
+the project before being interrupted or reaching an output-length boundary, so
+the tester completed the small project-local implementation without changing
+rupi. A final read-only `rupi run` verified the project suite and help commands;
+the independent fresh-process oracle and final project suite also passed.

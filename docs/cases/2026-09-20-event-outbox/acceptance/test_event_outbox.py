@@ -126,16 +126,13 @@ class EventOutboxAcceptance(unittest.TestCase):
             str(self.db),
             "--sink",
             sys.executable,
-            "--sink-arg",
-            str(SINK),
-            "--sink-arg",
-            "--log",
-            "--sink-arg",
-            str(self.log),
+            "--sink-arg=" + str(SINK),
+            "--sink-arg=--log",
+            "--sink-arg=" + str(self.log),
             "--once",
         ]
         if fail_event is not None:
-            args.extend(["--sink-arg", "--fail-event", "--sink-arg", fail_event])
+            args.extend(["--sink-arg=--fail-event", "--sink-arg=" + fail_event])
         return subprocess.run(
             args,
             cwd=PROJECT,
@@ -184,6 +181,13 @@ class EventOutboxAcceptance(unittest.TestCase):
         self.assertIn("error", conflict)
         self.assertEqual(self.event("evt-1")["attempts"], 0)
 
+        delivered = self.run_worker()
+        self.assertEqual(delivered.returncode, 0, delivered.stderr)
+        first_state = self.event("evt-1")
+        self.assertEqual(first_state["status"], "delivered")
+        self.assertEqual(first_state["attempts"], 1)
+        self.assertIsNone(first_state["last_error"])
+
         status, second = self.request(
             "POST",
             "/events",
@@ -202,14 +206,10 @@ class EventOutboxAcceptance(unittest.TestCase):
         status, invalid_json = self.request("POST", "/events", {"event_id": "evt-3"})
         self.assertEqual(status, 400)
         self.assertIn("error", invalid_json)
-        self.assertEqual(self.event("evt-1")["attempts"], 0)
-
-        delivered = self.run_worker()
-        self.assertEqual(delivered.returncode, 0, delivered.stderr)
-        first_state = self.event("evt-1")
-        self.assertEqual(first_state["status"], "delivered")
-        self.assertEqual(first_state["attempts"], 1)
-        self.assertIsNone(first_state["last_error"])
+        status, unsupported = self.request("PUT", "/events/evt-1", {})
+        self.assertEqual(status, 405)
+        self.assertIn("error", unsupported)
+        self.assertEqual(self.event("evt-1")["attempts"], 1)
 
         failed = self.run_worker(fail_event="evt-2")
         self.assertNotEqual(failed.returncode, 0)
