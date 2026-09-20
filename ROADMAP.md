@@ -768,6 +768,13 @@ Do not begin until stable baselines exist.
       sessions, document Windows shell behavior, add direct argv process execution,
       and verify the toy project plus full workspace on Windows (case remediation
       record and PR #105, 2026-09-20).
+- [x] Validate the next live project, Read Queue: a dependency-free Python
+      HTTP/SQLite service with fresh-process restart verification. The initial
+      bounded run exposed generic reasoning-dialect and Windows tool guidance
+      friction; PR #108 normalized `minimal` to the supported low wire value,
+      preserved bounded provider diagnostics, and re-ran the case with 67 project
+      tests, the HTTP/restart oracle, trace, replay, and all three CI platforms
+      green (2026-09-20).
 
 ### P2 — Later / deliberately deferred
 
