@@ -23,6 +23,10 @@ low` and a 60-second deadline still produced no first write.
 The final environment-only retry is recorded in
 [`REASONING_OFF_RETRY_REPORT.md`](REASONING_OFF_RETRY_REPORT.md): the model
 made one first write under the isolated server mode, but did not complete T.
+The final one-shot progress-boundary retry is recorded in
+[`ONE_SHOT_RETRY_REPORT.md`](ONE_SHOT_RETRY_REPORT.md): both turns made model
+first writes, and the boundary correctly returned the normal tool set after
+successful progress, but T still did not complete.
 
 No rupi runtime/source/tests or canonical documents changed.
 
@@ -38,6 +42,8 @@ No rupi runtime/source/tests or canonical documents changed.
   request deadlines.
 - `20a311f` — final provider-effort retry report before the environment-only
   retry.
+- `8efea83` — one-shot progress boundary after successful progress-tool
+  completion.
 
 All changed files are under
 `docs/cases/2026-09-20-webhook-inbox/`. The runtime, Rust crates, repository
@@ -65,6 +71,9 @@ unchanged.
 - final environment-only retry traces: R-09 63 entries/replay exit 0; R-10
   37 entries/replay exit 0; the model wrote only `webhookinbox/__init__.py`;
   project suite and oracle both failed against the incomplete model output;
+- final one-shot progress-boundary retry traces: R-11 49 entries/replay exit 0;
+  R-12 542 entries/replay exit 0; both turns made model-authored first writes,
+  but neither completed the package or passed the project/oracle checks;
 - source import review found only Python standard-library modules;
 - no file outside the case directory was modified.
 
@@ -80,12 +89,13 @@ unchanged.
 
 ## Parent retry request
 
-The progress boundary is now verified as active and schema-narrowing, but the
-high stopgate remains because the provider timed out before a write/edit/append
-call. The next retry must make the narrowed progress request complete within
-the deadline, or add a runtime enforcement that produces actual first-write
-progress. Keep the same fresh missing-project workspace, prompts, and unchanged
-oracle; require model-authored project-suite and oracle passes without tester
+The progress boundary is now verified as active, schema-narrowing, and
+one-shot after successful progress: the initial trace returned from 3 schemas
+to all 7 after successful writes without a second nudge/diagnostic. The high
+stopgate remains because the model still did not complete the package or pass
+the project/oracle checks. Any future runtime retry would need to preserve this
+fresh missing-project workspace, the exact prompts, and the unchanged oracle,
+and require model-authored project-suite and oracle passes without tester
 repair, followed by trace/replay.
 
 This is the final bounded retry for this case. The explicit low provider effort
@@ -94,3 +104,9 @@ and longer request deadline did not change the acceptance result.
 The isolated server environment produced a first write but not a complete
 model-authored project. The high stopgate remains, materially reduced but not
 resolved; no further case retry is implied by this report.
+
+The one-shot boundary fix is therefore behaviorally resolved for its targeted
+reactivation bug, but the broader high implementation stopgate remains:
+first-write progress is now observable, while bounded completion and acceptance
+still fail. This is the final bounded retry for the case; no tester repair is
+counted as implementation evidence.

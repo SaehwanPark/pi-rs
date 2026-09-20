@@ -388,3 +388,41 @@ authored only `webhookinbox/__init__.py`; the project suite failed because
 and failed both tests at `/healthz` setup. Trace/replay exited `0` (63 and 37
 entries). The high stopgate remains, materially reduced by the first write but
 not resolved.
+
+## Final one-shot progress-boundary retry (`8efea83`, 2026-09-20)
+
+The final retry after parent fix `8efea83` is recorded in
+[`ONE_SHOT_RETRY_REPORT.md`](ONE_SHOT_RETRY_REPORT.md). Rupi was rebuilt from
+the current head, and a brand-new ignored workspace contained only copied
+`SPEC.md`, configs, `.gitignore`, and the unchanged oracle/sinks. No prior
+implementation or retry files were exposed, and no implementation file was
+pre-created or deleted.
+
+The local llama server was healthy in user-authorized `--reasoning off` mode.
+All configs passed the pre-run parse check (the expected `parse-probe` session
+lookup returned no sessions, with no invalid-config error). The initial session
+`01a0c056-6029-729d-a93b-af8b2d7e09ac` ran 107,129 ms with 5/5 model request
+starts/completions, one model retry, and 5/5/0 tool request/completion/failure
+counts. Its first project write was `webhookinbox/__init__.py` at 30,149 ms;
+it then wrote `package_info.py` before the 60-second timeout and typed provider
+quarantine. The recovery session
+`01a0c058-4a7e-7bc7-8605-0fb1195a0f74` ran 68,570 ms with 3/3 requests and
+3/3/0 tools; it first wrote `__init__.py` at 25,833 ms and then `__main__.py`,
+ending naturally at `budget_exhausted`.
+
+The one-shot boundary behaved as intended. In the initial trace, schemas were
+7 at request 4, narrowed to `write`, `edit`, `append` at request 28 after
+one nudge/info diagnostic, and returned to all 7 at request 36 after successful
+writes; no second boundary nudge/diagnostic appeared. Recovery showed the same
+7 -> 3 transition before its two writes. The model authored only
+`webhookinbox/__init__.py`, `package_info.py`, and `__main__.py`; no README,
+tests, or functional modules existed. The unchanged project suite failed with
+`ImportError: Start directory is not importable: 'tests'`; the unchanged oracle
+ran because model output existed and both tests failed at `/healthz` with
+connection refused. Trace/replay exited 0 for both sessions (49/542 entries;
+15/9 tool lifecycle frames shown/replayed).
+
+The high stopgate remains, materially reduced: the runtime boundary now allows
+normal schemas after successful progress and the model reaches first writes,
+but it still does not complete T or pass either acceptance check without tester
+repair.
