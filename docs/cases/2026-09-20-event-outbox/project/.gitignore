@@ -1,4 +1,5 @@
 .rupi-state/
+.rupi-state-retry/
 __pycache__/
 *.py[cod]
 *.sqlite3
