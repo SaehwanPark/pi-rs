@@ -307,7 +307,7 @@ $sw=[Diagnostics.Stopwatch]::StartNew(); python -W error::ResourceWarning -m uni
 
 Result: `Ran 2 tests in 2.718s`, `OK`, exit `0`, wrapper elapsed `2834 ms`.
 
-## Final ranked issue status
+## Prior status before `95e8297`
 
 1. **High — the total deadline is not a hard wall-clock bound at the CLI/request
    boundary.** A configured `1000 ms` deadline produced a typed timeout, but the
@@ -328,3 +328,118 @@ waiting in the sense that a timeout is detected, but this live reproduction
 leaves two major runtime issues: the in-flight request and CLI exceed the
 configured deadline, and automatic timeout retry is still visible. The Event
 Outbox implementation and independent acceptance remain green.
+
+## Final retry after `95e8297`
+
+Parent fix: `95e8297` (`fix: bound provider deadline cancellation and recovery`).
+This retry used the unchanged case config
+`project/rupi.deadline.retry.config.json`; no runtime/provider source, project
+implementation, or acceptance oracle was edited in this case update.
+
+The local Qwen endpoint check returned HTTP `200` in `78 ms` and listed
+`qwen3.8-flash-next`. The rebuilt CLI command was:
+
+```powershell
+$sw=[Diagnostics.Stopwatch]::StartNew(); cargo build --bin rupi; $code=$LASTEXITCODE; $sw.Stop(); "cargo_build_exit=$code elapsed_ms=$($sw.ElapsedMilliseconds)"; exit $code
+```
+
+Result: exit `0`, wrapper elapsed `2977 ms` (`Finished` reported `2.90s`).
+
+Focused parent-fix checks passed:
+
+```powershell
+cargo test -p rupi-runtime request_budget_covers_recovery_attempts --lib
+```
+
+`1 passed; 0 failed; 90 filtered out; finished in 0.00s`; wrapper elapsed
+`183 ms`, exit `0`.
+
+```powershell
+cargo test -p rupi-provider total_request_deadline_is_distinct_from_idle_timeout --test transport
+```
+
+`1 passed; 0 failed; 21 filtered out; finished in 2.26s`; wrapper elapsed
+`2437 ms`, exit `0`.
+
+The same plain-text 4,000-word prompt was run against live Qwen:
+
+```powershell
+$prompt = 'Write a 4000-word plain-text essay explaining durable event outboxes, idempotency keys, retry state, and restart recovery. Do not use tools and do not emit structured data; respond only with prose.'; $sw=[Diagnostics.Stopwatch]::StartNew(); & 'C:\Users\saehwan\repos\pi-rs\target\debug\rupi.exe' run --config rupi.deadline.retry.config.json --cwd . --prompt $prompt --no-color --no-reasoning --verbose; $code=$LASTEXITCODE; $sw.Stop(); "rupi_exit=$code elapsed_ms=$($sw.ElapsedMilliseconds)"; exit $code
+```
+
+Live output and status:
+
+```text
+[model] no finish reason · 1.0 s · reasoning: reasoning
+[warn] model request failed (timeout): provider request exceeded its configured total timeout (1000 ms)
+[turn] timeout · 1.0 s
+[session end] interrupted · provider failure: timeout: provider request exceeded its configured total timeout (1000 ms)
+error: provider failure: timeout: provider request exceeded its configured total timeout (1000 ms)
+rupi_exit=1 elapsed_ms=1385
+```
+
+Session: `01a0bfec-a08e-7273-8c4f-d14613d1af21`
+
+The fresh trace contains exactly one model request and no recovery events:
+
+```text
+model_request_started=1
+model_request_completed=1
+model_retry=0
+model_failover=0
+diagnostic=1
+turn_completed=1
+session_ended=1
+model_request_completed: duration_ms=1067, first_delta_ms=754, finish_reason absent, tool_calls=0
+turn_completed: status.failed.kind=timeout, duration_ms=1086
+session_ended: interrupted; provider failure: timeout: provider request exceeded its configured total timeout (1000 ms)
+```
+
+Teardown is materially bounded: the provider request completed in `1067 ms`,
+the failed turn in `1086 ms`, and the CLI wrapper in `1385 ms`. This is a major
+improvement over the prior `3102 ms` request and `3544 ms` CLI run. The seven
+native reasoning deltas are partial timed-out output; no tool call or mutation
+occurred.
+
+Trace command:
+
+```powershell
+& 'C:\Users\saehwan\repos\pi-rs\target\debug\rupi.exe' trace --config rupi.deadline.retry.config.json 01a0bfec-a08e-7273-8c4f-d14613d1af21 --no-reasoning --no-color
+```
+
+Result: `15 entries read · 8 shown`, exit `0`, elapsed `19 ms`.
+
+Replay command:
+
+```powershell
+& 'C:\Users\saehwan\repos\pi-rs\target\debug\rupi.exe' replay ".rupi-state-deadline-retry\sessions\01a0bfec-a08e-7273-8c4f-d14613d1af21.trace.jsonl" --tools --sequence
+```
+
+Result: exit `0`, elapsed `17 ms`; no historical tool execution was performed.
+
+Regression checks remained green. The project suite reported `Ran 6 tests in
+0.368s`, `OK`, exit `0`, wrapper elapsed `475 ms`:
+
+```powershell
+$sw=[Diagnostics.Stopwatch]::StartNew(); python -W error::ResourceWarning -m unittest discover -s tests -p "test_*.py" -v; $code=$LASTEXITCODE; $sw.Stop(); "suite_exit=$code elapsed_ms=$($sw.ElapsedMilliseconds)"; exit $code
+```
+
+The independent HTTP/restart oracle reported `Ran 2 tests in 2.637s`, `OK`,
+exit `0`, wrapper elapsed `2765 ms`:
+
+```powershell
+$sw=[Diagnostics.Stopwatch]::StartNew(); python -W error::ResourceWarning -m unittest discover -s docs/cases/2026-09-20-event-outbox/acceptance -p "test_*.py" -v; $code=$LASTEXITCODE; $sw.Stop(); "oracle_exit=$code elapsed_ms=$($sw.ElapsedMilliseconds)"; exit $code
+```
+
+## Final issue status
+
+No major issue remains for the documented bounded workflow. The final live
+evidence confirms a typed timeout, exactly one model request, no retry/failover,
+and materially bounded teardown. The prior high issues—multi-second in-flight
+teardown, timeout retry, and the final quarantine diagnostic—are resolved by
+`95e8297`.
+
+Residual friction is low: the one-second probe can emit a few native reasoning
+deltas before timing out, and the CLI wrapper adds roughly `385 ms` over the
+provider request. Neither leaves an unbounded request or ambiguous completion
+status.
