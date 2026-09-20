@@ -20,6 +20,9 @@ and narrowed schemas, but the model still made no first write before timeout.
 The final provider-effort retry is recorded in
 [`REASONING_RETRY_REPORT.md`](REASONING_RETRY_REPORT.md): explicit `thinking:
 low` and a 60-second deadline still produced no first write.
+The final environment-only retry is recorded in
+[`REASONING_OFF_RETRY_REPORT.md`](REASONING_OFF_RETRY_REPORT.md): the model
+made one first write under the isolated server mode, but did not complete T.
 
 No rupi runtime/source/tests or canonical documents changed.
 
@@ -33,6 +36,8 @@ No rupi runtime/source/tests or canonical documents changed.
 - `e2e00f3` — opt-in progress boundary and Webhook Inbox progress-tool config.
 - `fc56ac4` — explicit low provider effort and 60-second initial/recovery
   request deadlines.
+- `20a311f` — final provider-effort retry report before the environment-only
+  retry.
 
 All changed files are under
 `docs/cases/2026-09-20-webhook-inbox/`. The runtime, Rust crates, repository
@@ -57,6 +62,9 @@ unchanged.
 - final provider-effort retry traces: R-07 892 entries/replay exit 0; R-08
   1,162 entries/replay exit 0; explicit low effort and 60-second deadlines
   still produced no project files;
+- final environment-only retry traces: R-09 63 entries/replay exit 0; R-10
+  37 entries/replay exit 0; the model wrote only `webhookinbox/__init__.py`;
+  project suite and oracle both failed against the incomplete model output;
 - source import review found only Python standard-library modules;
 - no file outside the case directory was modified.
 
@@ -82,3 +90,7 @@ repair, followed by trace/replay.
 
 This is the final bounded retry for this case. The explicit low provider effort
 and longer request deadline did not change the acceptance result.
+
+The isolated server environment produced a first write but not a complete
+model-authored project. The high stopgate remains, materially reduced but not
+resolved; no further case retry is implied by this report.

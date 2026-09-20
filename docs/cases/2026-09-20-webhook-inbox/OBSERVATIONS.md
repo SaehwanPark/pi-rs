@@ -364,3 +364,27 @@ runtime nudge and info diagnostic, and no `write`, `edit`, or `append` call.
 Neither model produced project files, so the project suite and unchanged oracle
 were not run. Trace/replay exited `0` (892 and 1,162 entries). Explicit low
 provider effort did not resolve the high stopgate; it remains.
+
+## Final environment-only retry (`--reasoning off`, 2026-09-20)
+
+The final environment retry is recorded in
+[`REASONING_OFF_RETRY_REPORT.md`](REASONING_OFF_RETRY_REPORT.md). The local
+llama server was restarted with the user-authorized isolated `--reasoning off`
+setting; `/v1/models` was healthy for `qwen3.8-flash-next`. Rupi was rebuilt
+from `20a311f`, and a brand-new ignored workspace contained only copied
+spec/config/ignore inputs plus the unchanged oracle.
+
+The initial session `01a0c04a-d453-733d-9581-280c626a7a47` ran 117,161 ms with
+5/5 model request starts/completions, 4/4/0 tool request/completion/failure
+counts, and a first model write at 40,237 ms (`webhookinbox/__init__.py`). The
+recovery session `01a0c04d-093f-71e2-a55c-60a6a76f699d` ran 67,192 ms with 3/3
+requests and 2/2/0 tools, adding no files. Both ended with typed provider
+quarantine after a 60-second timeout/retry sequence.
+
+The boundary evidence was durable: initial request schemas narrowed 7 -> 3
+(`write`, `edit`, `append`) twice; recovery narrowed 7 -> 3 once. The model
+authored only `webhookinbox/__init__.py`; the project suite failed because
+`tests/` was absent, and the unchanged oracle ran against the partial workspace
+and failed both tests at `/healthz` setup. Trace/replay exited `0` (63 and 37
+entries). The high stopgate remains, materially reduced by the first write but
+not resolved.
