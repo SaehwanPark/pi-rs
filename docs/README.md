@@ -34,6 +34,9 @@ For end users and system integrators, the primary documentation is published via
   - **Artifact Pipeline:** a live authenticated HTTP/SQLite pipeline worker
       with declared output-to-input data flow, retry/blocked states, lease
       reclaim, and an independent acceptance oracle.
+  - **Lease Cascade:** a live authenticated HTTP/SQLite pipeline worker with
+      ordered barrier fan-in, selected output propagation, retry/blocked states,
+      lease reclaim, and an independent acceptance oracle.
   - **CLI Reference:** Detailed usage of `run`, `interactive`, `trace`, `replay`, `skills`, `prompts`, `packages`, `trust`, `compat`, `import-pi`, and `export`.
   - **Interactive TUI:** Keyboard shortcuts, editor buffer, syntax highlighting, status line.
   - **Provenance Model:** Understanding `[native reasoning]`, `[provider summary]`, `[declared]`, and `[reconstructed]`.
