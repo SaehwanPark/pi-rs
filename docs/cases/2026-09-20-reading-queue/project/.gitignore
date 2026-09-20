@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+.readqueue.sqlite*
+.rupi-state/
+
