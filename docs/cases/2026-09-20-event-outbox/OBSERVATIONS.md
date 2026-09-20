@@ -107,9 +107,15 @@ turn limit to eight requests. Exact command shape:
 rupi.exe run --config rupi.recovery.config.json --cwd . --prompt <recovery implementation prompt> --no-color --no-reasoning --verbose
 ```
 
-The prompt explicitly said to start writing the package, avoid probes and shell
-commands, use direct `process`, run the project suite once after code existed,
-and not read the external oracle.
+Prompt:
+
+```text
+Implement the Event Outbox project now from SPEC.md. Work only in this project workspace. Start writing the minimal complete outbox package, README.md, and focused tests; do not spend time inspecting Python stdlib internals or making probe files. Use only standard library. Implement the exact HTTP, SQLite, idempotency, retry state, worker direct-argv, and NDJSON sink contracts in SPEC.md.
+
+This is a bounded recovery slice after an interrupted exploratory turn. Do not use shell commands for Python or directory inspection on Windows: use the direct process tool with program python and argv, and use write/edit for files. Do not edit SPEC.md, either rupi config, or the external acceptance oracle. Run the project unittest command once after the implementation exists:
+python -W error::ResourceWarning -m unittest discover -s tests -p "test_*.py" -v
+If a test failure appears, fix only project defects needed by SPEC.md, rerun it, and then stop with exact results. Do not claim success from a planned command.
+```
 
 Session: `01a0bfa2-cb37-7a45-a783-06c785674143`. Wrapper elapsed
 `439,635 ms` (`7m 19.635s`), exit `0`. Trace counts were 4 requests started and
@@ -130,8 +136,13 @@ The third config used `thinking: off`, a 16,384 output-token cap, and a
 rupi.exe run --config rupi.fast.config.json --cwd . --prompt <short implementation prompt> --no-color --no-reasoning --verbose
 ```
 
-The prompt required immediate writes, direct argv process calls, no probes or
-external reads, and one project-suite run. The session was
+Prompt:
+
+```text
+Build the complete project in SPEC.md immediately. Work only in this workspace and use only Python standard library. Create outbox/, README.md, and tests. Implement the exact HTTP event contract, SQLite durability, idempotent POST behavior, and the bounded worker that spawns the sink with direct argv and exchanges one JSON line per event. Do not inspect anything outside this workspace, do not create probe files, and do not edit SPEC.md or either rupi config. Use write/edit for source files. On Windows use the process tool with program python and argv for commands, not shell quoting or Unix commands. Run the specified project unittest command once after code exists and fix only failures required by SPEC.md. Report exact command status before stopping.
+```
+
+The session was
 `01a0bfaa-2353-7235-bf75-1c168dea64a1`; local trace wall time was
 `12:33:13.561` to `12:42:38.124`, or `564,563 ms` (`9m 24.563s`). Ctrl-C
 ended the terminal with exit `1` after 4 requests started, 3 completed, 6
