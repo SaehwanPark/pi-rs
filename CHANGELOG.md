@@ -22,8 +22,8 @@ independent implementation with selected Pi compatibility, not a Pi rewrite or R
 - Curated resolved audit and proposal material into explicit historical archives.
 - Made `import-pi` the documented session-import command while retaining `import` as a
   compatibility alias.
-- Reviewed repetitive test assertions and retained only boundary, failure, provenance,
-  compatibility, and recovery coverage.
+- Removed one redundant CLI stdout assertion after reviewing the suite; boundary, failure,
+  provenance, compatibility, and recovery coverage remains intact.
 
 ### Fixed
 

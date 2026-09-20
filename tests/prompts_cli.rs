@@ -107,11 +107,8 @@ fn an_expanded_prompt_is_the_only_thing_on_stdout_and_keeps_its_newlines() {
   let (_root, home, project) = fixture();
   let (stdout, stderr, ok) = run(&["prompt", "pr", "https://example.test/1"], &home, &project);
   assert!(ok, "{stderr}");
+  // Exact stdout equality already proves that transcript diagnostics did not leak into the prompt.
   assert_eq!(stdout, "Look at https://example.test/1.\n");
-  assert!(
-    !stdout.contains("[prompt]"),
-    "the prompt is prose for a model: {stdout}"
-  );
 }
 
 #[test]
