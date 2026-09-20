@@ -167,6 +167,10 @@ def start_service(db: Path) -> tuple[subprocess.Popen[str], str]:
     while time.monotonic() < deadline:
         if process.poll() is not None:
             stderr = process.stderr.read() if process.stderr else ""
+            if process.stdout:
+                process.stdout.close()
+            if process.stderr:
+                process.stderr.close()
             raise AssertionError(f"service exited before health check: {stderr}")
         try:
             status, body = http_call(base, "GET", "/healthz")
