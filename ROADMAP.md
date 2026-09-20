@@ -816,6 +816,14 @@ Do not begin until stable baselines exist.
       repair, but the model turns timed out before functional completion. The
       model-authoring stopgate remains active; see PR #114 and
       `docs/cases/2026-09-20-lease-cascade/FINAL_REPORT.md` (2026-09-20).
+- [!] Validate the next live project, Lease Fence: a dependency-free Python
+      HMAC-authenticated HTTP/SQLite pipeline worker with private claim fencing,
+      stale-worker rejection, ordered barrier fan-in, retryable and terminal
+      failures, blocked dependents, lease reclaim, and a direct-argv sink. The
+      checked-in project suite and independent fresh-process oracle pass after
+      bounded tester repair, but both model turns stopped before functional
+      completion. The model-authoring stopgate remains active; see PR #115 and
+      `docs/cases/2026-09-20-lease-fence/FINAL_REPORT.md` (2026-09-20).
 
 ### P2 — Later / deliberately deferred
 

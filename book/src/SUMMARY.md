@@ -12,6 +12,7 @@
 - [Live example: Batch Relay](getting-started/batch-relay.md)
 - [Live example: Artifact Pipeline](getting-started/artifact-pipeline.md)
 - [Live example: Lease Cascade](getting-started/lease-cascade.md)
+- [Live example: Lease Fence](getting-started/lease-fence.md)
 
 # User Guide
 - [Interactive TUI](user-guide/interactive-tui.md)
