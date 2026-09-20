@@ -3938,7 +3938,10 @@ mod tests {
   /// A tool that represents the requested mutation for the progress-boundary
   /// test without touching the host filesystem.
   #[derive(Clone)]
-  struct MutatingSpy(Arc<Mutex<Vec<serde_json::Value>>>);
+  struct MutatingSpy {
+    seen: Arc<Mutex<Vec<serde_json::Value>>>,
+    outcome: ToolOutcome,
+  }
 
   impl Tool for MutatingSpy {
     fn metadata(&self) -> ToolMetadata {
@@ -3955,8 +3958,8 @@ mod tests {
       request: &ToolRequest,
       _progress: &mut dyn rupi_core::ToolProgress,
     ) -> Result<ToolOutcome, rupi_core::ToolError> {
-      self.0.lock().unwrap().push(request.arguments.clone());
-      Ok(ToolOutcome::succeeded("mutated"))
+      self.seen.lock().unwrap().push(request.arguments.clone());
+      Ok(self.outcome.clone())
     }
   }
 
@@ -5037,7 +5040,10 @@ mod tests {
     let write_seen = Arc::new(Mutex::new(Vec::new()));
     let tools = registry_with(vec![
       Box::new(Spy(Arc::clone(&read_seen))),
-      Box::new(MutatingSpy(Arc::clone(&write_seen))),
+      Box::new(MutatingSpy {
+        seen: Arc::clone(&write_seen),
+        outcome: ToolOutcome::succeeded("mutated"),
+      }),
     ]);
     let provider = Scripted::new(
       "progress-boundary",
@@ -5104,6 +5110,73 @@ mod tests {
           .unwrap_or_default()
           .contains("progress boundary active")
     }));
+  }
+
+  #[test]
+  fn failed_progress_attempt_keeps_the_boundary_narrowed() {
+    let read_seen = Arc::new(Mutex::new(Vec::new()));
+    let write_seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![
+      Box::new(Spy(Arc::clone(&read_seen))),
+      Box::new(MutatingSpy {
+        seen: Arc::clone(&write_seen),
+        outcome: ToolOutcome::failed("rejected"),
+      }),
+    ]);
+    let provider = Scripted::new(
+      "failed-progress-boundary",
+      vec![
+        tool_call("spy", serde_json::json!({})),
+        tool_call("write_probe", serde_json::json!({"path": "app.py"})),
+        tool_call("write_probe", serde_json::json!({"path": "app.py"})),
+        text("done"),
+      ],
+    );
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_progress_boundary(Some(1), vec!["write_probe".into()])
+    .run_turn(
+      "build the project",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .expect("a failed progress attempt should remain recoverable");
+
+    assert_eq!(report.status, TurnStatus::Completed);
+    assert_eq!(report.text, "done");
+    assert_eq!(read_seen.lock().unwrap().len(), 1);
+    assert_eq!(write_seen.lock().unwrap().len(), 2);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+      requests[1]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>(),
+      vec!["write_probe"]
+    );
+    assert_eq!(
+      requests[2]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>(),
+      vec!["write_probe"],
+      "failed progress must not restore the unrestricted tool set"
+    );
   }
 
   #[test]
