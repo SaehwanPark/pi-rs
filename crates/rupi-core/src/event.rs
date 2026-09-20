@@ -136,6 +136,12 @@ pub enum SessionEndReason {
   Restart,
   /// A fatal runtime condition ended the session.
   Fatal { message: String },
+  /// A turn stopped with durable state intact and may be continued with `--resume`.
+  ///
+  /// This is distinct from [`Self::Fatal`]: a budget exhaustion, provider
+  /// interruption, or bounded finalization leaves a usable session even though
+  /// the requested work is not known to be complete.
+  Interrupted { message: String },
 }
 
 /// How a turn ended.

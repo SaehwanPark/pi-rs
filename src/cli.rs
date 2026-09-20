@@ -46,6 +46,8 @@ pub const RUN_HELP: &str = concat!(
   "                           new one, so the next turn is appended to the session\n",
   "                           named. An id or a unique prefix names it, exactly as\n",
   "                           in `rupi trace`.\n",
+  "  --finalize               On a resumed session, make one no-tool assessment\n",
+  "                           request and keep the result explicitly incomplete.\n",
   "\n",
   "Surface:\n",
   "  --color <auto|always|never>\n",
@@ -442,6 +444,8 @@ pub struct RunArgs {
   /// store actually holds happens in the run command, not here: parsing must not open
   /// the network or scan the store.
   pub resume: Option<String>,
+  /// Run one bounded no-tool assessment against a resumed partial session.
+  pub finalize: bool,
   pub surface: SurfaceArgs,
 }
 
@@ -991,6 +995,7 @@ fn parse_run(remaining: &[OsString]) -> Result<Command, String> {
   let mut cwd: Option<PathBuf> = None;
   let mut prompt: Option<String> = None;
   let mut resume: Option<String> = None;
+  let mut finalize = false;
   // Held as options so two flags that decide the same thing can be reported as a
   // conflict instead of silently resolved by whichever came last.
   let mut color: Option<ColorChoice> = None;
@@ -1063,6 +1068,7 @@ fn parse_run(remaining: &[OsString]) -> Result<Command, String> {
         }
         set_once(&mut resume, value, flag)?;
       }
+      "--finalize" => finalize = true,
       "--no-color" => set_choice(&mut color, ColorChoice::Never, flag)?,
       "--no-reasoning" => reasoning = false,
       "--verbose" => set_choice(&mut diagnostics, DiagnosticFilter::All, flag)?,
@@ -1080,11 +1086,15 @@ fn parse_run(remaining: &[OsString]) -> Result<Command, String> {
   if prompt.trim().is_empty() {
     return Err("--prompt must not be empty".into());
   }
+  if finalize && resume.is_none() {
+    return Err(format!("--finalize requires --resume\n{RUN_HELP}"));
+  }
   Ok(Command::Run(RunArgs {
     config,
     cwd,
     prompt,
     resume,
+    finalize,
     surface: SurfaceArgs {
       // The CLI default is the calm one, which is not the renderer's own default:
       // the renderer's job is to be able to render everything, the command's job is
@@ -1880,6 +1890,15 @@ mod tests {
     assert!(
       run_err(&["--resume", "a", "--resume", "b"]).contains("--resume may be supplied only once")
     );
+  }
+
+  #[test]
+  fn finalize_requires_resume_and_is_recorded_when_present() {
+    let error = run_err(&["--finalize"]);
+    assert!(error.contains("--finalize requires --resume"), "{error}");
+    let args = run_args(&["--resume", "session", "--finalize"]);
+    assert!(args.finalize);
+    assert_eq!(args.resume.as_deref(), Some("session"));
   }
 
   fn run_args(values: &[&str]) -> RunArgs {

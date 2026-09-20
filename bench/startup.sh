@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Keep this script LF-terminated; Bash treats CRLF as part of shell options.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,7 +47,7 @@ cargo build --release --bin rupi --quiet
 # checkout as `/c/...`, but native Python subprocesses require a Windows path or a
 # path relative to their current directory.
 BINARY="target/release/rupi"
-if [[ -f "target/release/rupi.exe" ]]; then
+if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]] && [[ -f "target/release/rupi.exe" ]]; then
   BINARY="target/release/rupi.exe"
 fi
 

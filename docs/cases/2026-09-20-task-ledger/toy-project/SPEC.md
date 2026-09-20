@@ -16,19 +16,25 @@ python -m tasklog <command> [options]
 ```
 
 State is stored in `.tasklog.json` in the current working directory unless the
-program exposes a documented path override. The file is created on the first
-successful write. JSON should be human-readable and deterministic enough for a
-user to inspect in version control.
+program exposes a documented path override. The `--state PATH` option is global
+(`python -m tasklog --state PATH <command>`) and is also accepted after a
+subcommand for convenience. The file is created on the first successful write.
+JSON should be human-readable and deterministic enough for a user to inspect in
+version control. A missing file means a fresh ledger; an existing empty file is
+treated as possible truncation and is rejected without replacement.
 
 Required commands:
 
 1. `add TEXT`
    - create one open task;
-   - assign a stable positive integer id;
+   - assign a stable positive integer id; command-line ids use ASCII decimal
+     digits with an optional sign and must be positive;
    - print the created task in a concise, human-readable form.
 2. `list`
    - show open tasks in ascending id order;
    - `list --all` shows both open and completed tasks;
+   - the summary counts only displayed open tasks for `list`, and reports both
+     open and completed counts for `list --all`;
    - an empty ledger succeeds and says that there are no matching tasks.
 3. `done ID`
    - mark an existing open task complete;

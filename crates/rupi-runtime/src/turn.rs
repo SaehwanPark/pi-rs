@@ -26,9 +26,10 @@ use rupi_core::{
   AgentEvent, AssistantDelta, AttributedMessage, BlobRef, CAPSULE_SCHEMA_VERSION, CancelToken,
   CapabilityGap, CapsuleArtifact, CapsuleDecision, CheckpointCreated, CheckpointId, ContentBlock,
   ContextAction, ContextCapsule, ContextCompactionCompleted, ContextCompactionEpoch,
-  ContextCompactionStarted, ContextLevel, ContextPolicy, ContextReduced, ContextState, Diagnostic,
-  DiagnosticLevel, EpochReason, EventEnvelope, EventMeta, EventSeq, EventSink, ExternalContextItem,
-  ExternalContextRetrieved, FailurePhase, Message, ModelCapabilities, ModelEpoch,
+  ContextCompactionStarted, ContextLevel, ContextPolicy, ContextReduced, ContextState,
+  DEFAULT_MAX_MODEL_REQUESTS_PER_TURN, Diagnostic, DiagnosticLevel, EpochReason, EventEnvelope,
+  EventMeta, EventSeq, EventSink, ExternalContextItem, ExternalContextRetrieved, FailurePhase,
+  MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN, Message, ModelCapabilities, ModelEpoch,
   ModelEpochStarted, ModelFailover, ModelFailure, ModelFailureKind, ModelProvider, ModelRef,
   ModelRequest, ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta,
   ReasoningProvenance, ReductionReason, Role, SessionEndReason, SessionEnded, SessionId,
@@ -95,13 +96,21 @@ pub struct ResumeState {
 ///
 /// A model that keeps asking for tools is looping; the limit exists so a loop
 /// costs one visible failure instead of an unbounded bill.
-pub const MAX_MODEL_REQUESTS_PER_TURN: usize = 32;
+pub const MAX_MODEL_REQUESTS_PER_TURN: usize = DEFAULT_MAX_MODEL_REQUESTS_PER_TURN as usize;
 
 /// Live feedback for the surface. Every method is optional by design: the loop
 /// must be runnable with nobody watching.
 pub trait TurnProgress: Send {
   fn on_user_message(&mut self, _text: &str) {}
   fn on_request_started(&mut self, _model: &ModelRef) {}
+  /// Report a request with its position in the current turn's budget.
+  ///
+  /// The compatibility default keeps existing integrations that only implement
+  /// `on_request_started` source-compatible while allowing user-facing surfaces
+  /// to show sparse near-limit progress.
+  fn on_request_started_with_budget(&mut self, model: &ModelRef, _request: usize, _max: usize) {
+    self.on_request_started(model);
+  }
   fn on_reasoning(&mut self, _text: &str, _provenance: ReasoningProvenance) {}
   fn on_text_delta(&mut self, _text: &str) {}
   fn on_tool_requested(&mut self, _call: &ToolCallBlock) {}
@@ -399,6 +408,12 @@ pub struct TurnLoop<'a> {
   /// Counted where requests are issued rather than where rounds are driven, so the
   /// recovery loop cannot outlive the budget it is supposed to respect.
   requests: AtomicUsize,
+  /// Whether model requests may advertise and execute tools.
+  ///
+  /// Finalization deliberately disables this capability. The normal turn loop
+  /// remains tool-capable, while the bounded recovery assessment can never
+  /// repeat a mutating side effect.
+  tools_enabled: bool,
   session_started: bool,
   /// Whether the first lifecycle event belongs to a continuation of an existing
   /// durable journal rather than a newly created session.
@@ -470,6 +485,7 @@ impl<'a> TurnLoop<'a> {
       thinking: ThinkingLevel::default(),
       max_requests: MAX_MODEL_REQUESTS_PER_TURN,
       requests: AtomicUsize::new(0),
+      tools_enabled: true,
       session_started: false,
       resumed: false,
       interrupted_tools: Vec::new(),
@@ -563,8 +579,32 @@ impl<'a> TurnLoop<'a> {
 
   /// Override the per-turn request budget.
   pub fn with_max_requests(mut self, max: usize) -> Self {
-    self.max_requests = max.max(1);
+    self.max_requests = max
+      .max(1)
+      .min(MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN as usize);
     self
+  }
+
+  /// Run one bounded, no-tool recovery assessment.
+  ///
+  /// This is intentionally a separate mode rather than a larger ordinary turn:
+  /// the provider receives no tool schemas, the runtime permits one request, and
+  /// the caller remains responsible for treating the resulting assessment as an
+  /// incomplete recovery rather than silently converting it into success.
+  pub fn run_finalization(
+    &mut self,
+    input: &str,
+    cancel: &CancelToken,
+    progress: &mut dyn TurnProgress,
+  ) -> Result<TurnReport, TurnError> {
+    let saved_max_requests = self.max_requests;
+    let saved_tools_enabled = self.tools_enabled;
+    self.max_requests = 1;
+    self.tools_enabled = false;
+    let result = self.run_turn(input, cancel, progress);
+    self.max_requests = saved_max_requests;
+    self.tools_enabled = saved_tools_enabled;
+    result
   }
 
   /// Seed the visible history, for example after a session resume.
@@ -963,7 +1003,27 @@ impl<'a> TurnLoop<'a> {
     let mut overflow_recovery_used = false;
 
     self.ensure_session_started()?;
+    let was_resumed = self.resumed;
+    let restored_model = self.active_model();
+    let restored_context_epoch = self.context_epoch;
+    let interrupted_tools = self.interrupted_tools.len();
     self.reconcile_interrupted_tools()?;
+    if was_resumed {
+      self.diagnostic(
+        None,
+        DiagnosticLevel::Warn,
+        format!(
+          "resumed session: model {}, context epoch {}, reconciled {} interrupted tool(s); fresh request budget is {}",
+          restored_model,
+          restored_context_epoch,
+          interrupted_tools,
+          self.max_requests,
+        ),
+      )?;
+      // A resumed session has one recovery boundary. Later turns are ordinary
+      // turns and must not repeat the same startup notice.
+      self.resumed = false;
+    }
 
     for item in external_context {
       let bytes = item.text.len() as u64;
@@ -997,8 +1057,15 @@ impl<'a> TurnLoop<'a> {
 
     // The loop is bounded by *requests*, not rounds: a turn that keeps asking for
     // tools and a turn that keeps retrying spend the same budget, because from the
-    // caller's side they cost the same.
-    while self.requests.load(Ordering::SeqCst) < self.max_requests {
+    // caller's side they cost the same. Keep one request in reserve for an
+    // explicit no-tool completion assessment whenever the configured budget allows
+    // it; a budget of one remains a useful single ordinary request.
+    let normal_request_limit = if self.max_requests > 1 {
+      self.max_requests - 1
+    } else {
+      self.max_requests
+    };
+    while self.requests.load(Ordering::SeqCst) < normal_request_limit {
       if cancel.is_cancelled() {
         return self.finish(report, TurnStatus::Cancelled, clock, Some(turn_id.clone()));
       }
@@ -1037,39 +1104,36 @@ impl<'a> TurnLoop<'a> {
         }
         Err(TurnFailure::Sink(error)) => return Err(TurnError::from(error)),
       };
-      report.epoch = response.epoch;
-      report.requests = self.requests.load(Ordering::SeqCst);
+      let (assistant_event_id, calls) = self.record_response(response, &mut report)?;
 
-      let mut blocks = Vec::new();
-      if let Some(text) = response.text.as_ref().filter(|text| !text.is_empty()) {
-        blocks.push(ContentBlock::text(text.clone()));
-        report.text.push_str(text);
-      }
-      for call in &response.calls {
-        blocks.push(ContentBlock::ToolCall(ToolCallBlock {
-          id: call.id.clone(),
-          name: call.name.clone(),
-          arguments: call.arguments.clone(),
-        }));
-      }
-      let mut completion = response.completion;
-      let assistant_event_id = completion.meta.event_id.clone();
-      if !blocks.is_empty() {
-        let message = Message::new(Role::Assistant, blocks);
-        self.trace.emit_message(&mut completion, &message)?;
-        self.envelopes.push(completion.clone());
-        self.push_message(message, completion.meta.seq);
-      } else {
-        self.trace.emit_without_message(&mut completion)?;
-        self.envelopes.push(completion);
-      }
-
-      if response.calls.is_empty() {
+      if calls.is_empty() {
         // The model answered instead of asking: the turn is over.
         return self.finish(report, TurnStatus::Completed, clock, Some(turn_id.clone()));
       }
 
-      let tool_calls = u32::try_from(response.calls.len())
+      if !self.tools_enabled && !calls.is_empty() {
+        self.record_unexecuted_calls(
+          turn_id.clone(),
+          assistant_event_id,
+          &calls,
+          progress,
+          "finalization mode does not execute tools",
+        )?;
+        report.budget_exhausted = true;
+        self.diagnostic(
+          Some(turn_id.clone()),
+          DiagnosticLevel::Warn,
+          "finalization received a tool request; no tool was executed",
+        )?;
+        return self.finish(
+          report,
+          TurnStatus::BudgetExhausted,
+          clock,
+          Some(turn_id.clone()),
+        );
+      }
+
+      let tool_calls = u32::try_from(calls.len())
         .map_err(|_| TurnError::Sink("tool-call count exceeds durable limit".into()))?;
       report.tool_calls = report
         .tool_calls
@@ -1078,10 +1142,73 @@ impl<'a> TurnLoop<'a> {
       self.execute_calls(
         turn_id.clone(),
         assistant_event_id,
-        &response.calls,
+        &calls,
         cancel,
         progress,
       )?;
+    }
+
+    if self.max_requests > 1 && self.requests.load(Ordering::SeqCst) < self.max_requests {
+      if cancel.is_cancelled() {
+        report.requests = self.requests.load(Ordering::SeqCst);
+        return self.finish(report, TurnStatus::Cancelled, clock, Some(turn_id.clone()));
+      }
+
+      self.append_finalization_instruction(&turn_id)?;
+      let finalization = {
+        let tools_enabled = self.tools_enabled;
+        self.tools_enabled = false;
+        let result = self.attempt(turn_id.clone(), &mut turn_history_start, cancel, progress);
+        self.tools_enabled = tools_enabled;
+        result
+      };
+      let response = match finalization {
+        Ok(response) => response,
+        Err(TurnFailure::Cancelled) => {
+          report.requests = self.requests.load(Ordering::SeqCst);
+          return self.finish(report, TurnStatus::Cancelled, clock, Some(turn_id.clone()));
+        }
+        Err(TurnFailure::ProviderOverflow(failure) | TurnFailure::Fatal(failure)) => {
+          report.requests = self.requests.load(Ordering::SeqCst);
+          return self.finish_failure(report, failure, clock, turn_id.clone());
+        }
+        Err(TurnFailure::Sink(error)) => return Err(TurnError::from(error)),
+      };
+      let (assistant_event_id, calls) = self.record_response(response, &mut report)?;
+      report.budget_exhausted = true;
+      if calls.is_empty() {
+        self.diagnostic(
+          Some(turn_id.clone()),
+          DiagnosticLevel::Warn,
+          "turn reached the request budget; finalization answer is incomplete",
+        )?;
+      } else {
+        let tool_calls = u32::try_from(calls.len()).map_err(|_| {
+          TurnError::Sink("finalization tool-call count exceeds durable limit".into())
+        })?;
+        report.tool_calls = report
+          .tool_calls
+          .checked_add(tool_calls)
+          .ok_or_else(|| TurnError::Sink("turn tool-call count is exhausted".into()))?;
+        self.record_unexecuted_calls(
+          turn_id.clone(),
+          assistant_event_id,
+          &calls,
+          progress,
+          "request-budget finalization does not execute tools",
+        )?;
+        self.diagnostic(
+          Some(turn_id.clone()),
+          DiagnosticLevel::Warn,
+          "turn reached the request budget; finalization requested tools and none were executed",
+        )?;
+      }
+      return self.finish(
+        report,
+        TurnStatus::BudgetExhausted,
+        clock,
+        Some(turn_id.clone()),
+      );
     }
 
     // Out of requests, not out of options: the distinction belongs in the trace.
@@ -1534,7 +1661,8 @@ impl<'a> TurnLoop<'a> {
           }),
         )
         .map_err(TurnFailure::from)?;
-      progress.on_request_started(&model);
+      let request_number = self.requests.load(Ordering::SeqCst);
+      progress.on_request_started_with_budget(&model, request_number, self.max_requests);
 
       let clock = Instant::now();
       let attribution = StreamAttribution {
@@ -2501,7 +2629,7 @@ impl<'a> TurnLoop<'a> {
   /// context policy. Emergency overflow recovery uses this same constructor.
   fn assemble_request(&self, messages: Vec<Message>) -> ModelRequest {
     let capabilities = self.provider().capabilities();
-    let tools = if capabilities.tools {
+    let tools = if self.tools_enabled && capabilities.tools {
       self.tools.specs()
     } else {
       Vec::new()
@@ -2617,6 +2745,66 @@ impl<'a> TurnLoop<'a> {
     }
 
     Ok(self.assemble_request(self.messages.clone()))
+  }
+
+  /// Persist one assistant response and add its visible content to model history.
+  ///
+  /// Keeping this transaction in one helper is important for automatic budget
+  /// finalization: its no-tool response must receive exactly the same durable
+  /// assistant-message treatment as an ordinary model round.
+  fn record_response(
+    &mut self,
+    response: Response,
+    report: &mut TurnReport,
+  ) -> Result<(rupi_core::EventId, Vec<ToolCallBlock>), TurnError> {
+    let Response {
+      epoch,
+      text,
+      calls,
+      mut completion,
+    } = response;
+    report.epoch = epoch;
+    report.requests = self.requests.load(Ordering::SeqCst);
+
+    let mut blocks = Vec::new();
+    if let Some(text) = text.filter(|text| !text.is_empty()) {
+      blocks.push(ContentBlock::text(text.clone()));
+      report.text.push_str(&text);
+    }
+    for call in &calls {
+      blocks.push(ContentBlock::ToolCall(ToolCallBlock {
+        id: call.id.clone(),
+        name: call.name.clone(),
+        arguments: call.arguments.clone(),
+      }));
+    }
+    let assistant_event_id = completion.meta.event_id.clone();
+    if !blocks.is_empty() {
+      let message = Message::new(Role::Assistant, blocks);
+      self.trace.emit_message(&mut completion, &message)?;
+      self.envelopes.push(completion.clone());
+      self.push_message(message, completion.meta.seq);
+    } else {
+      self.trace.emit_without_message(&mut completion)?;
+      self.envelopes.push(completion);
+    }
+    Ok((assistant_event_id, calls))
+  }
+
+  /// Add the runtime-owned instruction that explains why the final request has no tools.
+  fn append_finalization_instruction(&mut self, turn_id: &TurnId) -> Result<(), TurnError> {
+    let text = "The model-request safety budget is exhausted for this turn. This is a bounded finalization request: do not request or imply any tool execution. Summarize what is complete, identify unfinished files or verification, and state the safest next continuation step. Treat the task as incomplete.";
+    let message = Message::user(text);
+    let envelope = self.emit_message(
+      Some(turn_id.clone()),
+      AgentEvent::UserMessage(UserMessage {
+        text: text.to_string(),
+        attachments: 0,
+      }),
+      &message,
+    )?;
+    self.push_message(message, envelope.meta.seq);
+    Ok(())
   }
 
   /// Close fully decoded calls from a response that cannot be acted on.
@@ -5619,6 +5807,11 @@ mod tests {
     );
     assert_eq!(report.status, TurnStatus::BudgetExhausted);
     assert_eq!(report.requests, 3);
+    assert_eq!(
+      provider.requests().len(),
+      3,
+      "the reserved finalization used the last request"
+    );
     assert!(trace.kinds().iter().any(|kind| kind == "diagnostic"));
     let diagnostics = trace.0.lock().unwrap();
     assert!(diagnostics.iter().any(|(_, kind, payload)| {
@@ -5626,8 +5819,73 @@ mod tests {
         && payload["message"]
           .as_str()
           .unwrap_or_default()
-          .contains("without a final answer")
+          .contains("finalization requested tools")
     }));
+  }
+
+  #[test]
+  fn finalization_is_one_request_and_exposes_no_tools() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![Box::new(Spy(Arc::clone(&seen)))]);
+    let provider = Scripted::new("finalizer", vec![text("assessment")]);
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_max_requests(32)
+    .run_finalization("assess", &CancelToken::new(), &mut SilentProgress)
+    .expect("finalization answer");
+
+    assert_eq!(report.status, TurnStatus::Completed);
+    assert_eq!(report.requests, 1);
+    assert!(!report.budget_exhausted);
+    assert_eq!(report.text, "assessment");
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].tools.is_empty(), "finalization exposed tools");
+    assert!(seen.lock().unwrap().is_empty());
+  }
+
+  #[test]
+  fn finalization_closes_an_unexpected_tool_call_without_executing_it() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![Box::new(Spy(Arc::clone(&seen)))]);
+    let provider = Scripted::new(
+      "toolish-finalizer",
+      vec![tool_call("spy", serde_json::json!({}))],
+    );
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_finalization("assess", &CancelToken::new(), &mut SilentProgress)
+    .expect("unexpected tool call is closed as an incomplete assessment");
+
+    assert_eq!(report.status, TurnStatus::BudgetExhausted);
+    assert!(report.budget_exhausted);
+    assert!(
+      seen.lock().unwrap().is_empty(),
+      "finalization executed a tool"
+    );
+    assert_eq!(trace.count("tool_failed"), 1);
   }
 
   /// A 20 000-token window on the balanced profile: compact at 15 000, checkpoint

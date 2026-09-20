@@ -261,25 +261,26 @@ fn one_shot_budget_exhaustion_exits_unsuccessfully() {
   let temp = TempDir::new().unwrap();
   let workspace = temp.path().join("workspace");
   fs::create_dir(&workspace).unwrap();
-  let responses = (0..32)
+  let responses = (0..3)
     .map(|index| tool_response(&format!("budget_{index}"), "unknown_tool", "{}", None))
     .collect();
   let server = FakeServer::answer(responses);
   let config = write_config(temp.path(), &server.base_url(), true);
+  let mut config_value: RuntimeConfig =
+    serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+  config_value.limits.max_model_requests_per_turn = 3;
+  fs::write(&config, serde_json::to_vec_pretty(&config_value).unwrap()).unwrap();
 
   let output = run(&config, &workspace, "keep working");
   let requests = server.requests();
-  assert_eq!(
-    requests.len(),
-    32,
-    "the configured request budget is finite"
-  );
+  assert_eq!(requests.len(), 3, "the configured request budget is finite");
   assert!(
     !output.status.success(),
     "no final answer must not look successful"
   );
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert!(stderr.contains("budget exhausted"), "{stderr}");
+  assert!(stderr.contains("request 2/3"), "{stderr}");
 
   let layout = StateLayout::new(temp.path().join("state"));
   let session_id = layout.list_session_ids().unwrap().pop().expect("session");

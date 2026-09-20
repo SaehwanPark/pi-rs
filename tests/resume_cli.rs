@@ -419,6 +419,49 @@ fn a_recorded_session_gains_a_second_turn_under_the_same_id() {
 }
 
 #[test]
+fn finalization_resume_makes_one_no_tool_request_and_stays_incomplete() {
+  let temp = TempDir::new().expect("temp dir");
+  let workspace = temp.path().join("workspace");
+  fs::create_dir(&workspace).expect("create the workspace");
+  let state = temp.path().join("state");
+
+  let first = FakeServer::answer(vec![text_response("partial work recorded")]);
+  let config = write_config_at(temp.path(), &first.base_url());
+  let out = run_prompt(&config, &workspace, "implement the task", &[]);
+  assert!(out.status.success(), "stderr: {}", stderr(&out));
+  let session_id = recorded_ids(&state).pop().expect("session id");
+
+  let finalizer = FakeServer::answer(vec![text_response("incomplete assessment")]);
+  let config = write_config_at(temp.path(), &finalizer.base_url());
+  let out = run_prompt(
+    &config,
+    &workspace,
+    "assess the remaining work",
+    &["--resume", &session_id[..8], "--finalize"],
+  );
+  assert!(!out.status.success(), "finalization must remain incomplete");
+  assert!(
+    stderr(&out).contains("interrupted"),
+    "stderr: {}",
+    stderr(&out)
+  );
+
+  let requests = finalizer.requests();
+  assert_eq!(requests.len(), 1);
+  assert!(
+    !requests[0].contains("\"tools\""),
+    "finalization request must not advertise tools: {}",
+    requests[0]
+  );
+  assert!(requests[0].contains("bounded finalization assessment"));
+  assert!(String::from_utf8_lossy(&out.stdout).contains("incomplete assessment"));
+  assert!(
+    out.stdout.ends_with(b"\n"),
+    "finalization answer was not flushed"
+  );
+}
+
+#[test]
 fn a_session_whose_log_cannot_be_read_is_refused_without_creating_a_session() {
   // A named session whose log cannot be rebuilt is not continued with a partial context.
   // This fixture holds no header record at all, so the command names the session, says

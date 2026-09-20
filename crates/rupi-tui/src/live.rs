@@ -25,7 +25,7 @@ use crate::{
   line::{NarrowDecoration, RenderLine},
   style::{Palette, Role},
   transcript::{
-    DiagnosticFilter, TranscriptOptions, completion_label, reasoning_label, render_event,
+    DiagnosticFilter, TranscriptOptions, completion_label, label, reasoning_label, render_event,
     tool_request_line,
   },
   width::{MIN_COLUMN, display_width},
@@ -125,13 +125,47 @@ impl<O: Write, E: Write> Surface<O, E> {
   /// always printed — one line that marks which turn this is costs little and
   /// recovers the context of everything after it.
   pub fn request_started(&mut self, model: &ModelRef) -> io::Result<()> {
-    if !self.options.diagnostics.shows_routine() {
-      return Ok(());
+    self.request_started_with_budget(model, 0, 0)
+  }
+
+  /// Report a model request while keeping ordinary request chatter quiet.
+  ///
+  /// The default headless surface suppresses routine `[request]` lines, but a
+  /// long coding turn needs a few visible milestones so a user can tell that
+  /// the safety budget is being consumed. `0, 0` retains the legacy routine
+  /// behavior for callers that do not have budget information.
+  pub fn request_started_with_budget(
+    &mut self,
+    model: &ModelRef,
+    request: usize,
+    max: usize,
+  ) -> io::Result<()> {
+    if self.options.diagnostics.shows_routine() {
+      self.close_block()?;
+      let mut line = RenderLine::new();
+      line.push("[request] ", Role::Muted);
+      line.push(&model.as_key(), Role::Operation);
+      return self.lines(wrap(vec![line], &self.options));
     }
+    let Some(near_limit) = budget_milestone(request, max) else {
+      return Ok(());
+    };
     self.close_block()?;
-    let mut line = RenderLine::new();
-    line.push("[request] ", Role::Muted);
+    let mut line = label(if near_limit { "warning" } else { "working" });
+    line.push(
+      &format!("request {request}/{max}"),
+      if near_limit {
+        Role::Warning
+      } else {
+        Role::Operation
+      },
+    );
+    line.push(SEPARATOR, Role::Muted);
     line.push(&model.as_key(), Role::Operation);
+    if near_limit {
+      line.push(SEPARATOR, Role::Muted);
+      line.push("turn is nearing its safety limit", Role::Warning);
+    }
     self.lines(wrap(vec![line], &self.options))
   }
 
@@ -463,6 +497,23 @@ fn wrap(lines: Vec<RenderLine>, options: &TranscriptOptions) -> Vec<RenderLine> 
     .iter()
     .flat_map(|line| line.wrapped(options.width, decoration))
     .collect()
+}
+
+fn budget_milestone(request: usize, max: usize) -> Option<bool> {
+  if request == 0 || max == 0 || request > max {
+    return None;
+  }
+  let thresholds = [
+    max / 2,
+    max.saturating_mul(3) / 4,
+    max.saturating_sub(2),
+    max,
+  ];
+  thresholds
+    .into_iter()
+    .filter(|threshold| *threshold > 0)
+    .find(|threshold| *threshold == request)
+    .map(|_| request.saturating_add(2) >= max)
 }
 
 /// Whether the live surface is what shows this event's content.
@@ -856,6 +907,24 @@ mod tests {
     surface.request_started(&model).unwrap();
     let (_, err) = take(surface);
     assert_eq!(err, "[request] local/qwen\n");
+  }
+
+  #[test]
+  fn state_surface_shows_only_sparse_budget_milestones() {
+    let model = ModelRef::new("local", "qwen");
+    let mut surface = surface(level(DiagnosticFilter::State));
+    surface.request_started_with_budget(&model, 1, 32).unwrap();
+    surface.request_started_with_budget(&model, 16, 32).unwrap();
+    surface.request_started_with_budget(&model, 24, 32).unwrap();
+    surface.request_started_with_budget(&model, 30, 32).unwrap();
+    let (_, err) = take(surface);
+    assert!(!err.contains("request 1/32"), "{err}");
+    assert!(err.contains("[working] request 16/32"), "{err}");
+    assert!(err.contains("[working] request 24/32"), "{err}");
+    assert!(
+      err.contains("[warning] request 30/32") && err.contains("turn is nearing its safety limit"),
+      "{err}"
+    );
   }
   fn level(diagnostics: DiagnosticFilter) -> TranscriptOptions {
     TranscriptOptions {

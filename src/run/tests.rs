@@ -43,6 +43,7 @@ fn a_second_turn_on_one_handle_sends_the_first_turn_with_it() {
     cwd: workspace.clone(),
     prompt: String::new(),
     resume: None,
+    finalize: false,
     surface: SurfaceArgs::default(),
   };
 
@@ -115,6 +116,7 @@ fn a_recoverable_fatal_error_closes_the_durable_session_before_reporting_it() {
     cwd: workspace.clone(),
     prompt: String::new(),
     resume: None,
+    finalize: false,
     surface: SurfaceArgs::default(),
   };
 
@@ -135,7 +137,7 @@ fn a_recoverable_fatal_error_closes_the_durable_session_before_reporting_it() {
   assert!(matches!(
     events.last(),
     Some(AgentEvent::SessionEnded(event))
-      if matches!(&event.reason, SessionEndReason::Fatal { .. })
+      if matches!(&event.reason, SessionEndReason::Interrupted { .. })
   ));
 }
 
@@ -151,6 +153,7 @@ fn a_sink_error_does_not_fabricate_session_closure() {
     cwd: workspace.clone(),
     prompt: String::new(),
     resume: None,
+    finalize: false,
     surface: SurfaceArgs::default(),
   };
 
@@ -192,6 +195,7 @@ fn a_canceled_turn_ends_cancelled_and_the_same_handle_answers_again() {
     cwd: workspace.clone(),
     prompt: String::new(),
     resume: None,
+    finalize: false,
     surface: SurfaceArgs::default(),
   };
 
@@ -266,6 +270,7 @@ fn a_cancel_during_a_mutating_tool_leaves_that_call_unknown() {
     cwd: workspace.clone(),
     prompt: String::new(),
     resume: None,
+    finalize: false,
     surface: SurfaceArgs::default(),
   };
 

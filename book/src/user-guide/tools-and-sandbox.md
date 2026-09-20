@@ -1,6 +1,6 @@
 # Tools & Sandbox Safety
 
-`rupi` includes five core built-in tools for agent coding tasks, designed around strict confinement, bounded output, and approval contracts.
+`rupi` includes seven core built-in tools for agent coding tasks, designed around strict confinement, bounded output, and approval contracts.
 
 ---
 
@@ -31,6 +31,15 @@
 - **Parameters**: `command`.
 - **Classification**: **Mutating**.
 
+`exec` uses the platform shell: `cmd.exe /C` on Windows and `sh -c` on Unix-like
+systems. For a known executable, prefer `process` so each argument remains one
+argv value and is not reinterpreted by shell quoting or expansion.
+
+### 6. `process`
+- **Purpose**: Execute a program directly with an explicit argument list.
+- **Parameters**: `program`, optional `args`, `cwd`, and `timeout_ms`.
+- **Classification**: **Mutating** — an arbitrary program may change workspace or external state.
+
 ---
 
 ## Safety Guarantees
@@ -41,7 +50,7 @@ realpath resolution so traversal and outward-pointing symlink components cannot 
 the workspace. Explicit policy flags are required to widen read, search, or write scope.
 
 ### Mutating Tool Guard
-Mutating tools (`write`, `edit`, `exec`) cannot run automatically unless explicitly permitted in your configuration:
+Mutating tools (`write`, `edit`, `exec`, `process`) cannot run automatically unless explicitly permitted in your configuration:
 
 ```json
 {
@@ -55,5 +64,6 @@ If `auto_approve_mutating` is `false` (the default), mutating requests return an
 explicit refusal event, preventing unintended side effects. Enable it only for a
 trusted workspace.
 
-### The Shell Escape Hatch
-`exec` intentionally spawns a shell process (`sh -c` on Unix) to enable compiler builds, test suites, and git operations. It is not an OS-level sandbox. If running untrusted agent code, execute `rupi` within Docker, a VM, or an isolated container sandbox.
+### Process Boundaries
+Neither tool is an OS-level sandbox. If running untrusted agent code, execute `rupi`
+within Docker, a VM, or an isolated container sandbox.

@@ -24,7 +24,7 @@ class ParseIdTests(unittest.TestCase):
         self.assertEqual(parse_id(10**12), 10**12)
 
     def test_rejects_non_positive_or_non_numeric(self):
-        for value in (0, -1, "0", "-4", "1.5", "abc", "", "  ", "+", None, True, False, 1.0, [1]):
+        for value in (0, -1, "0", "-4", "1.5", "abc", "", "  ", "+", "١", None, True, False, 1.0, [1]):
             with self.subTest(value=value):
                 with self.assertRaises(LedgerError):
                     parse_id(value)
@@ -123,7 +123,7 @@ class LedgerRemoveTests(unittest.TestCase):
     def test_remove_keeps_completed_tasks_until_removed(self):
         ledger, _ = Ledger.empty().add("one")
         ledger, _ = ledger.add("two")
-        ledger, _ = ledger.mark_done(1)
+        ledger, _, _ = ledger.mark_done(1)
         ledger, _ = ledger.remove(2)
         self.assertEqual([t.id for t in ledger.tasks], [1])
         self.assertTrue(ledger.get(1).done)
@@ -134,7 +134,7 @@ class LedgerQueryTests(unittest.TestCase):
         ledger = Ledger.empty()
         for index in range(1, 4):
             ledger, _ = ledger.add(f"task {index}")
-        ledger, _ = ledger.mark_done(2)
+        ledger, _, _ = ledger.mark_done(2)
         return ledger
 
     def test_open_tasks_sorted_ascending(self):
@@ -159,12 +159,16 @@ class LedgerQueryTests(unittest.TestCase):
         with self.assertRaises(CorruptState):
             Ledger(next_id=1, tasks=(Task(1, "a"), Task(1, "b")))
 
+    def test_next_id_must_be_above_existing_ids_on_construction(self):
+        with self.assertRaises(CorruptState):
+            Ledger(next_id=2, tasks=(Task(3, "a"),))
+
 
 class DocumentTests(unittest.TestCase):
     def _sample(self):
         ledger, _ = Ledger.empty().add("one")
         ledger, _ = ledger.add("two")
-        ledger, _ = ledger.mark_done(1)
+        ledger, _, _ = ledger.mark_done(1)
         return ledger
 
     def test_document_is_versioned_and_sorted(self):

@@ -1,6 +1,6 @@
 # One-Shot CLI Runner
 
-`rupi run` executes a single, complete, durable coding-agent turn against an explicitly configured endpoint. It is designed for headless workflows, CI/CD automation, scripts, and quick one-off coding tasks.
+`rupi run` executes a single, durable coding-agent turn against an explicitly configured endpoint. It is designed for headless workflows, CI/CD automation, scripts, and quick one-off coding tasks. Each turn has a configurable model-request safety budget (`limits.max_model_requests_per_turn`, default 32); near-limit progress is shown as sparse stderr milestones, and exhaustion is recoverable rather than a claim of successful completion.
 
 ---
 
@@ -22,6 +22,7 @@ rupi run --config <file> --cwd <workspace> --prompt <text>
 | `--cwd <path>` | Yes | Confinement root for built-in tools. Canonicalized at startup. |
 | `--prompt <text>` | Yes | Prompt instruction for the agent turn. |
 | `--resume <id\|prefix>` | No | Resume an existing session by ID or prefix and append a new turn. |
+| `--finalize` | No | On a resumed session, make one no-tool assessment request and keep the result explicitly incomplete. |
 | `--trust-store <path>` | No | Path to custom trust directory (consults `trust.json` before project discoveries). |
 | `-h, --help` | No | Display CLI command help. |
 
@@ -43,5 +44,5 @@ rupi run --config <file> --cwd <workspace> --prompt <text>
 ## Security & Confinement Model
 
 1. **Confinement Root**: All built-in file operations (`read`, `write`, `edit`) are strictly confined to `--cwd`. Attempts to access paths outside the workspace boundary (e.g., `../../etc/passwd`) are rejected by runtime contracts.
-2. **Mutating Tool Guard**: Operations that alter disk state (`write`, `edit`, `exec`) are refused unless `"tools": { "auto_approve_mutating": true }` is present in `RuntimeConfig`.
-3. **Execution Shell Escape**: The `exec` tool invokes the system shell. When enabled, it provides full system execution capability; use container or OS-level virtualization when isolating untrusted workloads.
+2. **Mutating Tool Guard**: Operations that alter disk state (`write`, `edit`, `exec`, `process`) are refused unless `"tools": { "auto_approve_mutating": true }` is present in `RuntimeConfig`.
+3. **Execution Boundary**: The `exec` tool invokes `cmd.exe /C` on Windows and `sh -c` on Unix-like systems. For a known executable, `process` passes an explicit argv list without shell parsing. Both provide full system execution capability when enabled; use container or OS-level virtualization when isolating untrusted workloads.

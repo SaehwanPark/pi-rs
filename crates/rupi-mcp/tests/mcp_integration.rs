@@ -118,13 +118,41 @@ fn mutating_mcp_tool_preserves_honest_uncertainty_under_pipe_failure() {
 
 #[test]
 fn real_subprocess_stdio_transport_wire_test() {
-  // A tiny shell script running as an MCP server responding to initialize,
-  // notifications/initialized, tools/list, and tools/call
-  let script = r#"
+  // A tiny subprocess running as an MCP server responding to initialize,
+  // notifications/initialized, tools/list, and tools/call. Keep the fixture
+  // platform-native so this wire test exercises the transport rather than a
+  // developer machine's Unix shell availability.
+  #[cfg(windows)]
+  let (program, arguments) = (
+    "powershell",
+    vec![
+      "-NoProfile".to_string(),
+      "-Command".to_string(),
+      r#"
+while (($line = [Console]::In.ReadLine()) -ne $null) {
+  if ($line.Contains('initialize')) {
+    [Console]::WriteLine('{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"mock-stdio-mcp","version":"0.1.0"}}}')
+  } elseif ($line.Contains('tools/list')) {
+    [Console]::WriteLine('{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"echo text","inputSchema":{"type":"object"}}]}}')
+  } elseif ($line.Contains('tools/call')) {
+    [Console]::WriteLine('{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"echoed: hello wire"}],"isError":false}}')
+  }
+  [Console]::Out.Flush()
+}
+"#
+        .to_string(),
+    ],
+  );
+  #[cfg(not(windows))]
+  let (program, arguments) = (
+    "sh",
+    vec![
+      "-c".to_string(),
+      r#"
 while IFS= read -r line; do
   case "$line" in
     *"initialize"*)
-      echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"mock-sh-mcp","version":"0.1.0"}}}'
+      echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"mock-stdio-mcp","version":"0.1.0"}}}'
       ;;
     *"tools/list"*)
       echo '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"echo text","inputSchema":{"type":"object"}}]}}'
@@ -134,18 +162,17 @@ while IFS= read -r line; do
       ;;
   esac
 done
-"#;
+"#
+        .to_string(),
+    ],
+  );
 
-  let transport = StdioTransport::spawn(
-    "sh",
-    &["-c".to_string(), script.to_string()],
-    &BTreeMap::new(),
-  )
-  .expect("spawns sh subprocess");
+  let transport =
+    StdioTransport::spawn(program, &arguments, &BTreeMap::new()).expect("spawns stdio subprocess");
 
   let client = Arc::new(McpClient::new(Arc::new(transport)));
   let init = client.initialize().expect("initialize handshake succeeds");
-  assert_eq!(init.server_info.name, "mock-sh-mcp");
+  assert_eq!(init.server_info.name, "mock-stdio-mcp");
   assert_eq!(client.negotiated_version().unwrap(), "2024-11-05");
 
   let tools = client.list_tools().expect("list tools succeeds");

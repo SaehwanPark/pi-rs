@@ -19,6 +19,7 @@
 
 use std::{
   io::Read,
+  path::Path,
   process::{Child, Command, ExitStatus, Stdio},
   sync::mpsc,
   thread,
@@ -37,6 +38,14 @@ pub struct ExecTool {
   runtime: Runtime,
 }
 
+pub(crate) struct CommandExecution<'a> {
+  pub(crate) cwd: &'a Path,
+  pub(crate) runtime: &'a Runtime,
+  pub(crate) progress: &'a mut dyn ToolProgress,
+  pub(crate) deadline: &'a Deadline,
+  pub(crate) context: &'a ToolExecutionContext,
+}
+
 impl ExecTool {
   pub(crate) fn new(runtime: Runtime) -> Self {
     Self { runtime }
@@ -49,7 +58,7 @@ impl Tool for ExecTool {
     // act, not a repeat of the same one.
     ToolMetadata::mutating(
       "exec",
-      "Run a shell command in the workspace and return its output. Mutating and not idempotent.",
+      "Run a shell command in the workspace and return its output. Shell: cmd.exe /C on Windows, sh -c on Unix-like systems. Mutating and not idempotent. Prefer process for a known executable and argv list.",
       false,
     )
   }
@@ -58,7 +67,7 @@ impl Tool for ExecTool {
     json!({
       "type": "object",
       "properties": {
-        "command": { "type": "string", "description": "Shell command to run." },
+        "command": { "type": "string", "description": "Shell command to run. Uses cmd.exe /C on Windows and sh -c on Unix-like systems; prefer process for a known executable." },
         "cwd": { "type": "string", "description": "Working directory, relative to the workspace." },
         "timeout_ms": { "type": "integer", "description": "Override the configured timeout." }
       },
@@ -128,24 +137,57 @@ impl ExecTool {
 
     // The command is *itself* the escape hatch. Passing it through a shell is the
     // contract, which is exactly why the tool is declared mutating and gated.
-    let mut child = shell_command(command)
-      .current_dir(&cwd)
-      .stdout(Stdio::piped())
-      .stderr(Stdio::piped())
-      .spawn()
-      .map_err(|error| {
-        // Spawning failed, so nothing ran: this is a clean failure, not `Unknown`.
-        ToolError::new(format!("exec: cannot start command: {error}"))
-      })?;
-
-    let mut outcome = drain(
-      &mut child, progress, &runtime, &deadline, context, command, &cwd,
-    );
-    // Reap in every path. A leaked child keeps running after we report a result,
-    // which is the one outcome worse than an honest `Unknown`.
-    let status = wait_for_exit(&mut child, context, &deadline, &mut outcome);
-    finish(outcome, status, &deadline, command)
+    let mut execution = CommandExecution {
+      cwd: &cwd,
+      runtime: &runtime,
+      progress,
+      deadline: &deadline,
+      context,
+    };
+    run_command(shell_command(command), "exec", command, &mut execution)
   }
+}
+
+/// Run a prepared argv or shell command through the same bounded lifecycle.
+///
+/// `process` uses this boundary with a program and argument vector, while
+/// `exec` uses it with the platform shell. Keeping timeout, cancellation, output
+/// bounds, and unknown completion in one path prevents the two tools from
+/// drifting on the safety semantics that matter most.
+pub(crate) fn run_command(
+  mut command: Command,
+  tool_name: &str,
+  display: &str,
+  execution: &mut CommandExecution<'_>,
+) -> Result<ToolOutcome, ToolError> {
+  let mut child = command
+    .current_dir(execution.cwd)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .map_err(|error| {
+      // Spawning failed, so nothing ran: this is a clean failure, not `Unknown`.
+      ToolError::new(format!("{tool_name}: cannot start command: {error}"))
+    })?;
+
+  let mut outcome = drain(
+    &mut child,
+    execution.progress,
+    execution.runtime,
+    execution.deadline,
+    execution.context,
+    display,
+    execution.cwd,
+  );
+  // Reap in every path. A leaked child keeps running after we report a result,
+  // which is the one outcome worse than an honest `Unknown`.
+  let status = wait_for_exit(
+    &mut child,
+    execution.context,
+    execution.deadline,
+    &mut outcome,
+  );
+  finish(outcome, status, execution.deadline, display)
 }
 
 /// The result of the streaming phase, before reaping.
@@ -550,10 +592,14 @@ mod tests {
     // have already changed the world.
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("touched");
+    #[cfg(windows)]
+    let command = "echo touched > touched & ping -n 31 127.0.0.1 >nul";
+    #[cfg(not(windows))]
+    let command = format!("touch '{}' && sleep 30", marker.display());
     let outcome = exec(
       &dir,
       json!({
-        "command": format!("touch '{}' && sleep 30", marker.display()),
+        "command": command,
         "timeout_ms": 300
       }),
     );
@@ -610,6 +656,10 @@ mod tests {
   #[test]
   fn cancellation_kills_a_running_command_promptly() {
     let dir = tempfile::tempdir().unwrap();
+    #[cfg(windows)]
+    let command = "ping -n 31 127.0.0.1 >nul";
+    #[cfg(not(windows))]
+    let command = "sleep 30";
     let tool = ExecTool::new(runtime(&dir));
     let cancel = rupi_core::CancelToken::new();
     let trigger = cancel.clone();
@@ -621,7 +671,7 @@ mod tests {
     let mut recorder = Recorder::default();
     let outcome = tool
       .execute_with_context(
-        &request(json!({"command": "sleep 30"})),
+        &request(json!({"command": command})),
         &mut recorder,
         &rupi_core::ToolExecutionContext::new(cancel, Duration::from_secs(10)),
       )
@@ -643,7 +693,11 @@ mod tests {
   #[test]
   fn huge_output_is_bounded_and_marked() {
     let dir = tempfile::tempdir().unwrap();
-    let outcome = exec(&dir, json!({"command": "yes abcdefghij | head -c 4000000"}));
+    #[cfg(windows)]
+    let command = r#"powershell -NoProfile -Command [Console]::Out.Write(('abcdefghij' * 400000))"#;
+    #[cfg(not(windows))]
+    let command = "yes abcdefghij | head -c 4000000";
+    let outcome = exec(&dir, json!({"command": command}));
     // The *reported* result is bounded; the process may still have produced more.
     assert!(
       outcome.reduced || outcome.text.contains("truncated"),
@@ -767,7 +821,11 @@ mod tests {
   #[test]
   fn empty_output_says_so_instead_of_passing_as_no_output() {
     let dir = tempfile::tempdir().unwrap();
-    let outcome = exec(&dir, json!({"command": "true"}));
+    #[cfg(windows)]
+    let command = "ver >nul";
+    #[cfg(not(windows))]
+    let command = "true";
+    let outcome = exec(&dir, json!({"command": command}));
     assert!(outcome.text.contains("(no output)"), "{}", outcome.text);
   }
 }

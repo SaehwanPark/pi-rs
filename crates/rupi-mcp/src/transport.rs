@@ -978,13 +978,25 @@ mod tests {
 
   #[test]
   fn stdio_response_overflow_closes_the_protocol_before_materializing_the_line() {
-    let script = "IFS= read -r line; head -c 1048577 /dev/zero";
-    let transport = StdioTransport::spawn(
+    #[cfg(windows)]
+    let (program, arguments) = (
+      "powershell",
+      vec![
+        "-NoProfile".to_string(),
+        "-Command".to_string(),
+        "$s = 'x' * 1048577; [Console]::Out.Write($s)".to_string(),
+      ],
+    );
+    #[cfg(not(windows))]
+    let (program, arguments) = (
       "sh",
-      &["-c".to_string(), script.to_string()],
-      &BTreeMap::new(),
-    )
-    .expect("spawns overflow fixture");
+      vec![
+        "-c".to_string(),
+        "IFS= read -r line; head -c 1048577 /dev/zero".to_string(),
+      ],
+    );
+    let transport = StdioTransport::spawn(program, &arguments, &BTreeMap::new())
+      .expect("spawns overflow fixture");
     let error = transport.call("overflow", None).unwrap_err();
     assert!(format!("{error}").contains("bounded MCP stdout"), "{error}");
     assert!(!transport.is_alive());
@@ -992,15 +1004,21 @@ mod tests {
 
   #[test]
   fn stdio_call_cancellation_terminates_a_hung_server() {
-    let transport = StdioTransport::spawn(
+    #[cfg(windows)]
+    let (program, arguments) = (
+      "cmd",
+      vec!["/C".to_string(), "ping -n 31 127.0.0.1 >nul".to_string()],
+    );
+    #[cfg(not(windows))]
+    let (program, arguments) = (
       "sh",
-      &[
+      vec![
         "-c".to_string(),
         "while IFS= read -r line; do sleep 30; done".to_string(),
       ],
-      &BTreeMap::new(),
-    )
-    .expect("spawns hanging fixture");
+    );
+    let transport =
+      StdioTransport::spawn(program, &arguments, &BTreeMap::new()).expect("spawns hanging fixture");
     let cancel = rupi_core::CancelToken::new();
     let trigger = cancel.clone();
     let killer = thread::spawn(move || {

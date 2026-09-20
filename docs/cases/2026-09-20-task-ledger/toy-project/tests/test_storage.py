@@ -29,7 +29,7 @@ class SampleLedgers:
     def two_tasks_one_done() -> Ledger:
         ledger, _ = Ledger.empty().add("one")
         ledger, _ = ledger.add("two")
-        ledger, _ = ledger.mark_done(1)
+        ledger, _, _ = ledger.mark_done(1)
         return ledger
 
 
@@ -90,9 +90,11 @@ class SaveLoadTests(TempDirCase):
         save_ledger(self.state, ledger)
         self.assertEqual(load_ledger(self.state).get(1).text, "café — 日本語 task")
 
-    def test_empty_file_reads_as_empty_ledger(self):
+    def test_empty_existing_file_is_rejected_as_possible_truncation(self):
         self.write_state("   \n")
-        self.assertEqual(load_ledger(self.state), Ledger.empty())
+        with self.assertRaises(StorageError) as caught:
+            load_ledger(self.state)
+        self.assertIn("empty", str(caught.exception))
 
     def test_save_missing_parent_directory_reports_clearly(self):
         target = self.base / "nope" / DEFAULT_FILENAME
@@ -133,7 +135,7 @@ class AtomicityTests(TempDirCase):
         good = SampleLedgers.two_tasks_one_done()
         save_ledger(self.state, good)
         before = self.state_bytes()
-        broken = Ledger(next_id=1, tasks=(Task(1, "ok"),))
+        broken = Ledger(next_id=2, tasks=(Task(1, "ok"),))
         # Force json.dumps to fail *after* load succeeded: a ledger holding a
         # non-serialisable value cannot arise from JSON, so patch as_document.
         with mock.patch.object(
@@ -158,7 +160,8 @@ class AtomicityTests(TempDirCase):
 
         with mock.patch("tasklog.storage.os.replace", side_effect=crashing_replace):
             with self.assertRaises(StorageError):
-                save_ledger(self.state, Ledger.empty().add("new"))
+                new_ledger, _ = Ledger.empty().add("new")
+                save_ledger(self.state, new_ledger)
         self.assertEqual(self.state_bytes(), before)
         self.assertEqual(load_ledger(self.state), good)
         self.assertEqual(self.temp_files(), [])
