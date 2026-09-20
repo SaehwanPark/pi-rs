@@ -274,7 +274,9 @@ fn a_cancel_during_a_mutating_tool_leaves_that_call_unknown() {
     let cancel_token = cancel.clone();
     let flag_file = workspace.join("touched.txt");
     thread::spawn(move || {
-      let deadline = Instant::now() + Duration::from_secs(10);
+      // Allow the model request and tool dispatch to start after other unit tests
+      // have claimed the Windows runner, while still bounding a broken fixture.
+      let deadline = Instant::now() + FAKE_SERVER_ACCEPT_TIMEOUT;
       while !flag_file.exists() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
       }
@@ -356,6 +358,9 @@ enum Scripted {
   },
 }
 
+const FAKE_SERVER_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
+const FAKE_SERVER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Answers a fixed list of completions and records every request body it served.
 struct FakeServer {
   addr: SocketAddr,
@@ -376,6 +381,11 @@ impl FakeServer {
         .into_iter()
         .map(|response| {
           let mut socket = accept(&listener);
+          // A non-blocking listener can hand out non-blocking sockets on some
+          // platforms. Make request reads behave consistently under a loaded CI
+          // scheduler, and bound a client that connects without sending a body.
+          let _ = socket.set_nonblocking(false);
+          let _ = socket.set_read_timeout(Some(FAKE_SERVER_READ_TIMEOUT));
           let request = drain_request(&mut socket);
           match response {
             Scripted::Whole(body) => {
@@ -420,7 +430,10 @@ impl FakeServer {
 }
 
 fn accept(listener: &TcpListener) -> TcpStream {
-  let deadline = Instant::now() + Duration::from_secs(10);
+  // Opening a session can be delayed by the other tests sharing a Windows runner;
+  // this bound protects against a wedged fixture without making normal CI timing
+  // part of the assertion.
+  let deadline = Instant::now() + FAKE_SERVER_ACCEPT_TIMEOUT;
   loop {
     match listener.accept() {
       Ok((socket, _)) => return socket,
