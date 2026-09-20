@@ -58,6 +58,9 @@ class ReadQueueAcceptance(unittest.TestCase):
         except subprocess.TimeoutExpired:
             self.server.kill()
             self.server.wait(timeout=3)
+        for stream in (self.server.stdout, self.server.stderr):
+            if stream is not None:
+                stream.close()
         self.temp.cleanup()
 
     def wait_for_health(self) -> None:
@@ -87,7 +90,9 @@ class ReadQueueAcceptance(unittest.TestCase):
                 return response.status, json.loads(raw) if raw else None
         except HTTPError as exc:
             raw = exc.read()
-            return exc.code, json.loads(raw) if raw else None
+            result = exc.code, json.loads(raw) if raw else None
+            exc.close()
+            return result
 
     def test_http_contract_and_restart_persistence(self) -> None:
         status, body = self.request("GET", "/items")
@@ -142,6 +147,9 @@ class ReadQueueAcceptance(unittest.TestCase):
 
         self.server.terminate()
         self.server.wait(timeout=3)
+        for stream in (self.server.stdout, self.server.stderr):
+            if stream is not None:
+                stream.close()
         self.server = subprocess.Popen(
             [
                 sys.executable,
@@ -169,4 +177,3 @@ class ReadQueueAcceptance(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -1,6 +1,6 @@
 # Next black-box case: Reading Queue HTTP service
 
-Status: draft  
+Status: complete; acceptance passed
 Date: 2026-09-20  
 Test operator: Codex acting as a new `rupi` user  
 Model target: local llama.cpp, `qwen3.8-flash-next`
@@ -64,4 +64,3 @@ friction in `OBSERVATIONS.md`. A request-budget exhaustion, provider failure,
 or recovery interruption is evidence even if a later run succeeds. Stop only on
 a concrete environment or runtime gate after bounded recovery attempts; do not
 claim project acceptance from model prose alone.
-
