@@ -4,7 +4,7 @@ Status: in progress
 Date: 2026-09-20  
 Branch: `tester/2026-09-20-loop-6-lease-cascade`  
 Base: `main` at `e450c6c`  
-Draft PR: pending initial push  
+Draft PR: https://github.com/SaehwanPark/rupi/pull/114  
 Model target: local `qwen3.8-flash-next`
 
 This file is the chronological evidence ledger. It records exact commands,
@@ -60,8 +60,19 @@ This is the expected pre-implementation baseline, not an acceptance result.
 
 ## Initial PR handoff
 
-Pending: commit the case plan/spec/oracle/config/prompt baseline, push the
-branch, open a draft PR, and record its URL and commit here.
+Baseline commit: `b2cb9ff` (`test: define Loop 6 Lease Cascade case`).
+
+Commands:
+
+```text
+git push -u origin tester/2026-09-20-loop-6-lease-cascade
+gh pr create --repo SaehwanPark/rupi --base main --head tester/2026-09-20-loop-6-lease-cascade --draft --title "test: live case 6 Lease Cascade"
+```
+
+Result: push succeeded and draft PR
+https://github.com/SaehwanPark/rupi/pull/114 was created. The PR body records
+the pre-implementation baseline, acceptance split, and unchanged parent/runtime
+scope.
 
 ## Live implementation evidence
 

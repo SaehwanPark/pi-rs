@@ -5,7 +5,7 @@ Date: 2026-09-20
 T: Lease Cascade  
 Branch: `tester/2026-09-20-loop-6-lease-cascade`  
 Base: `main` at `e450c6c`  
-Draft PR: pending initial push
+Draft PR: https://github.com/SaehwanPark/rupi/pull/114
 
 The final report will separate model-authored evidence, independent project and
 oracle results, tester repairs, trace/replay evidence, runtime findings,
