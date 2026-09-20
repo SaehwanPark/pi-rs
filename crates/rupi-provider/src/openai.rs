@@ -405,6 +405,7 @@ impl OpenAiCompat {
         self.quarantined.store(true, Ordering::Release);
         relay.stop();
         let _ = worker_handle.join();
+        drain_worker_events(&receiver, sink, &mut emitted);
         // Keep the adapter quarantined: the POST may have reached the provider
         // before cancellation, so issuing another attempt through this adapter
         // could duplicate an uncertain request. Recovery must choose a fresh
@@ -417,6 +418,7 @@ impl OpenAiCompat {
         self.quarantined.store(true, Ordering::Release);
         relay.stop();
         let _ = worker_handle.join();
+        drain_worker_events(&receiver, sink, &mut emitted);
         self.active_request.store(false, Ordering::Release);
         return Err(
           ModelFailure::new(
@@ -468,6 +470,7 @@ impl OpenAiCompat {
           self.quarantined.store(true, Ordering::Release);
           relay.stop();
           let _ = worker_handle.join();
+          drain_worker_events(&receiver, sink, &mut emitted);
           self.active_request.store(false, Ordering::Release);
           return Err(decode::cancelled(emitted).with_model(model));
         }
@@ -476,6 +479,7 @@ impl OpenAiCompat {
           self.quarantined.store(true, Ordering::Release);
           relay.stop();
           let _ = worker_handle.join();
+          drain_worker_events(&receiver, sink, &mut emitted);
           self.active_request.store(false, Ordering::Release);
           return Err(
             ModelFailure::new(
@@ -518,6 +522,19 @@ enum WorkerMessage {
 struct ChannelSink {
   sender: SyncSender<WorkerMessage>,
   cancel: CancelToken,
+}
+
+fn drain_worker_events(
+  receiver: &mpsc::Receiver<WorkerMessage>,
+  sink: &mut dyn ProviderEventSink,
+  emitted: &mut bool,
+) {
+  while let Ok(message) = receiver.try_recv() {
+    if let WorkerMessage::Event(event) = message {
+      *emitted = true;
+      sink.emit(&event);
+    }
+  }
 }
 
 impl ProviderEventSink for ChannelSink {
