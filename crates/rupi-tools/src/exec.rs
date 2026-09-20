@@ -38,6 +38,12 @@ pub struct ExecTool {
   runtime: Runtime,
 }
 
+const EXEC_COMMAND_DESCRIPTION: &str = concat!(
+  "Shell command to run. Uses cmd.exe /C on Windows and sh -c on Unix-like ",
+  "systems; use dir rather than Unix ls on Windows; prefer process for a known ",
+  "executable."
+);
+
 pub(crate) struct CommandExecution<'a> {
   pub(crate) cwd: &'a Path,
   pub(crate) runtime: &'a Runtime,
@@ -72,7 +78,7 @@ impl Tool for ExecTool {
     json!({
       "type": "object",
       "properties": {
-        "command": { "type": "string", "description": concat!("Shell command to run. Uses cmd.exe /C on Windows and sh -c on Unix-like systems; use dir rather than Unix ls on Windows; prefer process for a known executable.") },
+        "command": { "type": "string", "description": EXEC_COMMAND_DESCRIPTION },
         "cwd": { "type": "string", "description": "Working directory, relative to the workspace." },
         "timeout_ms": { "type": "integer", "description": "Override the configured timeout." }
       },
