@@ -1,6 +1,6 @@
 # First-user black-box case: task ledger
 
-Status: in progress  
+Status: complete
 Date: 2026-09-20  
 Test operator: Codex acting as a new `rupi` user  
 Model: local llama.cpp, `qwen3.8-flash-next`
@@ -62,4 +62,3 @@ that require a separate benchmark.
 Severity in the final report will be `blocker`, `high`, `medium`, or `low`, based
 on whether it prevents a first successful task, risks data/safety, interrupts a
 normal workflow, or merely adds explanation/effort.
-
