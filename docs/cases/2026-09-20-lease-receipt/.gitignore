@@ -1,0 +1,10 @@
+.rupi-state*/
+**/__pycache__/
+**/*.pyc
+oracle-data/
+*.sqlite3
+*.log
+*.flag
+*.release
+*.receipts.json
+
