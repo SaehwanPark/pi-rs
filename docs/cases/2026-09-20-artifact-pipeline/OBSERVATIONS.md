@@ -53,9 +53,62 @@ Result:
 
 ## Live attempts
 
-No live model attempt has been run yet. This section will list each bounded
-`rupi run` invocation with its exact prompt file, session ID, request count,
-elapsed time, terminal status, tool lifecycle outcomes, and resulting files.
+### A-01 — initial model-authoring turn
+
+Exact command, run from `project/` with stdout and stderr intentionally combined
+for this first live capture:
+
+```text
+& 'C:\Users\saehwan\repos\pi-rs\target\debug\rupi.exe' run --config rupi.config.json --cwd . --prompt (Get-Content -Raw ..\prompts\initial.txt) --no-color 2>&1
+```
+
+Configuration and prompt:
+
+- config: `project/rupi.config.json`;
+- prompt: `prompts/initial.txt` (the exact committed file was passed as the
+  `--prompt` argument);
+- primary: `local/qwen3.8-flash-next`, native reasoning, 120,000 ms request
+  timeout, eight-request turn budget, one-request no-progress boundary.
+
+Observed result:
+
+- session: `01a0c0b0-6ce8-767a-983a-414e1833d853`;
+- trace turn duration: 244,985 ms;
+- process exit: 1;
+- model requests: 4 of the configured 8; the fourth request timed out after
+  120,083 ms while generating reasoning and made no tool call;
+- terminal diagnostic: `provider failure: timeout: provider request exceeded
+  its configured total timeout (120000 ms)`; no final model answer;
+- first request read `SPEC.md`; the runtime progress boundary activated after
+  that inspection request and exposed the narrowed progress tool set;
+- second request wrote `artifactpipe/__init__.py` successfully (893 bytes);
+- third request read the missing specification region;
+- fourth request produced only reasoning and timed out before another write;
+- no project implementation, tests, or README were completed.
+
+Read-only post-turn checks:
+
+```text
+& 'C:\Users\saehwan\repos\pi-rs\target\debug\rupi.exe' trace --config rupi.config.json 01a0c0b0-6ce8-767a-983a-414e1833d853 --quiet --no-reasoning
+```
+
+Result: exit 0; `4099 entries read · 1 shown`; the timeout warning was
+rendered and no provider was contacted by trace.
+
+```text
+& 'C:\Users\saehwan\repos\pi-rs\target\debug\rupi.exe' replay .rupi-state\sessions\01a0c0b0-6ce8-767a-983a-414e1833d853.trace.jsonl --tools --sequence
+```
+
+Result: exit 0; replay projected only the recorded read/write/read lifecycle
+at sequences 16–19, 1551–1553, and 1714–1716. It did not re-run a tool or call
+the provider. The session remains incomplete evidence.
+
+The exact emitted transcript was a combined stream; it included the original
+prompt, native reasoning, tool results, the progress-boundary diagnostic, and
+the typed timeout. No stdout final answer was present.
+
+The incomplete model-authored file is preserved in the workspace and is not
+counted as a completed implementation.
 
 ## Independent verification
 
@@ -71,4 +124,3 @@ the provider or execute historical tools.
 
 Pending. Slow local generation, request-budget exhaustion, or incomplete model
 work will be recorded as evidence and will not be relabelled as acceptance.
-
