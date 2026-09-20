@@ -1,0 +1,11 @@
+.rupi-state/
+.rupi-state-*/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.marker
+*.tmp
+__pycache__/
+*/__pycache__/
+tests/.tmp/
