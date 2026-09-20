@@ -135,3 +135,79 @@ llama.cpp or rerun tools.
 Classification: positive observability result. The `trace` default is very
 verbose for a 9,917-event session; `--no-reasoning` or `--quiet` is needed for
 practical inspection.
+
+### F-05 — Resume accepts the partial session but does not reach completion
+
+Condition: The session from F-01 was reopened with the documented `--resume`
+flag, using a second case-only config with the same endpoint and
+`thinking: "low"`. The original quickstart config was left unchanged.
+
+Command/prompt: `rupi run --config rupi.recovery.config.json --cwd .
+--resume 01a0bd1d-3e4a-72fd-812b-e67ed5aa2494 --prompt ...` asking only for
+tests, README, and a short verification run.
+
+Expected: resume the partial work, finish the missing deliverables, and return a
+final summary.
+
+Observed: the session reopened and appended new events to the same trace. The
+first resumed request took 124 seconds and its first visible delta arrived at
+115 seconds. Over the next roughly 25 minutes it added `tests/support.py`,
+`tests/test_model.py`, `tests/test_storage.py`, and `tests/test_cli.py`, but did
+not create `README.md` or return a final answer. The client was stopped after a
+bounded additional wait while the model was still generating; the wrapper
+reported exit `-1` and only a failed tool diagnostic.
+
+Evidence: the resumed trace reaches sequences above 20,000 and grows to about
+9 MiB; model request records show resumed requests lasting 123,180 ms,
+300,311 ms, and longer. The generated files remain in the toy workspace.
+
+Classification: high recovery UX failure. Resume is durable and productive,
+but the documented recovery path still requires another long opaque model turn
+and gives no user-facing estimate or way to request a bounded continuation.
+
+Impact: a new user can recover partial files but cannot predict whether the
+session will finish, and stopping the client leaves the recovery attempt without
+a clean final transcript.
+
+### F-06 — Independently validated toy project is only partially complete
+
+Condition: After the two model turns, run the project checks directly from the
+toy-project root with Python 3.14.7.
+
+Expected: the acceptance command `python -m unittest discover -s tests -v`
+passes, followed by the smoke and invalid-input checks in `SPEC.md`.
+
+Observed: the suite discovered 78 tests but exited 1 with 3 failures and 11
+errors. The generated tests unpack `Ledger.mark_done()` as two values while the
+implementation returns three, so several model/storage tests error before their
+assertions. Other failures include acceptance of an Arabic-Indic digit as an id,
+the default-list summary including completed-task counts, and a `--state` option
+test placing the option before the subcommand even though the parser only accepts
+it after the subcommand. No README was generated.
+
+The independent smoke sequence did pass: fresh `list`, two `add` calls,
+`list`, `done`, `list --all`, `remove`, durable JSON inspection, unknown-id
+rejection with an unchanged SHA-256, missing-argument rejection, and `--help`
+all returned the expected success/non-zero statuses for the tested cases.
+
+Classification: high task-completion failure, with separate toy-project quality
+findings. The core happy path works, but the model's own verification suite is
+internally inconsistent and the project lacks the requested documentation.
+
+Impact: a first user following the stated evaluation command sees a failing
+project even though a manual smoke path appears healthy; the agent never reached
+the point where it could diagnose or repair these failures.
+
+### O-07 — Mutation approval and durable state behaved as documented
+
+Condition: The isolated config set `tools.auto_approve_mutating` to `true` and
+the workspace was passed as `--cwd .`.
+
+Observed: `write` and `edit` calls modified only the toy workspace, `exec` ran
+the smoke commands, and `.rupi-state` recorded the session. A generated attempt
+to write outside the root was refused. The case `.gitignore` kept state, Python
+bytecode, and task data out of the eventual commit.
+
+Classification: positive safety/usability observation. The explicit mutation
+switch is understandable once found in the quickstart, but a new user must
+manually edit JSON before any coding task can change files.
