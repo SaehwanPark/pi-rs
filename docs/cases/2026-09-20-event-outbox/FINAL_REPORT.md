@@ -20,8 +20,10 @@ command/ordering mistakes; no rupi runtime changes were needed.
 - `c8ff2cb` — first specification/oracle commit, pushed before implementation;
   created `CASE_PLAN.md`, `project/SPEC.md`, the independent oracle and fake
   sink, `.gitignore`, and the initial Qwen config.
-- Follow-up implementation/evidence commit: to be filled with the pushed commit
-  hash in the PR update.
+- `5047573` — follow-up implementation, oracle corrections, configs, and
+  observations/evidence.
+- The branch-tip documentation commit finalizes this report and contains no
+  code changes.
 
 All changes are under `docs/cases/2026-09-20-event-outbox/`:
 
