@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "primary": "local/qwen3.8-flash-next",
+  "thinking": "xhigh",
+  "state_dir": ".rupi-state",
+  "endpoints": [
+    {
+      "provider": "local",
+      "model": "qwen3.8-flash-next",
+      "base_url": "http://127.0.0.1:8000/v1",
+      "capabilities": {
+        "text": true,
+        "images": false,
+        "tools": true,
+        "exposed_reasoning": "native",
+        "context_window": 262144,
+        "max_output_tokens": 32768
+      }
+    }
+  ],
+  "tools": {
+    "auto_approve_mutating": true,
+    "shell_timeout_ms": 120000,
+    "max_output_bytes": 8192
+  }
+}
