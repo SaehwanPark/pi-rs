@@ -71,6 +71,10 @@ pub struct ModelEndpoint {
   /// Optional logical idle deadline for this HTTP endpoint.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub read_timeout_ms: Option<u64>,
+  /// Optional total deadline for one provider request, including model
+  /// generation. `None` preserves long-running-session behavior.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub request_timeout_ms: Option<u64>,
 }
 
 impl fmt::Debug for ModelEndpoint {
@@ -86,6 +90,7 @@ impl fmt::Debug for ModelEndpoint {
       .field("max_output_tokens", &self.max_output_tokens)
       .field("connect_timeout_ms", &self.connect_timeout_ms)
       .field("read_timeout_ms", &self.read_timeout_ms)
+      .field("request_timeout_ms", &self.request_timeout_ms)
       .finish()
   }
 }
@@ -112,6 +117,7 @@ impl ModelEndpoint {
       max_output_tokens: None,
       connect_timeout_ms: None,
       read_timeout_ms: None,
+      request_timeout_ms: None,
     }
   }
 
@@ -141,6 +147,7 @@ impl ModelEndpoint {
       max_output_tokens: None,
       connect_timeout_ms: None,
       read_timeout_ms: None,
+      request_timeout_ms: None,
     }
   }
 
@@ -506,6 +513,7 @@ impl RuntimeConfig {
       for (name, timeout) in [
         ("connect_timeout_ms", endpoint.connect_timeout_ms),
         ("read_timeout_ms", endpoint.read_timeout_ms),
+        ("request_timeout_ms", endpoint.request_timeout_ms),
       ] {
         if timeout == Some(0) {
           return Err(ConfigError(format!(
@@ -778,12 +786,24 @@ mod tests {
     let mut config = sample_config();
     config.endpoints[0].connect_timeout_ms = Some(750);
     config.endpoints[0].read_timeout_ms = Some(2_500);
+    config.endpoints[0].request_timeout_ms = Some(120_000);
     let parsed = RuntimeConfig::parse(&config.to_json_string().unwrap()).unwrap();
     assert_eq!(parsed.endpoints[0].connect_timeout_ms, Some(750));
     assert_eq!(parsed.endpoints[0].read_timeout_ms, Some(2_500));
+    assert_eq!(parsed.endpoints[0].request_timeout_ms, Some(120_000));
 
     config.endpoints[0].read_timeout_ms = Some(0);
     assert!(config.validate().unwrap_err().0.contains("read_timeout_ms"));
+
+    config.endpoints[0].read_timeout_ms = None;
+    config.endpoints[0].request_timeout_ms = Some(0);
+    assert!(
+      config
+        .validate()
+        .unwrap_err()
+        .0
+        .contains("request_timeout_ms")
+    );
   }
 
   #[test]

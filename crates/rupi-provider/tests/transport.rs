@@ -593,6 +593,49 @@ fn a_quiet_stream_expires_at_the_logical_idle_timeout() {
 }
 
 #[test]
+fn total_request_deadline_is_distinct_from_idle_timeout() {
+  let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+  let addr = listener.local_addr().expect("addr");
+  let server = thread::spawn(move || {
+    let (mut socket, _) = listener.accept().expect("accept");
+    let _ = drain_request(&mut socket);
+    socket
+      .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
+      .expect("headers");
+    socket.flush().expect("flush");
+    thread::sleep(Duration::from_secs(1));
+  });
+  let mut config = ProviderConfig::local(
+    "local-vulkan",
+    "qwen3.8-flash",
+    format!("http://{addr}/v1"),
+    8_192,
+  );
+  config.read_timeout_ms = 5_000;
+  config.request_timeout_ms = Some(200);
+  let adapter = OpenAiCompat::new(config).expect("adapter");
+  let started = Instant::now();
+  let (result, _) = stream(&adapter, &request("total timeout"));
+  let failure = result.expect_err("total request budget must expire");
+  assert_eq!(failure.kind, ModelFailureKind::Timeout);
+  assert_eq!(failure.phase, FailurePhase::WaitingForResponse);
+  assert!(failure.message.contains("total timeout"), "{failure:?}");
+  assert!(started.elapsed() < Duration::from_secs(5), "{failure:?}");
+  server.join().expect("server");
+  let second = adapter.stream(
+    &request("must not retry after total timeout"),
+    &mut Collector::default(),
+    &CancelToken::new(),
+  );
+  assert_eq!(
+    second
+      .expect_err("total timeout quarantines the adapter")
+      .kind,
+    ModelFailureKind::ProviderUnavailable
+  );
+}
+
+#[test]
 fn delayed_headers_use_the_logical_timeout_without_resubmitting_the_post() {
   // Response headers may arrive after the short cancellation poll. The logical
   // idle budget, not that poll, decides whether the one in-flight POST expires.

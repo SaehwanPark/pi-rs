@@ -68,6 +68,7 @@ fn write_config(root: &Path, state: &Path) -> PathBuf {
     max_output_tokens: Some(1_024),
     connect_timeout_ms: None,
     read_timeout_ms: None,
+    request_timeout_ms: None,
   });
   let path = root.join(format!(
     "config-{}.json",

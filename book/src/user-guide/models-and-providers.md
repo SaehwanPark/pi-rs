@@ -29,7 +29,8 @@ then use this endpoint entry:
     "exposed_reasoning": "native",
     "context_window": 262144,
     "max_output_tokens": 32768
-  }
+  },
+  "request_timeout_ms": 900000
 }
 ```
 
@@ -44,6 +45,13 @@ the endpoint's supported `low` value rather than sending an unsupported literal.
 requested level is an intent, not proof that every endpoint accepts the same spelling;
 if a server still refuses a request, rupi reports its bounded diagnostic with the
 normalized failure kind and HTTP status.
+
+For local coding work, use an explicit total `request_timeout_ms` and a modest
+`max_output_tokens` value for each bounded implementation slice. The total deadline
+stops one request that is reasoning without producing a tool call from consuming an
+unbounded amount of time. It defaults to unset for users who intentionally allow
+long-running generation; a timeout is reported as incomplete and can be followed by
+`--resume` with a smaller prompt.
 
 Check the server before debugging rupi:
 
