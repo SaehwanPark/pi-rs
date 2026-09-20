@@ -38,6 +38,14 @@ pub struct ExecTool {
   runtime: Runtime,
 }
 
+pub(crate) struct CommandExecution<'a> {
+  pub(crate) cwd: &'a Path,
+  pub(crate) runtime: &'a Runtime,
+  pub(crate) progress: &'a mut dyn ToolProgress,
+  pub(crate) deadline: &'a Deadline,
+  pub(crate) context: &'a ToolExecutionContext,
+}
+
 impl ExecTool {
   pub(crate) fn new(runtime: Runtime) -> Self {
     Self { runtime }
@@ -129,16 +137,14 @@ impl ExecTool {
 
     // The command is *itself* the escape hatch. Passing it through a shell is the
     // contract, which is exactly why the tool is declared mutating and gated.
-    run_command(
-      shell_command(command),
-      "exec",
-      command,
-      &cwd,
-      &runtime,
+    let mut execution = CommandExecution {
+      cwd: &cwd,
+      runtime: &runtime,
       progress,
-      &deadline,
+      deadline: &deadline,
       context,
-    )
+    };
+    run_command(shell_command(command), "exec", command, &mut execution)
   }
 }
 
@@ -152,14 +158,10 @@ pub(crate) fn run_command(
   mut command: Command,
   tool_name: &str,
   display: &str,
-  cwd: &Path,
-  runtime: &Runtime,
-  progress: &mut dyn ToolProgress,
-  deadline: &Deadline,
-  context: &ToolExecutionContext,
+  execution: &mut CommandExecution<'_>,
 ) -> Result<ToolOutcome, ToolError> {
   let mut child = command
-    .current_dir(cwd)
+    .current_dir(execution.cwd)
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
     .spawn()
@@ -169,12 +171,23 @@ pub(crate) fn run_command(
     })?;
 
   let mut outcome = drain(
-    &mut child, progress, runtime, deadline, context, display, cwd,
+    &mut child,
+    execution.progress,
+    execution.runtime,
+    execution.deadline,
+    execution.context,
+    display,
+    execution.cwd,
   );
   // Reap in every path. A leaked child keeps running after we report a result,
   // which is the one outcome worse than an honest `Unknown`.
-  let status = wait_for_exit(&mut child, context, deadline, &mut outcome);
-  finish(outcome, status, deadline, display)
+  let status = wait_for_exit(
+    &mut child,
+    execution.context,
+    execution.deadline,
+    &mut outcome,
+  );
+  finish(outcome, status, execution.deadline, display)
 }
 
 /// The result of the streaming phase, before reaping.

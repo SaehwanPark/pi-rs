@@ -13,7 +13,7 @@ use rupi_core::{
 };
 use serde_json::{Value, json};
 
-use crate::{Deadline, Runtime, arg_str, exec::run_command};
+use crate::{Deadline, Runtime, arg_str, exec::CommandExecution, exec::run_command};
 
 /// Run one program with an explicit argument vector.
 pub struct ProcessTool {
@@ -111,9 +111,14 @@ impl ProcessTool {
     let display = display_command(program, &args);
     let mut command = Command::new(program);
     command.args(&args);
-    run_command(
-      command, "process", &display, &cwd, &runtime, progress, &deadline, context,
-    )
+    let mut execution = CommandExecution {
+      cwd: &cwd,
+      runtime: &runtime,
+      progress,
+      deadline: &deadline,
+      context,
+    };
+    run_command(command, "process", &display, &mut execution)
   }
 }
 
