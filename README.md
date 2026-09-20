@@ -257,6 +257,26 @@ covers declared data flow, output persistence, retry/blocked state, lease
 reclaim, and bounded trace/replay evidence. The checked-in fixture passes
 after tester repair; the case reports do not claim model-authored completion.
 
+## Live example: Lease Cascade
+
+[Lease Cascade](https://saehwanpark.github.io/rupi/getting-started/lease-cascade.html)
+is a seventh dependency-free Python example: an authenticated HTTP/SQLite
+pipeline worker with ordered barrier fan-in, selected output propagation,
+retryable and terminal failures, blocked cascades, leases, and a direct-argv
+sink. Verify its project suite and independent fresh-process oracle:
+
+```bash
+cd docs/cases/2026-09-20-lease-cascade/project
+python -W error::ResourceWarning -m unittest discover -s tests -p "test_*.py" -v
+cd ..
+python -W error::ResourceWarning -m unittest discover -s acceptance -p "test_*.py" -v
+```
+
+The [Lease Cascade walkthrough](https://saehwanpark.github.io/rupi/getting-started/lease-cascade.html)
+covers ordered fan-in, selected output references, retry/blocked state, lease
+reclaim, and bounded trace/replay evidence. The checked-in fixture passes after
+tester repair; the case reports do not claim model-authored completion.
+
 ## Commands
 
 | Command | Purpose |
