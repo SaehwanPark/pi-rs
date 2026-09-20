@@ -791,6 +791,14 @@ Do not begin until stable baselines exist.
       retries still produced only partial files and failed both acceptance
       checks, so the model-authoring stopgate remains active; see PR #111 and
       `docs/cases/2026-09-20-webhook-inbox/BUDGET_RETRY_REPORT.md` (2026-09-20).
+- [!] Validate the next live project, Batch Relay: a dependency-free Python
+      HMAC-authenticated HTTP/SQLite batch worker with atomic dependency DAGs,
+      retryable and terminal failures, blocked dependents, lease reclaim, and
+      a direct-argv sink. The checked-in project suite and independent
+      fresh-process oracle pass after bounded tester repair, but both fresh
+      model turns timed out before their first write. The model-authoring
+      stopgate remains active; see PR #112 and
+      `docs/cases/2026-09-20-batch-relay/FINAL_REPORT.md` (2026-09-20).
 
 ### P2 — Later / deliberately deferred
 
