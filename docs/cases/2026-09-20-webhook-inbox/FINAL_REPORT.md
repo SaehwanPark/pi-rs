@@ -23,7 +23,7 @@ result is a project result, not a claim that the model turns completed T.
 
 - `e4a4ceb` — plan/specification/oracle/config/ignore baseline, pushed before
   implementation; draft PR opened as #111.
-- follow-up commit — project implementation, tests, observations, and report.
+- `3ae8bb0` — project implementation, tests, observations, and report.
 
 All changed files are under
 `docs/cases/2026-09-20-webhook-inbox/`. The runtime, Rust crates, repository
