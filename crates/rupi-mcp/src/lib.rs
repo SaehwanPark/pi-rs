@@ -23,11 +23,11 @@ pub mod worker;
 pub use client::McpClient;
 pub use error::McpError;
 pub use manager::{McpManager, McpServerStatus};
-pub use rupi_core::McpServerConfig;
 pub use protocol::{
   CallToolParams, CallToolResult, InitializeResult, ListToolsResult, McpContent, McpToolDefinition,
   ServerCapabilities, ServerInfo,
 };
+pub use rupi_core::McpServerConfig;
 pub use tool::{McpTool, mcp_namespaced_tool_name};
 pub use transport::{
   DEFAULT_REQUEST_TIMEOUT, HttpTransport, McpTransport, MockTransport, StdioTransport,

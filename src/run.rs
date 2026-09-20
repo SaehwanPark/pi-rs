@@ -10,9 +10,7 @@ use rupi_core::{
   SessionEndReason, SessionHeader, SessionId, SinkError, TraceId, TurnId, TurnStatus, now_millis,
 };
 use rupi_provider::{Deferred, OpenAiCompat, ProviderConfig};
-use rupi_runtime::{
-  ResumeState, StoreTrace, Trace, TurnError, TurnLoop, TurnProgress, TurnReport,
-};
+use rupi_runtime::{ResumeState, StoreTrace, Trace, TurnError, TurnLoop, TurnProgress, TurnReport};
 use rupi_store::{Store, WritePolicy};
 use rupi_tools::{Executed, ToolRegistry, Workspace};
 use rupi_tui::{Palette, Surface, TranscriptOptions, is_streamed, render_event, term};

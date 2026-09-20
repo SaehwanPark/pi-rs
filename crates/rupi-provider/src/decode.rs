@@ -376,10 +376,7 @@ pub fn cancelled(emitted_output: bool) -> rupi_core::ModelFailure {
 }
 
 /// A cancel check between chunks.
-pub fn check_cancel(
-  cancel: &CancelToken,
-  emitted_output: bool,
-) -> Option<rupi_core::ModelFailure> {
+pub fn check_cancel(cancel: &CancelToken, emitted_output: bool) -> Option<rupi_core::ModelFailure> {
   cancel.is_cancelled().then(|| cancelled(emitted_output))
 }
 

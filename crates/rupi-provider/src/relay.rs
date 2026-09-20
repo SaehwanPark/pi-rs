@@ -455,6 +455,9 @@ fn origin_form(request: &[u8], header_end: usize) -> Vec<u8> {
   normalized.extend_from_slice(path);
   normalized.push(b' ');
   normalized.extend_from_slice(version);
+  // `line_end` is already past the request-line CRLF. Preserve that separator;
+  // otherwise strict HTTP servers see `HTTP/1.1Host:` as one malformed line.
+  normalized.extend_from_slice(b"\r\n");
   normalized.extend_from_slice(&request[line_end..]);
   normalized
 }
@@ -742,6 +745,21 @@ mod tests {
   use super::*;
 
   #[test]
+  fn origin_form_preserves_the_request_line_separator() {
+    let request = b"POST http://example.test/v1/chat/completions HTTP/1.1\r\nHost: example.test\r\nContent-Length: 0\r\n\r\n";
+    let header_end = request
+      .windows(4)
+      .position(|window| window == b"\r\n\r\n")
+      .unwrap()
+      + 4;
+    let normalized = origin_form(request, header_end);
+    assert_eq!(
+      String::from_utf8(normalized).unwrap(),
+      "POST /v1/chat/completions HTTP/1.1\r\nHost: example.test\r\nContent-Length: 0\r\n\r\n"
+    );
+  }
+
+  #[test]
   fn parses_http_and_https_authorities_without_network_io() {
     assert_eq!(
       target_from_url("http://127.0.0.1:1234/v1"),
@@ -781,7 +799,7 @@ mod tests {
     client
       .write_all(
         format!(
-          "CONNECT {address} HTTP/1.1\r\nHost: {address}\r\nX-Pi-Rs-Relay-Nonce: {}\r\n\r\n",
+          "CONNECT {address} HTTP/1.1\r\nHost: {address}\r\nX-Rupi-Relay-Nonce: {}\r\n\r\n",
           relay.nonce()
         )
         .as_bytes(),

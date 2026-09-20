@@ -1104,8 +1104,7 @@ pub fn execute(args: InteractiveArgs) -> Result<(), String> {
     // Checked before anything is opened, so a piped invocation is one clear line
     // rather than a terminal that nobody put back.
     return Err(
-      "interactive needs a terminal on stdout; for one turn in a script use `rupi run`"
-        .to_string(),
+      "interactive needs a terminal on stdout; for one turn in a script use `rupi run`".to_string(),
     );
   }
   // The surface is not configurable here. Colour and width come from the terminal

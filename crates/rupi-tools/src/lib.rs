@@ -20,10 +20,10 @@ pub use edit::EditTool;
 pub use exec::ExecTool;
 pub use grep::GrepTool;
 pub use paths::{PathError, Workspace};
-pub use rupi_core::ReconciliationStatus;
 pub use read::ReadTool;
 pub use reduce::Reduction;
 pub use registry::{Approval, ApprovalGate, AutoApprove, DenyAll, Executed, ToolRegistry};
+pub use rupi_core::ReconciliationStatus;
 pub use write::WriteTool;
 
 use std::time::Instant;
