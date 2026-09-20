@@ -431,11 +431,15 @@ fn timed_out(text: &str) -> bool {
 }
 
 pub(crate) fn summarize(text: &str) -> String {
+  // Some local servers frame plain-text errors with rows of dashes. Those
+  // rows are not a diagnostic and used to hide the actionable line behind a
+  // blank-looking `provider_unavailable` message.
   let first_line = text
     .lines()
-    .find(|line| !line.trim().is_empty())
+    .map(str::trim)
+    .find(|line| !line.is_empty() && line.chars().any(|character| character.is_alphanumeric()))
     .unwrap_or("");
-  truncate(first_line.trim(), 240)
+  truncate(first_line, 240)
 }
 
 fn truncate(text: &str, max_chars: usize) -> String {
@@ -832,6 +836,20 @@ mod tests {
     );
     assert_eq!(failure.message, "<html><body>Bad Gateway");
     assert!(failure.detail.is_some());
+  }
+
+  #[test]
+  fn separator_wrapped_error_bodies_keep_the_actionable_line() {
+    let failure = http_failure(
+      500,
+      "------------\nUnexpected reasoning effort minimal.\n------------",
+      None,
+      FailurePhase::WaitingForResponse,
+    );
+    assert_eq!(
+      failure.message, "Unexpected reasoning effort minimal.",
+      "decorative framing must not become the provider diagnostic"
+    );
   }
 
   #[test]

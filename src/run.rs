@@ -665,7 +665,7 @@ fn surface_options(args: &SurfaceArgs) -> TranscriptOptions {
 
 fn turn_error(error: &TurnError) -> String {
   match error {
-    TurnError::Unavailable(failure) => format!("provider failure: {}", failure.message),
+    TurnError::Unavailable(failure) => format!("provider failure: {failure}"),
     TurnError::Aborted(TurnStatus::BudgetExhausted) => {
       "turn aborted: model request budget exhausted".to_string()
     }

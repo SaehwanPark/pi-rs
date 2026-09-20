@@ -75,7 +75,10 @@ fn apply_thinking(config: &ProviderConfig, level: ThinkingLevel, body: &mut Valu
         return;
       }
       body["reasoning_effort"] = json!(match level {
-        ThinkingLevel::Minimal => "minimal",
+        // The generic OpenAI dialect has no `minimal` value. Keep the request
+        // usable by clamping the smallest core level to the endpoint's lowest
+        // supported effort instead of sending a value many servers reject.
+        ThinkingLevel::Minimal => "low",
         ThinkingLevel::Low => "low",
         ThinkingLevel::Medium => "medium",
         // `xhigh` is outside the OpenAI enum. Clamping upward preserves the
@@ -344,6 +347,13 @@ mod tests {
       false,
       "some templates keep thinking on unless told otherwise"
     );
+  }
+
+  #[test]
+  fn minimal_reasoning_effort_uses_the_supported_low_value() {
+    let mut req = request(vec![Message::user("x")]);
+    req.thinking = ThinkingLevel::Minimal;
+    assert_eq!(request_body(&config(), &req)["reasoning_effort"], "low");
   }
 
   #[test]
