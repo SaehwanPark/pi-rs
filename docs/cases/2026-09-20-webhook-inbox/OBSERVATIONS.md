@@ -343,3 +343,24 @@ model requested a progress tool before timing out. No model package, README,
 tests, project suite, or oracle result exists. Trace/replay exited `0` for both
 sessions (214 and 473 entries). The high stopgate remains, operationally
 reduced by the boundary but not resolved.
+
+## Final provider-effort retry (2026-09-20)
+
+The final retry after `fc56ac4` is recorded in
+[`REASONING_RETRY_REPORT.md`](REASONING_RETRY_REPORT.md). Rupi was rebuilt from
+that commit, and a brand-new ignored workspace contained only copied
+spec/config/ignore inputs plus the unchanged oracle. The initial and recovery
+configs parsed successfully with explicit `thinking: low`, 60-second request
+timeouts, bounded request counts, and the unchanged progress boundary.
+
+R-07 initial session `01a0c042-e535-7ea5-87ca-0912a63b76ea` ran 66,666 ms with
+2/2 model request starts/completions and 2/2/0 tool request/completion/failure
+counts. R-08 recovery session `01a0c044-2e31-7a68-a005-c18ca45f33cd` ran 70,365
+ms with 2/2 requests and 1/1/0 tools. Both made no project write and exited
+`1` with typed timeout.
+
+Both traces show the boundary transition from 7 to 3 schemas, the exact
+runtime nudge and info diagnostic, and no `write`, `edit`, or `append` call.
+Neither model produced project files, so the project suite and unchanged oracle
+were not run. Trace/replay exited `0` (892 and 1,162 entries). Explicit low
+provider effort did not resolve the high stopgate; it remains.

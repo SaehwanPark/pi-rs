@@ -17,6 +17,9 @@ files, so the high rupi implementation stopgate remains unresolved. The final
 progress-boundary retry is recorded in
 [`PROGRESS_RETRY_REPORT.md`](PROGRESS_RETRY_REPORT.md): the boundary activated
 and narrowed schemas, but the model still made no first write before timeout.
+The final provider-effort retry is recorded in
+[`REASONING_RETRY_REPORT.md`](REASONING_RETRY_REPORT.md): explicit `thinking:
+low` and a 60-second deadline still produced no first write.
 
 No rupi runtime/source/tests or canonical documents changed.
 
@@ -28,6 +31,8 @@ No rupi runtime/source/tests or canonical documents changed.
 - `96ca4b3` — parent-fix retry configs: 30,000 ms request timeout, initial
   request limit 8, recovery request limit 3, and `thinking: off`.
 - `e2e00f3` — opt-in progress boundary and Webhook Inbox progress-tool config.
+- `fc56ac4` — explicit low provider effort and 60-second initial/recovery
+  request deadlines.
 
 All changed files are under
 `docs/cases/2026-09-20-webhook-inbox/`. The runtime, Rust crates, repository
@@ -49,6 +54,9 @@ unchanged.
 - final progress-boundary retry traces: R-05 214 entries/replay exit 0; R-06
   473 entries/replay exit 0; both boundaries activated, neither retry wrote
   project files;
+- final provider-effort retry traces: R-07 892 entries/replay exit 0; R-08
+  1,162 entries/replay exit 0; explicit low effort and 60-second deadlines
+  still produced no project files;
 - source import review found only Python standard-library modules;
 - no file outside the case directory was modified.
 
@@ -71,3 +79,6 @@ the deadline, or add a runtime enforcement that produces actual first-write
 progress. Keep the same fresh missing-project workspace, prompts, and unchanged
 oracle; require model-authored project-suite and oracle passes without tester
 repair, followed by trace/replay.
+
+This is the final bounded retry for this case. The explicit low provider effort
+and longer request deadline did not change the acceptance result.
