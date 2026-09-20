@@ -1,6 +1,6 @@
 # Loop 5 live case: Artifact Pipeline
 
-Status: in progress
+Status: complete — acceptance passed after bounded tester-authored repair; model-authoring stopgate remains open
 Date: 2026-09-20
 Test operator: Codex acting as a fresh `rupi` user
 Model target: local llama.cpp, `qwen3.8-flash-next`
@@ -103,4 +103,3 @@ incomplete model turn is evidence, not acceptance.
 - exactly-once delivery semantics;
 - shell pipelines or network calls from the worker;
 - any change to rupi runtime/source/tests or parent project documents.
-

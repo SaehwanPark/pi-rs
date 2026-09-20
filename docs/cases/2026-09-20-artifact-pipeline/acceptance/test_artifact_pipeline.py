@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ast
 import json
 import socket
 import subprocess
@@ -183,6 +184,12 @@ class ArtifactPipelineOracle(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("error", data)
         self.assertEqual(http_call(self.base, "GET", "/pipelines/bad-ref")[0], 404)
+        malformed = b'{"pipeline_id":'
+        malformed_signature = "sha256=" + hmac.new(SECRET.encode("utf-8"), malformed, hashlib.sha256).hexdigest()
+        status, data = http_call(self.base, "POST", "/pipelines", malformed, malformed_signature)
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+        self.assertEqual(http_call(self.base, "GET", "/pipelines/malformed")[0], 404)
 
         pipeline = {
             "pipeline_id": "release-1",
@@ -206,6 +213,7 @@ class ArtifactPipelineOracle(unittest.TestCase):
         first = self.post_pipeline(pipeline, 202)
         self.assertEqual(first[1]["status"], "pending")
         self.assertIsNone(first[1]["jobs"][0]["output"])
+        self.assertNotIn(SECRET.encode("utf-8"), self.db.read_bytes())
         self.assertEqual(self.post_pipeline(pipeline, 200)[1], first[1])
         conflict = json.loads(json.dumps(pipeline))
         conflict["jobs"][0]["payload"]["version"] = "1.2.4"
@@ -337,6 +345,20 @@ class ArtifactPipelineOracle(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, (args, result.stdout, result.stderr))
             self.assertIn("help", (result.stdout + result.stderr).lower())
+        allowed = set(getattr(sys, "stdlib_module_names", ())) | {"artifactpipe", "tests"}
+        for path in PROJECT_ROOT.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    roots = [alias.name.split(".", 1)[0] for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module is not None and node.level == 0:
+                    roots = [node.module.split(".", 1)[0]]
+                else:
+                    continue
+                for root in roots:
+                    self.assertIn(root, allowed, f"non-standard import {root!r} in {path}")
 
 
 if __name__ == "__main__":
