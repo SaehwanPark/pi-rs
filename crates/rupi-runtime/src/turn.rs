@@ -1695,6 +1695,7 @@ impl<'a> TurnLoop<'a> {
         return Err(TurnFailure::Sink(error));
       }
 
+      let mut failed_usage = None;
       let failure = match outcome {
         // Transport said done. Whether the *model* finished is a separate
         // question, and answering it wrongly is how a runtime accepts a half
@@ -1704,7 +1705,15 @@ impl<'a> TurnLoop<'a> {
           // make an unfinished response a truncation of an answer.
           let produced = !text.is_empty();
           match completion_failure(&usage, produced, committed) {
-            Some(failure) => failure,
+            Some(failure) => {
+              // Keep provider completion evidence on the request boundary even
+              // when the answer is unusable. In particular, `length` must not
+              // disappear into a generic failed-request event: it tells the
+              // operator that the output budget, not the transport, stopped the
+              // model.
+              failed_usage = Some(usage);
+              failure
+            }
             None => {
               self.measured_input_tokens = usage.input_tokens;
               let tool_calls = u32::try_from(calls.len()).map_err(|_| {
@@ -1762,9 +1771,11 @@ impl<'a> TurnLoop<'a> {
           AgentEvent::ModelRequestCompleted(ModelRequestCompleted {
             epoch,
             model: model.clone(),
-            finish_reason: None,
-            input_tokens: None,
-            output_tokens: None,
+            finish_reason: failed_usage
+              .as_ref()
+              .and_then(|usage| usage.finish_reason.clone()),
+            input_tokens: failed_usage.as_ref().and_then(|usage| usage.input_tokens),
+            output_tokens: failed_usage.as_ref().and_then(|usage| usage.output_tokens),
             duration_ms,
             tool_calls: u32::try_from(calls.len()).map_err(|_| {
               TurnFailure::Sink(SinkError("tool-call count exceeds durable limit".into()))
@@ -3221,6 +3232,16 @@ fn completion_failure(
   produced: bool,
   committed: bool,
 ) -> Option<ModelFailure> {
+  if usage.stopped_at_output_limit() {
+    let mut failure = ModelFailure::new(
+      ModelFailureKind::Semantic,
+      FailurePhase::Normalizing,
+      "provider stopped at its output limit before completing the response",
+    );
+    failure.partial_output_emitted = committed;
+    failure.detail = usage.finish_reason.clone();
+    return Some(failure);
+  }
   if usage.is_certain() {
     return None;
   }
@@ -3534,6 +3555,8 @@ mod tests {
     calls: Arc<Mutex<Vec<(ModelRequest, ThinkingLevel, bool)>>>,
     /// Return `Ok` with an uncertain boundary instead of a usage report.
     unfinished: bool,
+    /// Override the scripted response's provider finish reason.
+    finish_reason: Option<String>,
     /// Fail *every* request. `fail` is per-request-index and can run out, which
     /// cannot express a provider that is simply down.
     always: Option<ModelFailureKind>,
@@ -3557,6 +3580,7 @@ mod tests {
         fail: Vec::new(),
         calls: Arc::new(Mutex::new(Vec::new())),
         unfinished: false,
+        finish_reason: None,
         always: None,
         fail_after_stream: None,
       }
@@ -3575,6 +3599,11 @@ mod tests {
 
     fn fails_after_stream(mut self, kind: ModelFailureKind) -> Self {
       self.fail_after_stream = Some(kind);
+      self
+    }
+
+    fn finishes_with(mut self, reason: &str) -> Self {
+      self.finish_reason = Some(reason.into());
       self
     }
 
@@ -3682,6 +3711,9 @@ mod tests {
             ProviderEvent::ReasoningDelta { .. } => {}
           }
           sink.emit(event);
+        }
+        if let Some(reason) = &self.finish_reason {
+          usage.finish_reason = Some(reason.clone());
         }
         if let Some(kind) = self.fail_after_stream {
           return Err(ModelFailure::new(
@@ -5621,6 +5653,46 @@ mod tests {
       serde_json::Value::Null,
       "no finish reason was ever observed"
     );
+  }
+
+  #[test]
+  fn output_limited_completion_is_failed_and_keeps_provider_evidence() {
+    let provider = Scripted::new("limited", vec![text("partial")]).finishes_with("length");
+    let tools = registry_with(Vec::new());
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn(
+      "finish the bounded task",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .expect_err("an output-limited answer is not a completed turn");
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::Semantic));
+    let TurnError::Unavailable(failure) = &error else {
+      panic!("expected a provider failure, got {error:?}");
+    };
+    assert!(failure.message.contains("output limit"));
+    assert_eq!(trace.count("model_retry"), 0);
+    let completed = trace
+      .all("model_request_completed")
+      .into_iter()
+      .next()
+      .expect("failed request is closed in the trace");
+    assert_eq!(completed["finish_reason"], "length");
+    assert_eq!(completed["output_tokens"], 4);
   }
 
   #[test]
