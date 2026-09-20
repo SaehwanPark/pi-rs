@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use pi_rs_core::Tool;
-use pi_rs_mcp::{McpManager, MockTransport};
-use pi_rs_rkb::{RkbAdapter, RkbContext, RkbSetup};
+use rupi_core::Tool;
+use rupi_mcp::{McpManager, MockTransport};
+use rupi_rkb::{RkbAdapter, RkbContext, RkbSetup};
 use serde_json::json;
 
 fn context_fixture() -> serde_json::Value {
@@ -65,7 +65,7 @@ fn rkb_setup_is_discovered_without_starting_mcp() {
 
 #[test]
 fn rkb_raw_config_is_normalized_before_activation() {
-  let raw = pi_rs_core::McpServerConfig::new("rkb", "rkb").with_args(vec!["mcp".into()]);
+  let raw = rupi_core::McpServerConfig::new("rkb", "rkb").with_args(vec!["mcp".into()]);
   let normalized = RkbSetup::normalize_configs(&[raw]);
   let mut manager = McpManager::new(normalized);
   let tools = manager

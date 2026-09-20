@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Cold-start benchmark for pi-rs: first exec of a fresh binary inode.
+# Cold-start benchmark for rupi: first exec of a fresh binary inode.
 #
 # Definition (pinned in docs/archive/slices/SLICE_COLD_START.md)
 #   Dropping the page cache needs root, which this project does not assume. So
 #   cold is defined as: the first execution of a freshly-linked binary inode,
 #   with no prior exec of that inode. Each iteration copies
-#   target/release/pi-rs to a unique path and times exec #1 of that path
+#   target/release/rupi to a unique path and times exec #1 of that path
 #   against execs #2 and #3 of the same path. That isolates first-exec effects
 #   (text page-in, relocation, dynamic linking) from steady state, which is the
 #   thing a user on a cold machine actually pays more of.
@@ -62,9 +62,9 @@ done
 cd "$REPO_ROOT"
 
 # Build once. Same target as bench/startup.sh; keep the tail short.
-cargo build --release --bin pi-rs 2>&1 | tail -3
+cargo build --release --bin rupi 2>&1 | tail -3
 
-BINARY="${REPO_ROOT}/target/release/pi-rs"
+BINARY="${REPO_ROOT}/target/release/rupi"
 
 BINARY="$BINARY" ITERATIONS="$ITERATIONS" JSON_OUT="$JSON_OUT" python3 - <<'PY'
 import json
@@ -117,10 +117,10 @@ def stat_block(samples):
 
 cold_times = []
 warm_times = []
-workdir = tempfile.mkdtemp(prefix="pi-rs-cold-start-")
+workdir = tempfile.mkdtemp(prefix="rupi-cold-start-")
 try:
     for i in range(iterations):
-        probe = os.path.join(workdir, f"pi-rs-cold-{i}")
+        probe = os.path.join(workdir, f"rupi-cold-{i}")
         # copyfile (not copy2/hardlink) so the probe is a brand-new inode whose
         # first exec is the thing under test.
         shutil.copyfile(binary, probe)
@@ -145,7 +145,7 @@ cold = stat_block(cold_times)
 warm = stat_block(warm_times)
 delta_median_ms = cold["median"] - warm["median"]
 
-print("Cold-start benchmark (pi-rs):")
+print("Cold-start benchmark (rupi):")
 print(f"  Cold startup ({iterations} fresh inodes, first exec each):")
 print(f"    min:          {cold['min']:.2f} ms")
 print(f"    mean:         {cold['mean']:.2f} ms")

@@ -1,6 +1,6 @@
 # Slice: render the classifier (wiring only, no classifier changes)
 
-`pi_rs_tui::highlight::tokens` exists (#39, cherry-picked here). Wire it where the interactive loop
+`rupi_tui::highlight::tokens` exists (#39, cherry-picked here). Wire it where the interactive loop
 actually draws an input line. **Do not change `highlight.rs`** except to fix a real bug you can name.
 
 ## Find the render site, do not invent one
@@ -32,7 +32,7 @@ widget, that is a different slice.
 ## Limits
 
 At most **four** `read` calls, ≤40 lines each; one `grep -n` per file `| head -20`; output ≤15 lines;
-`cargo test --workspace` once at the end, `cargo test -p pi-rs-tui` / `--bin pi-rs` in between.
+`cargo test --workspace` once at the end, `cargo test -p rupi-tui` / `--bin rupi` in between.
 **Commit before running any cargo command.** Never weaken an assertion; a named gap beats a fake test.
 Leave ROADMAP unchecked. No merges, rebases, pushes, PRs; stay in this worktree. `git rev-parse HEAD`
 before each commit — if it moved without your commit, stop and report.

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Entry point for the TUI render and command-parse benchmark, with the same interface as
 # bench/startup.sh. The measured case list, the budgets, and the pass/fail rule live in
-# crates/pi-rs-tui/benches/render.rs; this script only builds and runs it.
+# crates/rupi-tui/benches/render.rs; this script only builds and runs it.
 #
 # Usage: bench/render.sh [--iterations <N>] [--json <path>]
 
@@ -50,4 +50,4 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$REPO_ROOT"
-exec cargo bench --quiet -p pi-rs-tui --bench render -- ${ARGS[@]+"${ARGS[@]}"}
+exec cargo bench --quiet -p rupi-tui --bench render -- ${ARGS[@]+"${ARGS[@]}"}

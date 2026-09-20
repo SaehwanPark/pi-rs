@@ -2,7 +2,7 @@
 
 ## Intent
 
-Rebrand the released coding harness from `pi-rs` to `rupi` because the old name implies a
+Rebrand the released coding harness from `rupi` to `rupi` because the old name implies a
 rewrite or Rust port of Pi. Update the public repository identity, package/binary names,
 state/config examples, user documentation, screenshots, and release metadata while
 preserving the explicitly supported upstream Pi compatibility surfaces (`Pi`, `.pi`, and
@@ -32,7 +32,7 @@ Pi package/session formats).
 
 ## Acceptance evidence
 
-- `rg` finds no stale first-party `pi-rs`/`PI_RS`/`pi_rs` identity outside historical Git
+- `rg` finds no stale first-party `rupi`/`RUPI`/`rupi` identity outside historical Git
   history or intentional upstream-Pi compatibility wording.
 - `cargo metadata`, `cargo fmt`, `cargo check`, `cargo clippy`, `cargo test`, `cargo doc`,
   and `mdbook build book` pass with the new package and binary names.

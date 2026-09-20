@@ -1,12 +1,12 @@
 # Quickstart Guide
 
-Get up and running with `pi-rs` in under 60 seconds.
+Get up and running with `rupi` in under 60 seconds.
 
 ---
 
 ## 1. Create a Configuration File
 
-Create a minimal configuration file named `config.json` in your project or home directory. `pi-rs` uses a small versioned JSON schema and supports any OpenAI-compatible endpoint (such as local Ollama, vLLM, LM Studio, or cloud providers). The `primary` and `endpoints` entries use the same `provider/model` identity.
+Create a minimal configuration file named `config.json` in your project or home directory. `rupi` uses a small versioned JSON schema and supports any OpenAI-compatible endpoint (such as local Ollama, vLLM, LM Studio, or cloud providers). The `primary` and `endpoints` entries use the same `provider/model` identity.
 
 ### Example: Local Ollama (Qwen 2.5 Coder or Llama 3)
 
@@ -15,7 +15,7 @@ Create a minimal configuration file named `config.json` in your project or home 
   "version": 1,
   "primary": "local/qwen2.5-coder:latest",
   "thinking": "medium",
-  "state_dir": ".pi-rs-state",
+  "state_dir": ".rupi-state",
   "endpoints": [
     {
       "provider": "local",
@@ -45,7 +45,7 @@ Create a minimal configuration file named `config.json` in your project or home 
   "version": 1,
   "primary": "openai/gpt-4o",
   "thinking": "off",
-  "state_dir": ".pi-rs-state",
+  "state_dir": ".rupi-state",
   "endpoints": [
     {
       "provider": "openai",
@@ -73,10 +73,10 @@ Create a minimal configuration file named `config.json` in your project or home 
 
 ## 2. Run a One-Shot Task
 
-Execute a single durable turn using `pi-rs run`:
+Execute a single durable turn using `rupi run`:
 
 ```bash
-pi-rs run \
+rupi run \
   --config config.json \
   --cwd . \
   --prompt "Inspect Cargo.toml and list the workspace dependencies"
@@ -86,7 +86,7 @@ What happens:
 - Output prose is streamed cleanly to `stdout`.
 - Internal reasoning, tool invocation lifecycle, and diagnostics stream to `stderr`.
 - Mutating tools remain refused unless you explicitly set `auto_approve_mutating` to `true` for a trusted workspace.
-- An append-only session record is created in `.pi-rs-state`.
+- An append-only session record is created in `.rupi-state`.
 
 ---
 
@@ -95,7 +95,7 @@ What happens:
 For multi-turn terminal pair programming, start the interactive mode:
 
 ```bash
-pi-rs interactive --config config.json
+rupi interactive --config config.json
 ```
 
 - Type your prompt in the multi-line editor buffer.
@@ -112,11 +112,11 @@ Every session is stored durably with typed events:
 
 ```bash
 # Read the event trace for a session
-pi-rs trace --config config.json <session-id>
+rupi trace --config config.json <session-id>
 
 # Inspect a recorded trace or session file deterministically
-pi-rs replay path/to/session.trace.jsonl
+rupi replay path/to/session.trace.jsonl
 
 # Resume where you left off
-pi-rs run --config config.json --cwd . --resume <session-id> --prompt "Continue with next step"
+rupi run --config config.json --cwd . --resume <session-id> --prompt "Continue with next step"
 ```

@@ -1,11 +1,11 @@
 # Slice: resume one durable session at launch
 
-`pi-rs` holds one session across many turns **inside a process** and `pi-rs trace <id>` reads a session
+`rupi` holds one session across many turns **inside a process** and `rupi trace <id>` reads a session
 back out. There is no way to **continue** a stored session in a new process. Add it.
 
 ## Observable contract
 
-1. `pi-rs --resume <session-id>` (with `--store/--config/--cwd` honoured as usual) continues that
+1. `rupi --resume <session-id>` (with `--store/--config/--cwd` honoured as usual) continues that
    session: the next turn is appended to the **same session id**, not a fresh one.
 2. A value starting with `-` is rejected like `--store`/`--config` already reject theirs.
 3. Unknown or unreadable id → clear error on stderr, non-zero exit, and **no new session created**.

@@ -54,8 +54,8 @@ evidence-backed; delete one when its prevention becomes structurally enforced.
 
 ## Help-surface compatibility tests pin the exact top-level help shape
 
-- Context: the top-level help moved from `pi-rs <cmd> [options]` usage lines to a
-  `Commands:` table; a test asserted `contains("pi-rs interactive")`.
+- Context: the top-level help moved from `rupi <cmd> [options]` usage lines to a
+  `Commands:` table; a test asserted `contains("rupi interactive")`.
 - Symptom: an unrelated-looking integration failure in
   `tests/interactive_cli.rs::top_level_help_names_the_interactive_command` after a
   help-table merge resolution.
@@ -65,7 +65,7 @@ evidence-backed; delete one when its prevention becomes structurally enforced.
   name with a comment saying why, and keep every command row present (the lost
   `interactive` row was itself a regression).
 - Prevention: when resolving conflicts in `TOP_HELP`/`RUN_HELP`, diff the rendered
-  `pi-rs --help` output against every `tests/*_cli.rs` assertion before committing
+  `rupi --help` output against every `tests/*_cli.rs` assertion before committing
   the merge.
 
 ## Context probes must be pure

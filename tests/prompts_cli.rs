@@ -1,7 +1,7 @@
-//! `pi-rs prompts` and `pi-rs prompt` as processes: what belongs on stdout, and what
+//! `rupi prompts` and `rupi prompt` as processes: what belongs on stdout, and what
 //! does not.
 //!
-//! The scan and the substitution grammar are covered by unit tests in `pi-rs-compat`.
+//! The scan and the substitution grammar are covered by unit tests in `rupi-compat`.
 //! What only a process can show is the partition -- the listing and the expanded prompt
 //! are the answer, so nothing else may share stdout with them -- and that the expansion
 //! reaches the terminal with its newlines intact, which is where a `println!` would
@@ -14,7 +14,7 @@ use std::{
 };
 
 fn binary() -> &'static str {
-  env!("CARGO_BIN_EXE_pi-rs")
+  env!("CARGO_BIN_EXE_rupi")
 }
 
 /// A `$HOME` holding three templates, and a project directory holding one more.
@@ -52,7 +52,7 @@ fn run(args: &[&str], home: &Path, cwd: &Path) -> (String, String, bool) {
     .current_dir(cwd)
     .env("NO_COLOR", "1")
     .output()
-    .expect("run pi-rs");
+    .expect("run rupi");
   (
     String::from_utf8_lossy(&output.stdout).into_owned(),
     String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -136,7 +136,7 @@ fn a_name_that_is_not_there_is_an_error_that_names_what_to_run_instead() {
   assert!(!ok);
   assert_eq!(stdout, "");
   assert!(
-    stderr.contains("no prompt template named 'nope'") && stderr.contains("pi-rs prompts"),
+    stderr.contains("no prompt template named 'nope'") && stderr.contains("rupi prompts"),
     "{stderr}"
   );
 }

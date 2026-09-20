@@ -1,8 +1,8 @@
-# pi-rs Documentation Index
+# rupi Documentation Index
 
-Welcome to the `pi-rs` documentation. This directory and repository contain the
+Welcome to the `rupi` documentation. This directory and repository contain the
 specifications, architectural contracts, user guides, and historical development
-records for `pi-rs`—a minimal, Pi-inspired coding-agent runtime implemented in
+records for `rupi`—a minimal, Pi-inspired coding-agent runtime implemented in
 Rust. The current public release is **v0.2.0 (2026-09-19)**.
 
 ---
@@ -13,7 +13,7 @@ For end users and system integrators, the primary documentation is published via
 **GitHub Pages** (built with mdBook; deployment is validated from `book/` on pushes to
 `main`):
 
-- **Online Documentation:** [https://saehwanpark.github.io/pi-rs/](https://saehwanpark.github.io/pi-rs/)
+- **Online Documentation:** [https://saehwanpark.github.io/rupi/](https://saehwanpark.github.io/rupi/)
 - **Source Files:** [`book/src/`](../book/src/)
 - **Topics Covered:**
   - **Quickstart Guide:** Get running with local or remote models in under 60 seconds.
@@ -38,7 +38,7 @@ These documents serve as the authoritative sources of truth for the codebase:
 | [`ARCHITECTURE.md`](../ARCHITECTURE.md) | Runtime boundaries, subsystem contracts, crate breakdown, and concurrency invariants. |
 | [`COMPATIBILITY.md`](../COMPATIBILITY.md) | Upstream Pi behavioral compatibility targets, coverage status, and regression fixtures. |
 | [`docs/SCHEMA_REFERENCE.md`](SCHEMA_REFERENCE.md) | Current v0.2.0 reference for event payloads, session logs, and serialized structures; source remains authoritative. |
-| [`docs/SESSION_COMPATIBILITY.md`](SESSION_COMPATIBILITY.md) | Bidirectional mapping between Pi session JSONL and pi-rs store schemas. |
+| [`docs/SESSION_COMPATIBILITY.md`](SESSION_COMPATIBILITY.md) | Bidirectional mapping between Pi session JSONL and rupi store schemas. |
 | [`docs/IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) | Implementation inventory, verified capabilities, and phase deliverables. |
 
 ---
@@ -53,7 +53,7 @@ These documents serve as the authoritative sources of truth for the codebase:
 | [`LESSONS.md`](../LESSONS.md) | Durable architectural lessons, edge cases encountered, and rationale for key design choices. |
 | [`docs/codexbar.md`](codexbar.md) | Subscription quota monitoring rules and loop boundary policies. |
 | [`docs/subagents_policy.md`](subagents_policy.md) | Subagent delegation topologies, memory conservation, and handoff protocols. |
-| [`docs/harness/pi-rs-development/team-spec.md`](harness/pi-rs-development/team-spec.md) | Delivery harness specification and specialist agent roles. |
+| [`docs/harness/rupi-development/team-spec.md`](harness/rupi-development/team-spec.md) | Delivery harness specification and specialist agent roles. |
 
 ---
 

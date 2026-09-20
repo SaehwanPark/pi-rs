@@ -2,7 +2,7 @@
 
 ## Scope
 
-Implement the bounded MCP worker boundary in `pi-rs-mcp` without coupling the MCP
+Implement the bounded MCP worker boundary in `rupi-mcp` without coupling the MCP
 protocol to providers, terminal rendering, or runtime implementation details.
 
 ## Contract
@@ -24,8 +24,8 @@ protocol to providers, terminal rendering, or runtime implementation details.
 
 ## Verification evidence
 
-- `cargo test -p pi-rs-mcp --all-features`: worker unit tests plus existing MCP tests pass.
-- `crates/pi-rs-mcp/tests/worker_integration.rs`: public worker run/cancel/resource/MCP tests.
+- `cargo test -p rupi-mcp --all-features`: worker unit tests plus existing MCP tests pass.
+- `crates/rupi-mcp/tests/worker_integration.rs`: public worker run/cancel/resource/MCP tests.
 - Workspace tests, clippy, docs, startup, and render benchmarks pass.
 - Invariant review checks cancellation, summary/trace separation, epoch/failover history,
   resource URI safety, bounded projections, and no implementation/path exposure.

@@ -6,7 +6,7 @@ use std::{
   process::Command,
 };
 
-use pi_rs_core::{
+use rupi_core::{
   AgentEvent, EventEnvelope, EventMeta, EventSeq, Message, ModelCapabilities, ModelRef,
   ReasoningDelta, ReasoningProvenance, SessionId, SessionMessage, SessionRecord, SessionStarted,
   ToolCallId, ToolUnknown, TraceEntry, TraceId, TurnId, UserMessage,
@@ -98,7 +98,7 @@ fn fixture() -> (TempDir, PathBuf, PathBuf, SessionId) {
     }),
     SessionRecord::Message(SessionMessage {
       turn_id: TurnId::from_string("turn-1"),
-      role: pi_rs_core::Role::User,
+      role: rupi_core::Role::User,
       message: Message::user("fix it"),
       epoch: 0,
       model,
@@ -121,7 +121,7 @@ fn fixture() -> (TempDir, PathBuf, PathBuf, SessionId) {
 }
 
 fn run(input: &Path, args: &[&str]) -> std::process::Output {
-  Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+  Command::new(env!("CARGO_BIN_EXE_rupi"))
     .arg("replay")
     .arg(input)
     .args(args)

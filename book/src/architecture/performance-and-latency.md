@@ -1,6 +1,6 @@
 # Performance & Latency Budgets
 
-`pi-rs` treats responsiveness as a user-facing contract. The repository keeps
+`rupi` treats responsiveness as a user-facing contract. The repository keeps
 benchmark scripts under `bench/`; they are release and pre-merge evidence, while
 shared CI runs the startup benchmark on supported non-Windows runners.
 

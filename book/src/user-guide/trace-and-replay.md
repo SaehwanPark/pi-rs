@@ -1,12 +1,12 @@
 # Session Trace & Replay
 
-A foundational principle of `pi-rs` is **honest observability**: every event that occurs during execution is recorded as an immutable, typed event in an append-only store.
+A foundational principle of `rupi` is **honest observability**: every event that occurs during execution is recorded as an immutable, typed event in an append-only store.
 
 ---
 
 ## Canonical Trace Storage
 
-Sessions are written under the configured `state_dir` (for example, `.pi-rs-state/`):
+Sessions are written under the configured `state_dir` (for example, `.rupi-state/`):
 
 - **`sessions/<id>.jsonl`**: Semantic session messages used for resume.
 - **`sessions/<id>.trace.jsonl`**: Append-only canonical `AgentEvent` journal.
@@ -14,16 +14,16 @@ Sessions are written under the configured `state_dir` (for example, `.pi-rs-stat
 - **`sessions/<id>/blobs/`**: Content-addressed storage for large, redacted payloads.
 - **`sessions/<id>/checkpoints/`**: Structured context capsules for reviewed reset/resume.
 
-Unlike systems where session logs are reconstructed by summarizing chat history, `pi-rs` preserves the canonical runtime trace separately from model-visible context.
+Unlike systems where session logs are reconstructed by summarizing chat history, `rupi` preserves the canonical runtime trace separately from model-visible context.
 
 ---
 
-## Inspecting Traces (`pi-rs trace`)
+## Inspecting Traces (`rupi trace`)
 
 View the chronological, formatted log of events for any session:
 
 ```bash
-pi-rs trace --config config.json <session-id>
+rupi trace --config config.json <session-id>
 ```
 
 Output includes:
@@ -35,15 +35,15 @@ Output includes:
 
 ---
 
-## Deterministic Replay (`pi-rs replay`)
+## Deterministic Replay (`rupi replay`)
 
 To inspect and verify past execution without making network calls or mutating disk files:
 
 ```bash
-pi-rs replay .pi-rs-state/sessions/<session-id>.trace.jsonl
+rupi replay .rupi-state/sessions/<session-id>.trace.jsonl
 ```
 
-![pi-rs Trace & Replay](../assets/screenshots/trace-replay.png)
+![rupi Trace & Replay](../assets/screenshots/trace-replay.png)
 
 In replay mode:
 - Events are loaded sequentially from `trace.jsonl`.
@@ -58,7 +58,7 @@ In replay mode:
 To continue a previous conversation without losing conversational context:
 
 ```bash
-pi-rs run --config config.json --cwd . --resume <session-id-or-prefix> --prompt "Refactor the function we just wrote"
+rupi run --config config.json --cwd . --resume <session-id-or-prefix> --prompt "Refactor the function we just wrote"
 ```
 
 The runtime resolves the session ID prefix, restores the latest durable projection and

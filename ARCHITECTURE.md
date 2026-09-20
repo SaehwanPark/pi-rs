@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-This document defines the implementation-facing architecture for `pi-rs`.
+This document defines the implementation-facing architecture for `rupi`.
 
 The project should remain small at the user-facing layer while providing explicit runtime primitives for:
 
@@ -56,16 +56,16 @@ Initial crate boundaries may be:
 
 ```text
 crates/
-  pi-rs-core/
-  pi-rs-provider/
-  pi-rs-session/
-  pi-rs-context/
-  pi-rs-trace/
-  pi-rs-tools/
-  pi-rs-mcp/
-  pi-rs-pi-compat/
-  pi-rs-extension/
-  pi-rs-tui/
+  rupi-core/
+  rupi-provider/
+  rupi-session/
+  rupi-context/
+  rupi-trace/
+  rupi-tools/
+  rupi-mcp/
+  rupi-pi-compat/
+  rupi-extension/
+  rupi-tui/
 
 src/
   main.rs
@@ -220,7 +220,7 @@ Blob payload compression is optional and disabled by default. When enabled, the 
 Durable layout (the session files are kept flat so listing only reads headers):
 
 ```text
-.pi-rs/
+.rupi/
   sessions/
     <session-id>.jsonl              semantic resume projection
     <session-id>.trace.jsonl        canonical ordered trace
@@ -283,7 +283,7 @@ That rule is pinned at every hop a claim crosses, in `tests/provenance_roundtrip
 - each claim renders under its own label and its own style role, and a resumed session
   reports the same claim the run recorded, including the optional source detail;
 - `Native` is the only claim that may be described as emitted reasoning, and only
-  `Reconstructed` is described as pi-rs inference. Those two predicates are what the
+  `Reconstructed` is described as rupi inference. Those two predicates are what the
   prose is generated from, so they are asserted directly.
 
 ## 9. Tool runtime
@@ -490,7 +490,7 @@ Rules:
 
 ## 15. MCP server / worker mode
 
-`pi-rs-mcp::worker` exposes a coarse, explicit worker boundary through typed MCP
+`rupi-mcp::worker` exposes a coarse, explicit worker boundary through typed MCP
 JSON-RPC. The embedding application supplies a headless [`WorkerEngine`] adapter (normally
 composed from `TurnLoop`, `StoreTrace`, `CancelToken`, and `SilentProgress`); the MCP layer
 owns run handles, cancellation, bounded waits, and stable resource projections.
@@ -523,12 +523,12 @@ ordering and attribution, not raw event payloads or implementation paths. Diff a
 resources report explicit availability rather than fabricating data. The stdio dispatcher
 accepts MCP `initialize`, `tools/list`, `tools/call`, `resources/list`, and `resources/read`
 without scraping terminal output. Checkpoint and historical-event branching are now owned by
-read-only `pi-rs-replay` plans; the worker still does not execute historical branches itself.
+read-only `rupi-replay` plans; the worker still does not execute historical branches itself.
 
 ### 15.1 Replay and research tooling
 
-`pi-rs-replay` is a pure projection boundary over redacted `TraceEntry` values joined with
-optional `SessionRecord` messages. `pi-rs replay` is read-only: it never opens a provider,
+`rupi-replay` is a pure projection boundary over redacted `TraceEntry` values joined with
+optional `SessionRecord` messages. `rupi replay` is read-only: it never opens a provider,
 executes a tool, or treats historical records as a new generation. Sequence numbers define
 ordering; timestamps are used only for timing views. Filters, inclusive replay-until-event,
 model-visible context snapshots, epoch/compaction/failover timelines, provenance summaries,
@@ -542,7 +542,7 @@ model reasoning.
 
 ### 15.2 Optimization experiments and adaptive policies
 
-`pi-rs-experiments` defines pure evaluation and measurement boundaries for adaptive context
+`rupi-experiments` defines pure evaluation and measurement boundaries for adaptive context
 policies, standby backup analysis, and MCP capability exposure:
 - **Context adaptation**: `KneeDetector` tracks `first_delta_ms` against context token estimates
   to detect non-linear prefill latency knees. `AdaptiveContextPolicy` only lowers or caps
@@ -587,14 +587,14 @@ External context therefore supports:
 - traceable source/provenance metadata;
 - fail-closed unavailable-resource handling.
 
-`pi-rs-rkb` is the first-party reference integration. It depends on generic core/MCP
-contracts, while `pi-rs-core` has no dependency on RKB or its external crate.
+`rupi-rkb` is the first-party reference integration. It depends on generic core/MCP
+contracts, while `rupi-core` has no dependency on RKB or its external crate.
 
 ## 17. Pi compatibility layer
 
 Compatibility logic should remain isolated from the Rust-native runtime.
 
-That boundary is a crate. `pi-rs-compat` reads files Pi already understands — skills and
+That boundary is a crate. `rupi-compat` reads files Pi already understands — skills and
 prompt templates today — and returns typed state plus the list of things it did not
 understand. Where two formats come from the same places, the *where* is stated once:
 `scan` holds `Trust`, `Source`, and `Discovery`, because a trust decision that exists
@@ -624,7 +624,7 @@ Priority order:
 7. selected lifecycle events;
 8. selected UI compatibility.
 
-`pi-rs-extension` handles the selected TypeScript extension surface behind a typed
+`rupi-extension` handles the selected TypeScript extension surface behind a typed
 JSON-lines RPC boundary. It accepts trusted module paths, loads Pi-style default factories,
 and returns normalized tool/command metadata, lifecycle/context results, and selected UI
 notifications. Extension exceptions and process loss remain adapter errors; the core
@@ -665,7 +665,7 @@ READY
 
 Deferred by default:
 
-- Node extension host (`pi-rs-extension`);
+- Node extension host (`rupi-extension`);
 - MCP connections;
 - backup provider connection/loading;
 - deep trace hydration;
@@ -682,7 +682,7 @@ All durable trace output should pass through redaction policy before persistence
 Raw provider payload storage must be opt-in.
 
 Project-local config must respect trust boundaries. Compatibility readers receive an
-explicit caller-owned `Discovery::trust`; `pi-rs trust` persists exact canonical project
+explicit caller-owned `Discovery::trust`; `rupi trust` persists exact canonical project
 scopes in a private, schema-versioned file, but no reader infers trust from the files it
 would activate.
 

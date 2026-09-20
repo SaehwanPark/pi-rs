@@ -1,13 +1,13 @@
-# pi-rs
+# rupi
 
 <p align="center">
   <strong>A minimal, Pi-inspired coding-agent runtime implemented in Rust.</strong>
 </p>
 
 <p align="center">
-  <a href="https://github.com/SaehwanPark/pi-rs/actions/workflows/ci.yml"><img src="https://github.com/SaehwanPark/pi-rs/actions/workflows/ci.yml/badge.svg" alt="CI Status" /></a>
-  <a href="https://saehwanpark.github.io/pi-rs/"><img src="https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg" alt="Documentation" /></a>
-  <a href="https://github.com/SaehwanPark/pi-rs/releases"><img src="https://img.shields.io/badge/release-v0.2.0-green.svg" alt="Release v0.2.0" /></a>
+  <a href="https://github.com/SaehwanPark/rupi/actions/workflows/ci.yml"><img src="https://github.com/SaehwanPark/rupi/actions/workflows/ci.yml/badge.svg" alt="CI Status" /></a>
+  <a href="https://saehwanpark.github.io/rupi/"><img src="https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg" alt="Documentation" /></a>
+  <a href="https://github.com/SaehwanPark/rupi/releases"><img src="https://img.shields.io/badge/release-v0.2.0-green.svg" alt="Release v0.2.0" /></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.85%2B%20(2024)-orange.svg" alt="Rust 1.85+" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-purple.svg" alt="License" /></a>
 </p>
@@ -18,7 +18,7 @@
 
 **Current release:** `v0.2.0` (2026-09-19). Round 9 of the durability and recovery audit accepted the audited `main` state with no remaining P0/P1 findings.
 
-`pi-rs` preserves the strengths and interaction ergonomics of [Pi](https://github.com/mariozechner/pi) while delivering a native Rust runtime with no required Node.js or Python runtime for standard tasks, typed event sourcing, honest reasoning provenance, deterministic replay, and low-latency startup.
+`rupi` preserves the strengths and interaction ergonomics of [Pi](https://github.com/mariozechner/pi) while delivering a native Rust runtime with no required Node.js or Python runtime for standard tasks, typed event sourcing, honest reasoning provenance, deterministic replay, and low-latency startup.
 
 ---
 
@@ -27,21 +27,21 @@
 ### Interactive TUI Mode
 Real-time streaming, multi-line editor buffer, syntax-highlighted tool activity, and a persistent semantic statusline:
 
-![pi-rs Interactive TUI](assets/screenshots/interactive-tui.png)
+![rupi Interactive TUI](assets/screenshots/interactive-tui.png)
 
 ### One-Shot Headless Runner
 Streamlined CLI execution with strict stdout/stderr separation and explicit provenance labels (`[native reasoning]`):
 
-![pi-rs CLI Runner](assets/screenshots/cli-run.png)
+![rupi CLI Runner](assets/screenshots/cli-run.png)
 
 ---
 
 ## Core Highlights
 
 - **Interactive TUI**: Keyboard-first terminal pair programming with multi-line editor, live streaming, and semantic statusline.
-- **One-Shot CLI Runner (`pi-rs run`)**: Scriptable headless turn execution; pure assistant prose to `stdout`, structured execution telemetry to `stderr`.
+- **One-Shot CLI Runner (`rupi run`)**: Scriptable headless turn execution; pure assistant prose to `stdout`, structured execution telemetry to `stderr`.
 - **Honest Provenance**: Distinct attribution for `[native reasoning]`, `[provider summary]`, `[declared]`, and `[reconstructed]` rationale. Hidden chain-of-thought is never falsely claimed.
-- **Append-Only Event Store & Replay**: Complete execution timeline stored in `trace.jsonl`; inspect sessions with `pi-rs trace` or replay deterministically with `pi-rs replay` without re-running tools.
+- **Append-Only Event Store & Replay**: Complete execution timeline stored in `trace.jsonl`; inspect sessions with `rupi trace` or replay deterministically with `rupi replay` without re-running tools.
 - **Workspace Confinement**: File tools reject traversal and outward-pointing symlink components under `--cwd`; mutating tools (`write`, `edit`, `exec`) require explicit configuration approval.
 - **Pi Ecosystem Compatibility**: Tested behavioral compatibility for Pi skills, prompt templates, packages, selected extensions, and bidirectional session migration (`import-pi`/`export`).
 - **Resilient Model Failover**: Pre-validated backup provider failover with capability checks (tools, modalities, context limits).
@@ -59,7 +59,7 @@ Streamlined CLI execution with strict stdout/stderr separation and explicit prov
 cargo install --path .
 
 # Or download prebuilt binaries from GitHub Releases
-# https://github.com/SaehwanPark/pi-rs/releases
+# https://github.com/SaehwanPark/rupi/releases
 ```
 
 ### 2. Configure (`config.json`)
@@ -71,7 +71,7 @@ Works out of the box with local models (Ollama, vLLM) and OpenAI-compatible clou
   "version": 1,
   "primary": "local/qwen2.5-coder:latest",
   "thinking": "medium",
-  "state_dir": ".pi-rs-state",
+  "state_dir": ".rupi-state",
   "endpoints": [
     {
       "provider": "local",
@@ -98,10 +98,10 @@ Works out of the box with local models (Ollama, vLLM) and OpenAI-compatible clou
 
 ```bash
 # One-shot task
-pi-rs run --config config.json --cwd . --prompt "Inspect Cargo.toml and list workspace members"
+rupi run --config config.json --cwd . --prompt "Inspect Cargo.toml and list workspace members"
 
 # Interactive terminal session
-pi-rs interactive --config config.json
+rupi interactive --config config.json
 ```
 
 ---
@@ -110,18 +110,18 @@ pi-rs interactive --config config.json
 
 | Command | Usage | Description |
 | :--- | :--- | :--- |
-| `run` | `pi-rs run --config <cfg> --cwd <dir> --prompt <txt>` | Run one durable coding-agent turn |
-| `interactive` | `pi-rs interactive --config <cfg>` | Start interactive multi-turn terminal UI |
-| `trace` | `pi-rs trace --config <cfg> [session-id]` | Read a chronological event log from the store |
-| `replay` | `pi-rs replay <trace-or-session.jsonl>` | Inspect recorded history without providers or tools |
-| `skills` | `pi-rs skills [--project]` | List skills offered to model |
-| `prompts` | `pi-rs prompts [--project]` | List discovered prompt templates |
-| `prompt` | `pi-rs prompt <name> [args...]` | Expand prompt template with parameters |
-| `packages` | `pi-rs packages` | List discovered Pi packages and surfaces |
-| `trust` | `pi-rs trust --store <dir> --list\|--grant\|--deny\|--clear` | Manage explicit project trust decisions |
-| `compat` | `pi-rs compat <path>` | Audit package/directory for compatibility |
-| `import-pi` | `pi-rs import-pi <session.jsonl> [--config <cfg>] [--write]` | Import a Pi session with loss diagnostics |
-| `export` | `pi-rs export <session-id> --config <cfg> [--out <path>]` | Export a session to Pi JSONL format |
+| `run` | `rupi run --config <cfg> --cwd <dir> --prompt <txt>` | Run one durable coding-agent turn |
+| `interactive` | `rupi interactive --config <cfg>` | Start interactive multi-turn terminal UI |
+| `trace` | `rupi trace --config <cfg> [session-id]` | Read a chronological event log from the store |
+| `replay` | `rupi replay <trace-or-session.jsonl>` | Inspect recorded history without providers or tools |
+| `skills` | `rupi skills [--project]` | List skills offered to model |
+| `prompts` | `rupi prompts [--project]` | List discovered prompt templates |
+| `prompt` | `rupi prompt <name> [args...]` | Expand prompt template with parameters |
+| `packages` | `rupi packages` | List discovered Pi packages and surfaces |
+| `trust` | `rupi trust --store <dir> --list\|--grant\|--deny\|--clear` | Manage explicit project trust decisions |
+| `compat` | `rupi compat <path>` | Audit package/directory for compatibility |
+| `import-pi` | `rupi import-pi <session.jsonl> [--config <cfg>] [--write]` | Import a Pi session with loss diagnostics |
+| `export` | `rupi export <session-id> --config <cfg> [--out <path>]` | Export a session to Pi JSONL format |
 
 ---
 
@@ -141,7 +141,7 @@ The benchmark harnesses (`bench/`) enforce these targets where the host supports
 
 ## Documentation
 
-Full public documentation is available on **[GitHub Pages](https://saehwanpark.github.io/pi-rs/)**.
+Full public documentation is available on **[GitHub Pages](https://saehwanpark.github.io/rupi/)**.
 
 For codebase architecture and developer contracts:
 - **[Documentation Index](docs/README.md)** — Master map of all repository documentation.
@@ -155,4 +155,4 @@ For codebase architecture and developer contracts:
 
 ## License
 
-`pi-rs` is distributed under the [MIT License](LICENSE).
+`rupi` is distributed under the [MIT License](LICENSE).

@@ -5,7 +5,7 @@ Neither measures the thing #32 made possible: **relaunching a process that conti
 
 ## Definition to pin in the header
 
-Warm start = time from exec to exit for `pi-rs run --resume <id> --prompt <p>` against a session that
+Warm start = time from exec to exit for `rupi run --resume <id> --prompt <p>` against a session that
 **already exists in the store**, compared against the same argv **without** `--resume` on an empty
 store. It measures resolve + `Store::restore` + context rebuild. It is *not* a cold-start number (the
 page cache is warm, the binary inode is warm) and the header must say so.

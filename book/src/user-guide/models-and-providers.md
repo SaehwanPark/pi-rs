@@ -1,6 +1,6 @@
 # Models & Providers
 
-`pi-rs` connects to both local and remote AI models through a unified provider abstraction.
+`rupi` connects to both local and remote AI models through a unified provider abstraction.
 
 ---
 
@@ -15,7 +15,7 @@ model must have a matching entry in `endpoints`:
   "primary": "local/qwen2.5-coder:32b",
   "backup": "openai/gpt-4o",
   "thinking": "medium",
-  "state_dir": ".pi-rs-state",
+  "state_dir": ".rupi-state",
   "endpoints": [
     {
       "provider": "local",

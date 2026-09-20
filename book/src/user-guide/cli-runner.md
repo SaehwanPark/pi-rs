@@ -1,16 +1,16 @@
 # One-Shot CLI Runner
 
-`pi-rs run` executes a single, complete, durable coding-agent turn against an explicitly configured endpoint. It is designed for headless workflows, CI/CD automation, scripts, and quick one-off coding tasks.
+`rupi run` executes a single, complete, durable coding-agent turn against an explicitly configured endpoint. It is designed for headless workflows, CI/CD automation, scripts, and quick one-off coding tasks.
 
 ---
 
 ## Basic Invocation
 
 ```bash
-pi-rs run --config <file> --cwd <workspace> --prompt <text>
+rupi run --config <file> --cwd <workspace> --prompt <text>
 ```
 
-![pi-rs CLI Runner](../assets/screenshots/cli-run.png)
+![rupi CLI Runner](../assets/screenshots/cli-run.png)
 
 ---
 
@@ -29,9 +29,9 @@ pi-rs run --config <file> --cwd <workspace> --prompt <text>
 
 ## Stream Separation: stdout vs stderr
 
-`pi-rs` strictly separates assistant prose from execution metadata:
+`rupi` strictly separates assistant prose from execution metadata:
 
-- **`stdout`**: Streams only the raw, unattributed assistant response text. This makes `pi-rs run` directly pipeable into files or Unix pipelines (e.g. `pi-rs run ... > generated_code.rs`).
+- **`stdout`**: Streams only the raw, unattributed assistant response text. This makes `rupi run` directly pipeable into files or Unix pipelines (e.g. `rupi run ... > generated_code.rs`).
 - **`stderr`**: Streams the structured runtime transcript, including:
   - Model request notifications
   - Provenance-labeled thinking text

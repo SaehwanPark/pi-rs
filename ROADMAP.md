@@ -51,7 +51,7 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [x] Add warm-start benchmark (`bench/startup.sh` reports min/mean/median/max over N warm runs;
       `bench/warm_start.sh` benchmarks relaunching a process that continues a stored session).
 - [x] Add TUI render benchmark (`bench/render.sh`; cases in
-      `crates/pi-rs-tui/benches/render.rs`).
+      `crates/rupi-tui/benches/render.rs`).
 - [x] Add slash-completion benchmark (`tab_completion` in `bench/keystroke.sh`: Tab cycling
       a command word against 64 candidates, budgeted per press alongside the other keystrokes).
 - [x] Record initial latency budgets. They are the budgets in the bench source, which exits
@@ -61,9 +61,9 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Stage gate
 
-- [x] Core contracts compile independently of provider/TUI implementation (`pi-rs-core` has zero
+- [x] Core contracts compile independently of provider/TUI implementation (`rupi-core` has zero
       dependencies on provider, runtime, store, or TUI crates).
-- [x] Event/session/provenance schemas are documented (`crates/pi-rs-core/src/`, `ARCHITECTURE.md`,
+- [x] Event/session/provenance schemas are documented (`crates/rupi-core/src/`, `ARCHITECTURE.md`,
       and canonical design docs).
 - [x] CI is green on supported platforms.
 - [x] Startup benchmark can run reproducibly (`bench/startup.sh`).
@@ -74,38 +74,38 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### CLI and TUI
 
-- [x] Implement executable entry point (`pi-rs run` one-shot headless turn).
-- [x] Implement minimal terminal editor, and the loop that feeds it (`pi-rs interactive`:
-      raw mode, key events mapped through `pi-rs-tui::keys`, `pi-rs-tui::editor` buffer,
+- [x] Implement executable entry point (`rupi run` one-shot headless turn).
+- [x] Implement minimal terminal editor, and the loop that feeds it (`rupi interactive`:
+      raw mode, key events mapped through `rupi-tui::keys`, `rupi-tui::editor` buffer,
       one turn per submit on a single open session, so context carries across turns).
       Turn interruption is still its own item below.
 - [x] Implement streamed assistant rendering for the one-shot command.
 - [x] Implement cancel/interrupt (`interrupt::TurnInterruptGuard` catches `SIGINT` during in-flight
       turns and flags `CancelToken`, safely aborting model streaming or tool calls without
       session corruption).
-- [x] Implement compact status line (the projection in `pi-rs-tui::statusline` is rendered
+- [x] Implement compact status line (the projection in `rupi-tui::statusline` is rendered
       by the interactive session frame, tested across narrow fallback and idle/working states).
-- [x] Render the streamed transcript through a semantic layer (`pi-rs-tui`: roles,
+- [x] Render the streamed transcript through a semantic layer (`rupi-tui`: roles,
       provenance-labelled reasoning, spelled-out tool state, calm-by-default diagnostics)
-      and wire it into `pi-rs run` behind `--color/--no-color`, `--width`, `--no-reasoning`,
+      and wire it into `rupi run` behind `--color/--no-color`, `--width`, `--no-reasoning`,
       `--verbose`, `--quiet`, `--silent`.
-- [x] Implement syntax-aware command parsing (parser in `pi-rs-tui::command` is consumed in
+- [x] Implement syntax-aware command parsing (parser in `rupi-tui::command` is consumed in
       interactive routing via `Input::parse` and prompt template argument parsing).
-- [x] Implement syntax highlighting for operation vs arguments (`pi-rs-tui::highlight::tokens`
+- [x] Implement syntax highlighting for operation vs arguments (`rupi-tui::highlight::tokens`
       wired into `interactive` buffer rows and painted across terminal palettes).
-- [x] Implement path-aware rendering (`pi-rs-tui::command` path shapes, `Role::Path`).
+- [x] Implement path-aware rendering (`rupi-tui::command` path shapes, `Role::Path`).
 - [x] Ensure narrow-terminal fallback (`MIN_COLUMN` drops decoration, keeps word alignment).
 - [x] Measure keystroke/render latency. Keystroke latency is measured and budgeted in
-      `bench/keystroke.sh` (`crates/pi-rs-tui/benches/keystroke.rs`: eleven cases); render and
-      command-parse latency are measured and budgeted in `bench/render.sh` (`crates/pi-rs-tui/benches/render.rs`).
+      `bench/keystroke.sh` (`crates/rupi-tui/benches/keystroke.rs`: eleven cases); render and
+      command-parse latency are measured and budgeted in `bench/render.sh` (`crates/rupi-tui/benches/render.rs`).
 
 ### Providers
 
-> `pi-rs-provider` implements one OpenAI-compatible adapter (`OpenAiCompat`) used
+> `rupi-provider` implements one OpenAI-compatible adapter (`OpenAiCompat`) used
 > against local llama.cpp and remote cloud endpoints (OpenAI, Groq, OpenRouter).
 > Streaming, tool-call, exposed-reasoning, and failure normalization are covered by
 > unit tests plus wire-level integration tests against a fake OpenAI server
-> (`crates/pi-rs-provider/tests/transport.rs`), and verified against the real local
+> (`crates/rupi-provider/tests/transport.rs`), and verified against the real local
 > endpoint: reasoning arrived as a separate typed event with `Native` provenance,
 > the visible answer stayed separate, and the turn reported `finish_reason=stop` with
 > usage. Remote cloud provider paths (`ModelEndpoint::remote`, `ProviderConfig::remote`,
@@ -122,7 +122,7 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Basic tools
 
-> `pi-rs-tools` provides the built-in set (`read`, `write`, `edit`, `grep`,
+> `rupi-tools` provides the built-in set (`read`, `write`, `edit`, `grep`,
 > `exec`) behind a `ToolRegistry`. Every path is confined to an explicit
 > workspace root; every result passes one reduction boundary; every call lands in
 > a typed lifecycle state. Two invariants carry the safety weight and are tested
@@ -142,7 +142,7 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Sessions
 
-> The one-shot `pi-rs run --config <file> --cwd <workspace> --prompt <text>`
+> The one-shot `rupi run --config <file> --cwd <workspace> --prompt <text>`
 > composition root now drives the provider/tool loop and writes attributed
 > messages plus the store-sequenced canonical trace. Interactive resume UX
 > remains outside this slice.
@@ -155,7 +155,7 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Stage gate
 
-- [x] User can start `pi-rs`, issue a coding request, inspect files, edit files, run
+- [x] User can start `rupi`, issue a coding request, inspect files, edit files, run
       tests, and continue the session (`tests/run_cli.rs`, `tests/resume_cli.rs`, and
       `src/interactive.rs`).
 - [x] Startup is within an acceptable baseline (latest recorded run: cold 222.06 ms,
@@ -199,13 +199,13 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 > Provenance is decided by the endpoint's declared `exposed_reasoning` rather than by
 > the response field it was decoded from, and `Declared` is therefore now produced:
 > an endpoint declaring `declared` exposure yields declared rationale end to end.
-> `crates/pi-rs-provider/tests/transport.rs` sends the same thinking field under three
+> `crates/rupi-provider/tests/transport.rs` sends the same thinking field under three
 > declarations and reads back three different claims; `tests/run_cli.rs` checks the
 > claim through the journal and the rendered transcript line. A folded reasoning run
 > still never merges across a provenance boundary.
 >
 > `Reconstructed` keeps a distinct role and label in the rendering layer and no
-> producer: nothing in `pi-rs` infers reasoning after the fact, and it should not
+> producer: nothing in `rupi` infers reasoning after the fact, and it should not
 > acquire that ability casually.
 >
 > Serialization is pinned instead of trusted. `tests/provenance_roundtrip.rs` walks all
@@ -215,11 +215,11 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 
 ### Inspection
 
-- [x] Implement `pi-rs trace`.
+- [x] Implement `rupi trace`.
 - [x] Implement trace filtering by tools.
 - [x] Implement trace filtering by reasoning.
 - [x] Implement model-epoch inspection.
-- [x] Name the stored-out reference for an externalized field when rendering a recorded line. The transcript budgets a long argument value to keep one request on one line, which cuts the reference off; the marker is in the line and the typed `externalized` record carries the path. (Verified in `crates/pi-rs-tui/src/trace.rs` unit tests and `tests/trace_cli.rs`)
+- [x] Name the stored-out reference for an externalized field when rendering a recorded line. The transcript budgets a long argument value to keep one request on one line, which cuts the reference off; the marker is in the line and the typed `externalized` record carries the path. (Verified in `crates/rupi-tui/src/trace.rs` unit tests and `tests/trace_cli.rs`)
 
 ### Stage gate
 
@@ -256,7 +256,7 @@ Each stage has a **stage gate**. Do not advance merely because some tasks are co
 - [x] Add project-local skill support.
 - [x] Add compatibility fixtures.
 
-Skill discovery (`pi-rs-compat::skill`, surfaced by `pi-rs skills`) reads the two file
+Skill discovery (`rupi-compat::skill`, surfaced by `rupi skills`) reads the two file
 families Pi documents — per-user and per-project — including the rule that a root `*.md`
 counts as a skill in `.pi/` locations and is ignored in the shared `.agents/` ones, the
 ancestor walk that stops at the git root, and the frontmatter subset (`name`,
@@ -266,11 +266,11 @@ packages (global and project, gated on trust) and explicit `--skill` paths are s
 Project locations are gated on trust, and frontmatter declares the trust question as an
 input rather than answering it.
 
-Prompt-template discovery (`pi-rs-compat::prompt`, surfaced by `pi-rs prompts`) reads
+Prompt-template discovery (`rupi-compat::prompt`, surfaced by `rupi prompts`) reads
 Pi's two template locations non-recursively, takes the command name from the filename, and
 falls back to the body's first line for a missing `description` while recording that the
-description was not authored. `pi-rs prompt <name> [args…]` applies Pi's substitution
-grammar (`pi-rs-compat::substitute`) and prints the prompt alone, which is what makes a
+description was not authored. `rupi prompt <name> [args…]` applies Pi's substitution
+grammar (`rupi-compat::substitute`) and prints the prompt alone, which is what makes a
 template reusable before any session knows how to invoke one.
 
 Open in this area, in order:
@@ -279,20 +279,20 @@ Open in this area, in order:
 - [x] Present loaded skills to the model as a skill-control prompt listing/template.
 - [x] Add package-local skills (`manifest.skill_paths`, conventional `skills/` and `SKILL.md`),
       and `--skill` CLI paths. (Settings array remains deferred).
-- [x] Invoke a prompt template from inside a session (`/name`), and wire `pi-rs run` to
-      accept one; `pi-rs prompt` expands a template today, nothing sends it.
+- [x] Invoke a prompt template from inside a session (`/name`), and wire `rupi run` to
+      accept one; `rupi prompt` expands a template today, nothing sends it.
 - [x] Split one typed string into template arguments the way Pi's editor does, quotes
       included.
 - [x] Add package-local prompts (`manifest.prompt_paths`, conventional `prompts/`),
       `--prompt-template`, and `--no-prompt-templates`. (Settings array remains deferred).
-- [x] Decide trust somewhere other than the file reader, then pass its answer in (`--project` is an explicit caller-owned one-shot grant; `--trust-store <dir>` resolves durable exact canonical project scopes, with denial winning over the one-shot flag; durable high-risk decisions are recorded by `pi-rs trust` in `FileTrustStore`, while runtime once/always prompting remains deferred).
+- [x] Decide trust somewhere other than the file reader, then pass its answer in (`--project` is an explicit caller-owned one-shot grant; `--trust-store <dir>` resolves durable exact canonical project scopes, with denial winning over the one-shot flag; durable high-risk decisions are recorded by `rupi trust` in `FileTrustStore`, while runtime once/always prompting remains deferred).
 - [x] Add the compatibility fixture suite (`tests/compat/` holds skill, prompt, and package
       fixtures; session import/export has targeted CLI coverage; TypeScript extension
       execution is covered by the Phase 8 host fixtures).
 
 ### Packages
 
-- [x] Parse compatible package manifests (`crates/pi-rs-compat/src/package.rs`: hand-rolled
+- [x] Parse compatible package manifests (`crates/rupi-compat/src/package.rs`: hand-rolled
       zero-dependency JSON reader; extracts `name`, `version`, `description`, `pi.skills`,
       `pi.prompts`; produces typed `Warning::UnsupportedSurface` for `extensions`,
       `Warning::UnknownSurface` for unknown `pi`-namespace keys; `tests/compat_packages.rs`:
@@ -300,20 +300,20 @@ Open in this area, in order:
 - [x] Report unsupported package surfaces (per-surface `Warning` variants with counts;
       does not reject the whole package when only one optional feature is unrecognised;
       `extensions` is the documented Phase-8 surface, recorded with entry count).
-- [x] Implement package discovery (`crates/pi-rs-compat/src/package.rs`: `discover(&Discovery)`
+- [x] Implement package discovery (`crates/rupi-compat/src/package.rs`: `discover(&Discovery)`
       scans `$HOME/.pi/agent/packages`, `$HOME/.pi/packages`, and `<ancestor>/.pi/packages`
       when trusted; deterministic lexicographical sort; first-found-wins duplicate resolution;
       subdirectories missing `package.json` flagged with `Warning::MissingManifest`;
       exposes contained `skill_locations` and `prompt_locations` via manifest or convention;
-      `pi-rs packages [--project] [--trust-store <dir>] [--show <name>]` CLI command;
+      `rupi packages [--project] [--trust-store <dir>] [--show <name>]` CLI command;
       `tests/compat_packages.rs`:
       9 passing fixture-driven tests; `tests/packages_cli.rs`: 6 passing CLI tests).
 - [x] Implement package install path (explicit local-directory copy to global/project package roots with atomic staging, symlink/path checks, and no dependency/script execution; npm/git/HTTP/update support remains deferred and compatibility stays Partial).
-- [x] Add `pi-rs compat` prototype (`crates/pi-rs-compat/src/compat.rs`: `inspect_target` inspects
+- [x] Add `rupi compat` prototype (`crates/rupi-compat/src/compat.rs`: `inspect_target` inspects
       package manifests, skills, prompts, and extension files with static analysis of `registerTool`,
-      `registerCommand`, context hooks, and internal imports; `pi-rs compat [options] <path-or-package>`
+      `registerCommand`, context hooks, and internal imports; `rupi compat [options] <path-or-package>`
       with `--project` and `--json` support; `tests/compat_cli.rs`: 8 passing integration tests;
-      `crates/pi-rs-compat/src/compat.rs`: 5 passing unit tests).
+      `crates/rupi-compat/src/compat.rs`: 5 passing unit tests).
 
 ### Sessions
 
@@ -367,7 +367,7 @@ Open in this area, in order:
 
 ### L0 reduction
 
-> Evidenced by the oversized-tool-output path: `pi-rs-runtime` reads the journal back and
+> Evidenced by the oversized-tool-output path: `rupi-runtime` reads the journal back and
 > asserts that a reduced result carries a `context_reduced` event whose recovery
 > reference resolves to a blob holding the full, redacted output. A reduction that
 > cannot be stored still logs the event, with no reference, rather than logging nothing.
@@ -380,7 +380,7 @@ Open in this area, in order:
 
 ### L1 ordinary compaction
 
-- [x] Implement ordinary compaction (`TurnLoop::compact` in `crates/pi-rs-runtime/src/turn.rs`).
+- [x] Implement ordinary compaction (`TurnLoop::compact` in `crates/rupi-runtime/src/turn.rs`).
 - [x] Retain recent context (retained tail kept alongside canonical summary).
 - [x] Persist compaction event (`ContextCompactionStarted`, `ContextSummary`, `ContextCompactionEpoch`, `ContextCompactionCompleted`).
 - [x] Preserve original trace (original events remain in `trace.jsonl` with epoch tracking).
@@ -390,7 +390,7 @@ Open in this area, in order:
 
 ### L2 semantic phase compaction
 
-- [x] Implement phase-boundary request (`TurnLoop::compact_phase` in `crates/pi-rs-runtime/src/turn.rs` creates structured phase summary epoch).
+- [x] Implement phase-boundary request (`TurnLoop::compact_phase` in `crates/rupi-runtime/src/turn.rs` creates structured phase summary epoch).
 - [x] Add `/compact-phase` (interactive slash command with Tab completion and optional `--force` override).
 - [x] Allow model-facing semantic compaction recommendation (`ContextAction::Compact` with `ContextLevel::L2Phase` routes to phase compaction).
 - [x] Restrict execution to safe idle boundaries (phase compaction executed between turn requests or via interactive command when idle).
@@ -411,7 +411,7 @@ Open in this area, in order:
 - [x] Restore active model epochs, context epochs, cited sequence bounds, and resumed lifecycle state without duplicating epoch 0 (`StoreTrace`, `ResumeState`, and `tests/resume_cli.rs`).
 - [x] Apply durable compaction projections, retain post-checkpoint capsules as impermeable floors, and preserve canonical replacement ranges across resume (`SessionLog::restore` and runtime regression tests).
 - [x] Avoid full historical trace hydration (checkpoint and compaction projections act as barriers for model context reconstruction).
-- [x] Benchmark large-session restore (`bench/large_session.sh` and `crates/pi-rs-store/benches/restore.rs` measure 10, 100, 500, and 1,000 turns with and without checkpoint barriers).
+- [x] Benchmark large-session restore (`bench/large_session.sh` and `crates/rupi-store/benches/restore.rs` measure 10, 100, 500, and 1,000 turns with and without checkpoint barriers).
 
 ### Stage gate
 
@@ -432,7 +432,7 @@ Open in this area, in order:
 
 ### Failure classification
 
-- [x] Implement retryable transport failures (`ModelFailureKind::Transport` in `crates/pi-rs-core/src/failure.rs`).
+- [x] Implement retryable transport failures (`ModelFailureKind::Transport` in `crates/rupi-core/src/failure.rs`).
 - [x] Implement timeout classification (`ModelFailureKind::Timeout`, 408 / socket timeout).
 - [x] Implement rate-limit classification (`ModelFailureKind::RateLimited`, 429 with retry-after header parsing).
 - [x] Implement provider-unavailable classification (`ModelFailureKind::ProviderUnavailable`, 5xx, missing endpoint).
@@ -458,7 +458,7 @@ Open in this area, in order:
 ### Capability gate
 
 > The gate compares declared capability snapshots, so it decides before any adapter is
-> built. `FailoverPolicy::decide` is covered by `crates/pi-rs-runtime/src/failover.rs`
+> built. `FailoverPolicy::decide` is covered by `crates/rupi-runtime/src/failover.rs`
 > tests for each gap kind, and the two decisions that reach a user — refusal by name,
 > and a narrowed takeover that names the window it lost — are covered end to end in
 > `tests/failover_cli.rs`.
@@ -476,7 +476,7 @@ Open in this area, in order:
 - [x] Preserve committed tool results across failover.
 - [x] Detect `Unknown` tool completion (`ToolExecutionState::Unknown` and `AgentEvent::ToolUnknown`).
 - [x] Prevent blind replay of mutating operations (cancelled/uncertain mutating calls coerced to `Unknown`).
-- [x] Add reconciliation path for uncertain state (`ReconciliationStatus` on `Tool` trait, `ToolRegistry::reconcile`, and `TurnEngine::reconcile_tool_call` disambiguate `write`/`edit` side effects into `Committed`, `Unmodified`, `Diverged`, or `RequiresManualInspection`; verified in `crates/pi-rs-tools/tests/registry.rs`).
+- [x] Add reconciliation path for uncertain state (`ReconciliationStatus` on `Tool` trait, `ToolRegistry::reconcile`, and `TurnEngine::reconcile_tool_call` disambiguate `write`/`edit` side effects into `Committed`, `Unmodified`, `Diverged`, or `RequiresManualInspection`; verified in `crates/rupi-tools/tests/registry.rs`).
 
 ### Recovery policy
 
@@ -530,7 +530,7 @@ Open in this area, in order:
 - [x] A configured MCP server can be used without delaying startup (warm startup ~3.2 ms vs <100 ms budget; HTTP construction performs no I/O).
 - [x] Large MCP catalogs do not all enter model context by default (activation is lazy and filtered).
 - [x] MCP tools participate in the same trace/tool lifecycle as native tools (verified via `mcp_integration.rs`).
-- [x] A configured HTTP MCP endpoint is selected lazily and passes initialize/tools-list through the same client (`pi-rs-mcp` manager/transport wire tests); JSON and bounded SSE responses, session headers, notification 202/204, status/id failures, reserved headers, and response limits are covered.
+- [x] A configured HTTP MCP endpoint is selected lazily and passes initialize/tools-list through the same client (`rupi-mcp` manager/transport wire tests); JSON and bounded SSE responses, session headers, notification 202/204, status/id failures, reserved headers, and response limits are covered.
 
 ---
 
@@ -538,7 +538,7 @@ Open in this area, in order:
 
 ### Integration package
 
-- [x] Create `pi-rs-rkb` package/extension (`crates/pi-rs-rkb` is a downstream adapter;
+- [x] Create `rupi-rkb` package/extension (`crates/rupi-rkb` is a downstream adapter;
       its bundled `package.json`/`SKILL.md` are inspectable without linking the external
       `rkb-rs` crate).
 - [x] Add setup/discovery (`RkbSetup::discover` recognizes caller-provided `rkb`/`rkb-rs`
@@ -572,8 +572,8 @@ Open in this area, in order:
       (`tests/rkb_integration.rs` gate fixture).
 - [x] Source provenance survives all context transformations (core reference round trip,
       runtime/store resume fixture, and RKB citation metadata tests).
-- [x] RKB remains an independent project with no core dependency (`pi-rs-rkb` depends on
-      generic core/MCP contracts; `pi-rs-core` has no RKB dependency).
+- [x] RKB remains an independent project with no core dependency (`rupi-rkb` depends on
+      generic core/MCP contracts; `rupi-core` has no RKB dependency).
 
 ---
 
@@ -581,7 +581,7 @@ Open in this area, in order:
 
 ### Host runtime
 
-- [x] Define host RPC protocol (`pi-rs-extension` uses typed request/response values over
+- [x] Define host RPC protocol (`rupi-extension` uses typed request/response values over
       a private JSON-lines Node boundary; process loss and extension errors are distinct).
 - [x] Spawn Node host lazily (construction and an empty module list perform no process I/O;
       `start` is the explicit activation boundary).
@@ -593,7 +593,7 @@ Open in this area, in order:
 ### Extension APIs
 
 - [x] Support tool registration (`pi.registerTool` metadata/schema plus async execution,
-      progress events, and a `pi-rs-core::Tool` wrapper).
+      progress events, and a `rupi-core::Tool` wrapper).
 - [x] Support slash-command registration (`pi.registerCommand` and command dispatch).
 - [x] Support selected lifecycle events (`session_start`, `session_shutdown`, `turn_start`,
       `turn_end`, `tool_call`, and `tool_result`).
@@ -619,7 +619,7 @@ Open in this area, in order:
 
 ### Agent API
 
-- [x] Implement `agent.start` (`pi-rs-mcp::worker::WorkerService` returns a stable session/run
+- [x] Implement `agent.start` (`rupi-mcp::worker::WorkerService` returns a stable session/run
       handle and accepts an optional bounded wait).
 - [x] Implement `agent.continue` against the same worker session.
 - [x] Implement `agent.cancel` with a per-run cancellation token and terminal cancellation state.
@@ -649,8 +649,8 @@ Open in this area, in order:
 
 ### Stage gate
 
-- [x] External orchestrator can run and inspect a `pi-rs` worker without scraping terminal output
-      (`pi-rs-mcp::worker::serve_stdio` and MCP handshake/tools/resources fixtures).
+- [x] External orchestrator can run and inspect a `rupi` worker without scraping terminal output
+      (`rupi-mcp::worker::serve_stdio` and MCP handshake/tools/resources fixtures).
 - [x] Worker API does not expose unnecessary internal implementation details (bounded resource
       projections, explicit diff/artifact availability, and typed domain errors).
 
@@ -660,7 +660,7 @@ Open in this area, in order:
 
 ### Replay
 
-- [x] Implement read-only `pi-rs replay` over canonical trace/session JSONL.
+- [x] Implement read-only `rupi replay` over canonical trace/session JSONL.
 - [x] Filter by tools.
 - [x] Filter by reasoning.
 - [x] Filter by timing.
@@ -694,7 +694,7 @@ Do not begin until stable baselines exist.
 
 ### Context adaptation
 
-- [x] Measure prefill latency vs context size (`pi-rs-experiments::context`, `bench/context_prefill.sh`, and `ModelRequestCompleted.first_delta_ms`).
+- [x] Measure prefill latency vs context size (`rupi-experiments::context`, `bench/context_prefill.sh`, and `ModelRequestCompleted.first_delta_ms`).
 - [x] Detect model/runtime-specific performance knees (`KneeDetector::detect_knee`).
 - [x] Prototype adaptive context thresholds (`AdaptiveContextPolicy` caps/lowers compact thresholds).
 - [x] Compare against static profiles (`AdaptiveContextPolicy::compare_with_static`).
@@ -702,13 +702,13 @@ Do not begin until stable baselines exist.
 
 ### Backup optimization
 
-- [x] Evaluate optional warm standby (`pi-rs-experiments::backup::evaluate_standby_tradeoff`).
+- [x] Evaluate optional warm standby (`rupi-experiments::backup::evaluate_standby_tradeoff`).
 - [x] Measure startup/memory trade-offs (`StandbyTradeoffAnalysis` models startup vs takeover delay).
 - [x] Keep cold backup as default (retained default via `Deferred` in `src/run.rs`).
 
 ### MCP optimization
 
-- [x] Explore predictive/lazy capability prefetch (`pi-rs-experiments::mcp::evaluate_mcp_exposure`).
+- [x] Explore predictive/lazy capability prefetch (`rupi-experiments::mcp::evaluate_mcp_exposure`).
 - [x] Measure schema exposure vs model performance (evaluated minimal vs predictive vs eager token footprint).
 - [x] Keep minimal exposure as default (retained lazy activation in `McpManager`).
 
@@ -742,7 +742,7 @@ Do not begin until stable baselines exist.
       and folds formatted context and citations into the model's message path via
       `TurnLoop::run_turn_with_external_context`.
 - [x] Slash-completion for the interactive input line, plus its benchmark: `Tab` walks
-      `Completions` in `pi-rs-tui::complete`, the editor owns the cycle, and the loop answers
+      `Completions` in `rupi-tui::complete`, the editor owns the cycle, and the loop answers
       `/help`, `/quit`, and `/exit` itself.
 
 ### P1 — Follow-on
@@ -771,7 +771,7 @@ Do not begin until stable baselines exist.
 - [x] GitHub Pages site (mdBook source under `book/`, deployment workflow under
       `.github/workflows/pages.yml`; hosted deployment remains subject to repository
       Pages configuration).
-- [x] MCP server/worker mode (Phase 9): the typed `pi-rs-mcp::worker` adapter is implemented;
+- [x] MCP server/worker mode (Phase 9): the typed `rupi-mcp::worker` adapter is implemented;
       provider/runtime composition remains explicit at its `WorkerEngine` boundary. The selected
       TypeScript extension host (Phase 8) is complete above.
 

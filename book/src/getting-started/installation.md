@@ -1,6 +1,6 @@
 # Installation
 
-`pi-rs` is built in Rust using stable toolchains. Standard agent operations require no Node.js or Python runtime; those are optional integrations.
+`rupi` is built in Rust using stable toolchains. Standard agent operations require no Node.js or Python runtime; those are optional integrations.
 
 ---
 
@@ -18,12 +18,12 @@
 Clone the repository and compile using Cargo:
 
 ```bash
-git clone https://github.com/SaehwanPark/pi-rs.git
-cd pi-rs
+git clone https://github.com/SaehwanPark/rupi.git
+cd rupi
 cargo build --release
 ```
 
-The optimized binary will be located at `target/release/pi-rs`.
+The optimized binary will be located at `target/release/rupi`.
 
 To install the binary into your Cargo binary directory (`~/.cargo/bin`):
 
@@ -34,7 +34,7 @@ cargo install --path .
 Verify your installation:
 
 ```bash
-pi-rs --help
+rupi --help
 ```
 
 ---
@@ -44,12 +44,12 @@ pi-rs --help
 Release artifacts are target-specific. The v0.2.0 release includes an
 `x86_64-pc-windows-msvc` archive; build from source for other targets:
 
-👉 **[Download from GitHub Releases](https://github.com/SaehwanPark/pi-rs/releases)**
+👉 **[Download from GitHub Releases](https://github.com/SaehwanPark/rupi/releases)**
 
 On Windows PowerShell:
 
 ```powershell
-Expand-Archive .\pi-rs-v0.2.0-x86_64-pc-windows-msvc.zip -DestinationPath $env:USERPROFILE\.cargo\bin
+Expand-Archive .\rupi-v0.2.0-x86_64-pc-windows-msvc.zip -DestinationPath $env:USERPROFILE\.cargo\bin
 ```
 
 On Linux or macOS, use the Cargo source build above unless a matching release asset is

@@ -1,6 +1,6 @@
 //! Pi prompt templates that already exist on disk, read from committed fixtures.
 //!
-//! The unit tests in `pi-rs-compat` build their trees in code. These fixtures are real
+//! The unit tests in `rupi-compat` build their trees in code. These fixtures are real
 //! files in the repository, so a reviewer can read the input beside the expected outcome,
 //! and so a later change to the rules shows up as a diff in a fixture rather than only in
 //! a test.
@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use pi_rs_compat::{
+use rupi_compat::{
   prompt::{self, Warning},
   scan::{Discovery, Source, Trust},
 };

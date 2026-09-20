@@ -33,7 +33,7 @@ So the harness intentionally kills a potentially mutating process halfway throug
 
 That directly contradicts the module's otherwise excellent rule that killing a command mid-flight means completion is unknown. The existing large-output test only checks that output became truncated/reduced; it never checks that the command actually reached its end or that the lifecycle state is truthful.
 
-A realistic failure is a build/deploy script that emits 64 KiB of logs before reaching its state-changing final steps. pi-rs can kill it at the log threshold and tell the model it succeeded.
+A realistic failure is a build/deploy script that emits 64 KiB of logs before reaching its state-changing final steps. rupi can kill it at the log threshold and tell the model it succeeded.
 
 The preferred fix is **not to terminate the process because capture is full**. Once the capture limit is reached, stop retaining and forwarding additional bytes, but continue draining stdout/stderr into a discard sink so pipes cannot block, then wait for the real exit status. Memory remains bounded and the command is allowed to complete. If you intentionally choose a policy where excessive output terminates execution, then the result must be `Unknown`, never `Succeeded`.
 
@@ -81,7 +81,7 @@ I would add failpoint tests at every trace→projection boundary: kill after the
 
 The code already has nearly all the pieces for this, which makes the omission notable.
 
-Before tool code executes, pi-rs durably emits `ToolStarted`; the registry intentionally calls the start observer after approval/preflight but before executing the tool.
+Before tool code executes, rupi durably emits `ToolStarted`; the registry intentionally calls the start observer after approval/preflight but before executing the tool.
 
 Consider:
 
@@ -176,7 +176,7 @@ Even if filesystem append operations themselves remain intact, canonical sequenc
 
 The same missing ownership signal affects retention. Starting a new non-resumed session invokes retention with `keep_newest = 1`.  Retention explicitly does not track open handles; it plans victims by identifier age/size and then removes their files/directories.
 
-Thus, under concurrent pi-rs processes sharing a `state_dir`, an older-but-still-active session can become a retention victim once another newer session exists. On Unix, an already-open file descriptor may continue writing to an unlinked file, making the active process appear healthy while its durable path has vanished. On Windows, deletion/open-handle behavior can instead surface as failures. Neither outcome is acceptable for a durable harness.
+Thus, under concurrent rupi processes sharing a `state_dir`, an older-but-still-active session can become a retention victim once another newer session exists. On Unix, an already-open file descriptor may continue writing to an unlinked file, making the active process appear healthy while its durable path has vanished. On Windows, deletion/open-handle behavior can instead surface as failures. Neither outcome is acceptable for a durable harness.
 
 I would introduce a per-session **exclusive lease** held for the `Session` lifetime. `begin`/`resume` acquire it; a second resume fails cleanly with "session is active elsewhere." Retention takes a nonblocking lease before selecting/deleting a victim and skips leased sessions. A separate short store-level lock should serialize simultaneous retention passes.
 

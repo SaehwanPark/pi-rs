@@ -6,7 +6,7 @@ body:
     attributes:
       value: >
         Redact anything sensitive before pasting. Session and trace files contain prompts,
-        paths, and sometimes credentials; pi-rs writes them under its state directory and
+        paths, and sometimes credentials; rupi writes them under its state directory and
         redacts durable trace output, but an issue body is not redacted.
   - type: textarea
     id: what-happened
@@ -16,7 +16,7 @@ body:
         The command you ran, what came back, and what you expected instead. Exact strings
         beat descriptions: paste the error line, not "it errored".
       placeholder: |
-        pi-rs run --model local-vulcan/qwen3.8-flash "fix the build"
+        rupi run --model local-vulcan/qwen3.8-flash "fix the build"
         expected: a turn with two tool calls
         actual: session aborted with `provider: stream ended before a finish reason`
     validations:
@@ -30,7 +30,7 @@ body:
         whether a session was resumed. If it needs a specific session file, say what is in
         it rather than attaching it.
       placeholder: |
-        1. cargo run -p pi-rs -- run ...
+        1. cargo run -p rupi -- run ...
         2. ...
       render: shell
     validations:
@@ -46,7 +46,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: pi-rs version or commit
+      label: rupi version or commit
       description: git rev-parse --short HEAD
     validations:
       required: true

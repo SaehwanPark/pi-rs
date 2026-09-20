@@ -1,4 +1,4 @@
-//! End-to-end tests for `pi-rs trace`.
+//! End-to-end tests for `rupi trace`.
 //!
 //! The fixture is a journal written by hand rather than a session produced by a
 //! simulated provider run: the point under test is how a recorded trace is read and
@@ -13,14 +13,14 @@ use std::{
   process::{Command, Output},
 };
 
-use pi_rs_core::{
+use rupi_core::{
   AgentEvent, AssistantDelta, BlobRef, ContextCompactionEpoch, Diagnostic, DiagnosticLevel,
   EpochReason, EventEnvelope, EventMeta, EventSeq, ExternalizedField, ModelCapabilities,
   ModelEndpoint, ModelRef, ReasoningExposure, ReasoningProvenance, RuntimeConfig, SessionEndReason,
   SessionEnded, SessionId, SessionStarted, ToolCallId, ToolCompleted, ToolExecutionState,
   ToolFailed, ToolRequested, ToolStarted, TraceEntry, UserMessage, next_context_epoch,
 };
-use pi_rs_store::StateLayout;
+use rupi_store::StateLayout;
 use tempfile::TempDir;
 
 /// Caps that make no difference to a trace read.
@@ -63,8 +63,8 @@ fn fixture(root: &Path, id: &str, events: &[(u32, AgentEvent)]) -> Fixture {
     .iter()
     .enumerate()
     .map(|(index, (epoch, event))| {
-      let mut meta = EventMeta::new(session.clone(), pi_rs_core::TraceId::new());
-      meta.seq = Some(pi_rs_core::EventSeq(index as u64 + 1));
+      let mut meta = EventMeta::new(session.clone(), rupi_core::TraceId::new());
+      meta.seq = Some(rupi_core::EventSeq(index as u64 + 1));
       meta.timestamp_ms = 1_700_000_000_000 + index as u64 * 1_000;
       meta.model_epoch = Some(*epoch);
       TraceEntry {
@@ -127,7 +127,7 @@ fn fixture_events() -> Vec<(u32, AgentEvent)> {
     ),
     (
       0,
-      AgentEvent::ReasoningDelta(pi_rs_core::ReasoningDelta {
+      AgentEvent::ReasoningDelta(rupi_core::ReasoningDelta {
         text: "the linker ".into(),
         provenance: ReasoningProvenance::Native,
         chunk_index: 0,
@@ -135,7 +135,7 @@ fn fixture_events() -> Vec<(u32, AgentEvent)> {
     ),
     (
       0,
-      AgentEvent::ReasoningDelta(pi_rs_core::ReasoningDelta {
+      AgentEvent::ReasoningDelta(rupi_core::ReasoningDelta {
         text: "is missing -lm".into(),
         provenance: ReasoningProvenance::Native,
         chunk_index: 1,
@@ -212,7 +212,7 @@ fn fixture_events() -> Vec<(u32, AgentEvent)> {
     ),
     (
       1,
-      AgentEvent::ModelEpochStarted(pi_rs_core::ModelEpochStarted {
+      AgentEvent::ModelEpochStarted(rupi_core::ModelEpochStarted {
         epoch: 1,
         model: backup,
         reason: EpochReason::AutomaticFailover,
@@ -221,7 +221,7 @@ fn fixture_events() -> Vec<(u32, AgentEvent)> {
     ),
     (
       1,
-      AgentEvent::ReasoningDelta(pi_rs_core::ReasoningDelta {
+      AgentEvent::ReasoningDelta(rupi_core::ReasoningDelta {
         text: "taking over from the primary".into(),
         provenance: ReasoningProvenance::ProviderSummary,
         chunk_index: 0,
@@ -269,7 +269,7 @@ fn config(root: &Path) -> PathBuf {
 }
 
 fn trace(config: &Path, extra: &[&str]) -> Output {
-  let mut command = Command::new(env!("CARGO_BIN_EXE_pi-rs"));
+  let mut command = Command::new(env!("CARGO_BIN_EXE_rupi"));
   command
     .arg("trace")
     .arg("--config")
@@ -279,7 +279,7 @@ fn trace(config: &Path, extra: &[&str]) -> Output {
     .env_remove("TERM")
     .env_remove("CLICOLOR")
     .env_remove("CLICOLOR_FORCE");
-  command.output().expect("run pi-rs trace")
+  command.output().expect("run rupi trace")
 }
 
 fn stdout(out: &Output) -> String {
@@ -312,7 +312,7 @@ fn unstyle(text: &str) -> String {
 
 /// Display columns, counted by the same rule the renderer uses.
 fn columns(line: &str) -> usize {
-  pi_rs_tui::display_width(line)
+  rupi_tui::display_width(line)
 }
 
 /// A temp root holding one fixture session.
@@ -755,14 +755,14 @@ fn two_category_flags_are_two_different_answers() {
 
 #[test]
 fn usage_errors_exit_two_and_trace_help_is_its_own() {
-  let binary = env!("CARGO_BIN_EXE_pi-rs");
+  let binary = env!("CARGO_BIN_EXE_rupi");
   let help = Command::new(binary)
     .args(["trace", "--help"])
     .output()
-    .expect("run pi-rs trace --help");
+    .expect("run rupi trace --help");
   assert!(help.status.success());
   let text = String::from_utf8_lossy(&help.stdout);
-  assert!(text.contains("pi-rs trace [session-id]"), "{text}");
+  assert!(text.contains("rupi trace [session-id]"), "{text}");
   assert!(!text.contains("--prompt"), "{text}");
 
   let missing = Command::new(binary).arg("trace").output().expect("run");
@@ -802,14 +802,14 @@ fn a_bounded_line_renders_its_preview_and_names_where_the_bytes_went() {
   );
   let mut meta = EventMeta::new(
     SessionId::from_string("unused".to_string()),
-    pi_rs_core::TraceId::new(),
+    rupi_core::TraceId::new(),
   );
-  meta.seq = Some(pi_rs_core::EventSeq(1));
+  meta.seq = Some(rupi_core::EventSeq(1));
   let entry = TraceEntry {
     envelope: EventEnvelope::new(
       meta,
       AgentEvent::ToolRequested(ToolRequested {
-        call_id: pi_rs_core::ToolCallId::from_string("call-1".to_string()),
+        call_id: rupi_core::ToolCallId::from_string("call-1".to_string()),
         name: "write".into(),
         arguments: serde_json::json!({
           "path": "generated/glue.c",

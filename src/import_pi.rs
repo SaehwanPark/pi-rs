@@ -1,14 +1,14 @@
-//! `pi-rs import-pi`: bring Pi session files into the pi-rs store.
+//! `rupi import-pi`: bring Pi session files into the rupi store.
 //!
 //! The default is a dry run, and the report *is* the answer to this command, so the report
-//! goes to stdout and only the destination line goes to stderr — the split `pi-rs trace`
+//! goes to stdout and only the destination line goes to stderr — the split `rupi trace`
 //! uses for the same reason. Nothing is executed: a tool call inside Pi's file records
 //! something that already happened in Pi, and this command never replays it.
 //!
 //! The path is one session file or a directory of them. A directory imports each `*.jsonl`
 //! it holds directly, in name order, each as its own session — which is also the honest
 //! statement of what a batch carries: Pi's cross-file lineage (forks and parents recorded
-//! as separate files) is not reconstructed, because nothing in the pi-rs session model has
+//! as separate files) is not reconstructed, because nothing in the rupi session model has
 //! the shape that lineage would fold into.
 //!
 //! Writing refuses when the session id already exists. Re-importing the same file is usually
@@ -24,8 +24,8 @@ use std::{
   path::{Path, PathBuf},
 };
 
-use pi_rs_core::RuntimeConfig;
-use pi_rs_store::{Store, WritePolicy, pi_import};
+use rupi_core::RuntimeConfig;
+use rupi_store::{Store, WritePolicy, pi_import};
 
 use crate::cli::ImportArgs;
 
@@ -44,7 +44,7 @@ fn plan_file(path: &Path) -> Result<(pi_import::PiSession, pi_import::ImportPlan
 }
 
 /// The report, with the one error a report should swallow: a closed pipe is how
-/// `pi-rs import-pi f | head` ends, and it is not an import failure.
+/// `rupi import-pi f | head` ends, and it is not an import failure.
 fn report(source: &pi_import::PiSession, plan: &pi_import::ImportPlan) -> Result<(), String> {
   let mut out = io::stdout();
   write_report(&mut out, source, plan).map_err(|error| {
@@ -171,7 +171,7 @@ fn execute_batch(args: ImportArgs) -> Result<(), String> {
 ///
 /// `--config` is not a longer way to spell a directory: it also carries the redaction and
 /// retention settings the runtime will use to read the session back, so an imported session
-/// is stored under the same rules as one pi-rs recorded itself.
+/// is stored under the same rules as one rupi recorded itself.
 fn destination(args: &ImportArgs) -> Result<(PathBuf, WritePolicy), String> {
   if let Some(root) = &args.store {
     return Ok((root.clone(), WritePolicy::default()));
@@ -189,7 +189,7 @@ fn destination(args: &ImportArgs) -> Result<(PathBuf, WritePolicy), String> {
   ))
 }
 
-/// What the import carries, what it left out, and what Pi recorded that pi-rs cannot hold.
+/// What the import carries, what it left out, and what Pi recorded that rupi cannot hold.
 fn write_report(
   out: &mut impl Write,
   source: &pi_import::PiSession,

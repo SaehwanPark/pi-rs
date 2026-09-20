@@ -27,7 +27,7 @@ jobs:
       - name: Verify Node extension host runtime
         run: node --version
       - name: core contracts compile independently
-        run: cargo check -p pi-rs-core --all-features
+        run: cargo check -p rupi-core --all-features
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test

@@ -1,10 +1,10 @@
-# pi-rs Audit Loop Handoff
+# rupi Audit Loop Handoff
 
 - **Status:** Loop 006 delivered; completion is paused pending the user's explicit disposition of
   the pre-fix historical-checkpoint residual risk.
 - **Current goal:** `mu3hka9c-231p7n`
 - **Repository base:** `main` / `origin/main`
-- **Delivery PR:** [#89](https://github.com/SaehwanPark/pi-rs/pull/89)
+- **Delivery PR:** [#89](https://github.com/SaehwanPark/rupi/pull/89)
 - **Date:** 2026-09-16 UTC
 
 ## Current loop 006 — final delivery record
@@ -57,12 +57,12 @@ local adversarial audit documented above. No adviser findings are claimed for ei
 
 | Audit/report | Delivery | Result |
 |---|---|---|
-| `audits/20260915-001.md` | PR [#85](https://github.com/SaehwanPark/pi-rs/pull/85), merge `4d4d377` | Windows compatibility/portability fixes delivered. |
-| `audits/20260916-002.md` | PR [#86](https://github.com/SaehwanPark/pi-rs/pull/86), merge `5b8aeb4` | Portability slice delivered. |
-| `audits/20260916-003.md` | PR [#87](https://github.com/SaehwanPark/pi-rs/pull/87), merge `ca2192e` | Portability slice delivered. |
-| `audits/20260916-004.md` | PR [#88](https://github.com/SaehwanPark/pi-rs/pull/88) | Continuation audit/handoff delivered. |
-| `audits/20260916-005.md` | PR [#88](https://github.com/SaehwanPark/pi-rs/pull/88) | Further continuation record delivered. |
-| `audits/20260916-006.md` | PR [#89](https://github.com/SaehwanPark/pi-rs/pull/89), merge `c86640d` | Durable redaction gaps fixed; residual historical-state disposition is pending user decision. |
+| `audits/20260915-001.md` | PR [#85](https://github.com/SaehwanPark/rupi/pull/85), merge `4d4d377` | Windows compatibility/portability fixes delivered. |
+| `audits/20260916-002.md` | PR [#86](https://github.com/SaehwanPark/rupi/pull/86), merge `5b8aeb4` | Portability slice delivered. |
+| `audits/20260916-003.md` | PR [#87](https://github.com/SaehwanPark/rupi/pull/87), merge `ca2192e` | Portability slice delivered. |
+| `audits/20260916-004.md` | PR [#88](https://github.com/SaehwanPark/rupi/pull/88) | Continuation audit/handoff delivered. |
+| `audits/20260916-005.md` | PR [#88](https://github.com/SaehwanPark/rupi/pull/88) | Further continuation record delivered. |
+| `audits/20260916-006.md` | PR [#89](https://github.com/SaehwanPark/rupi/pull/89), merge `c86640d` | Durable redaction gaps fixed; residual historical-state disposition is pending user decision. |
 
 ## Changes delivered in earlier loops
 

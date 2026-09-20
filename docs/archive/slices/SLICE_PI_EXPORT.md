@@ -1,13 +1,13 @@
-# Slice: export a pi-rs session in Pi's shape (round-trip proven, not assumed)
+# Slice: export a rupi session in Pi's shape (round-trip proven, not assumed)
 
-`src/import_pi.rs` reads Pi session JSONL into pi-rs; the fixtures in
-`crates/pi-rs-store/tests/fixtures/pi/` are the ground truth for what Pi actually writes. There is no
+`src/import_pi.rs` reads Pi session JSONL into rupi; the fixtures in
+`crates/rupi-store/tests/fixtures/pi/` are the ground truth for what Pi actually writes. There is no
 way out. Add it, and prove it by **round-tripping through the existing importer** rather than by
 eyeballing the spec.
 
 ## Contract
 
-1. `pi-rs export <session-id> [--out <path>]` writes that session as Pi-shaped JSONL (stdout when
+1. `rupi export <session-id> [--out <path>]` writes that session as Pi-shaped JSONL (stdout when
    `--out` is omitted). Resolve the id with `crate::trace::resolve_session` — exact id or unique prefix,
    ambiguous = error — the same resolver `run --resume` and `trace` use. No second resolver.
 2. The emitted shape is derived from what `import_pi` **accepts**, field for field, using the fixtures

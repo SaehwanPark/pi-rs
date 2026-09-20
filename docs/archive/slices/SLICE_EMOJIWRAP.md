@@ -4,7 +4,7 @@
 
 > `row 0 of "👨‍👩‍👧 ship it now" at 6 ends on a joiner: "👨‍👩‍👨‍👩‍👧"`
 
-Breaks are chosen in `line_rows` (`crates/pi-rs-tui/src/editor.rs:748`): it is display-width aware but
+Breaks are chosen in `line_rows` (`crates/rupi-tui/src/editor.rs:748`): it is display-width aware but
 breaks **between `char`s**, so a cluster whose tail overflows starts the next row. `segment_row` /
 `input_rows` only re-segment rows they are handed — that is why the previous slice correctly refused to
 "fix" it there.
@@ -42,7 +42,7 @@ grapheme parity.
 ## Limits
 
 Three `read` calls, ≤40 lines each; one grep per file `| head -20`; output ≤15 lines;
-`cargo test -p pi-rs-tui` then `cargo test --bin pi-rs`, `--workspace` once at the end. **Commit before
+`cargo test -p rupi-tui` then `cargo test --bin rupi`, `--workspace` once at the end. **Commit before
 running cargo.** Never weaken an assertion. No new dependencies — if you think one is unavoidable, stop
 and report instead. Leave ROADMAP unchecked. No merges, rebases, pushes, PRs; stay in this worktree.
 `git rev-parse HEAD` before each commit — if it moved without your commit, stop and report.

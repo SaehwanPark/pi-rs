@@ -1,0 +1,115 @@
+//! Durable state for `rupi`: session logs, canonical trace journals, checkpoint
+//! capsules, content-addressed blobs, and bounded retention.
+//!
+//! The crate exists so that the runtime can announce facts without deciding how
+//! they are persisted. Three properties are enforced here rather than at call
+//! sites, because enforcement at call sites would be optional:
+//!
+//! - **Redaction.** Every durable line passes through the redaction policy at
+//!   the write boundary. Trace data may contain secrets; "we sanitize on the way
+//!   out" is only true if there is exactly one way out.
+//! - **Ordering.** Sequence numbers are assigned by the journal, not by
+//!   producers, and are recovered from the journal tail on reopen. A session can
+//!   therefore be resumed without hydrating it.
+//! - **Two representations of the same session.** `sessions/<id>.jsonl` holds
+//!   semantic state that model-visible resume needs; `sessions/<id>.trace.jsonl`
+//!   holds the canonical, high-resolution history. Neither is derived from the
+//!   other for projection reconstruction. A strict resume still scans the trace
+//!   when validating lifecycle integrity and unresolved side effects.
+//! - **A bounded line.** A journal line is the unit every later reader pays for,
+//!   so bytes above the inline budget go to the blob store and the line keeps a
+//!   preview naming the reference, plus a machine-readable record of what moved.
+//!   Nothing is silently truncated: the bytes stay recoverable, and an elided
+//!   field is always announced.
+//!
+//! All I/O is blocking and bounded at the record/payload boundary. Nothing in
+//! this crate scans a directory eagerly, parses a whole journal to answer a
+//! metadata question, or creates a task. Startup calls [`Store::open`] once;
+//! full canonical validation is an explicit restore/resume operation.
+//!
+//! ```text
+//! Store::open(root, WritePolicy)      one bounded mkdir pass
+//!   ├─ begin / resume                 -> Session (durable handle)
+//!   │     ├─ emit(&mut envelope)      -> EventSeq, stamped back; line bounded
+//!   │     ├─ append_message(..)       -> session line pointing at that seq
+//!   │     └─ checkpoint(&capsule)     -> capsule file + barrier line
+//!   ├─ restore(id)                    -> latest checkpoint + records after it
+//!   ├─ summaries(limit)               -> headers + trace tails only
+//!   └─ plan_retention / apply_retention
+//! ```
+
+#![forbid(unsafe_code)]
+#![warn(missing_debug_implementations)]
+
+mod blob;
+mod error;
+mod journal;
+mod jsonl;
+mod layout;
+mod lease;
+mod payload;
+mod projection;
+mod retention;
+mod session_log;
+mod store;
+pub mod tmp;
+mod trust;
+
+/// Reading a Pi session file. Exported as a module: the importer is a surface, not a detail
+/// of the store's own formats.
+pub mod pi_import;
+
+pub use blob::BlobStore;
+pub use error::StoreError;
+pub use journal::{TraceJournal, requires_durable_write};
+pub use jsonl::{LineWriter, ReadReport, read_first_line, read_jsonl, read_jsonl_tail};
+pub use layout::StateLayout;
+pub use retention::{DEFAULT_KEEP_NEWEST, RetentionReport, session_started_ms};
+pub use session_log::{RestoredSession, SessionLog, restore};
+pub use store::{DEFAULT_INLINE_THRESHOLD_BYTES, Payload, Session, Store, WritePolicy};
+pub use tmp::TempDir;
+pub use trust::{FileTrustStore, TRUST_SCHEMA_VERSION};
+
+/// Schema version of this crate's on-disk layout.
+///
+/// Recorded separately from the record-level schema versions so that a layout
+/// change (paths, directory shape) is distinguishable from a record change.
+pub const LAYOUT_VERSION: u32 = 1;
+
+#[cfg(test)]
+mod tests {
+  use rupi_core::event::AgentEvent;
+
+  use super::*;
+
+  #[test]
+  fn layout_version_is_reported() {
+    assert_eq!(LAYOUT_VERSION, 1);
+  }
+
+  #[test]
+  fn durable_write_rule_excludes_only_streaming_deltas() {
+    use rupi_core::event::{AssistantDelta, ReasoningDelta, TurnCompleted, TurnStatus};
+    use rupi_core::provenance::ReasoningProvenance;
+
+    assert!(!requires_durable_write(&AgentEvent::AssistantDelta(
+      AssistantDelta {
+        text: "tok".into(),
+        chunk_index: 0,
+      }
+    )));
+    assert!(!requires_durable_write(&AgentEvent::ReasoningDelta(
+      ReasoningDelta {
+        text: "think".into(),
+        provenance: ReasoningProvenance::Native,
+        chunk_index: 0,
+      }
+    )));
+    assert!(requires_durable_write(&AgentEvent::TurnCompleted(
+      TurnCompleted {
+        status: TurnStatus::Completed,
+        duration_ms: 1,
+      }
+    )));
+  }
+}

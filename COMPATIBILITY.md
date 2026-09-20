@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-`pi-rs` is heavily inspired by Pi and should support a meaningful subset of the Pi ecosystem.
+`rupi` is heavily inspired by Pi and should support a meaningful subset of the Pi ecosystem.
 
 Compatibility must be:
 
@@ -68,7 +68,7 @@ Skills should not require the Node compatibility host unless they explicitly dep
 
 ### 5.1 Implemented
 
-`pi-rs skills [--project]` scans, in order: `$HOME/.pi/agent/skills`,
+`rupi skills [--project]` scans, in order: `$HOME/.pi/agent/skills`,
 `$HOME/.agents/skills`, then `<ancestor>/.pi/skills` and `<ancestor>/.agents/skills` from
 the working directory up to the git root. Within a location, a directory containing
 `SKILL.md` is a skill; a root `*.md` file is a skill in the `.pi` family and is ignored
@@ -81,15 +81,15 @@ followed — linking in a skill kept elsewhere is the normal way to share one, a
 already decided about the directory holding the link — with the depth bound stopping a
 link that walks a scan back on itself and saying so.
 
-A session offers its skills the way Pi does. `pi-rs run` and `pi-rs interactive` scan
+A session offers its skills the way Pi does. `rupi run` and `rupi interactive` scan
 the global locations at session open and put the result in front of every request as the
 system message: Pi's skill-control block — the three instruction sentences, then one
 `<skill>` entry per visible skill with its `name`, `description`, and `location` (the
 file the read tool should be given), XML-escaped as the Agent Skills standard spells it.
 A `disable-model-invocation` skill is absent from the block down to its name; asking for
-it by name (`pi-rs skills --show <name>`, which prints the body with the frontmatter
+it by name (`rupi skills --show <name>`, which prints the body with the frontmatter
 removed) is the explicit invocation that flag reserves for the user.
-`pi-rs skills --control-prompt` prints exactly what a session would send, empty stdout
+`rupi skills --control-prompt` prints exactly what a session would send, empty stdout
 when there is nothing to offer — and only global locations reach a session, because the
 workspace's own skill files need a trust decision `run` does not have. Discovery commands
 accept `--trust-store <dir>` to consult durable canonical project scopes; an explicit
@@ -110,7 +110,7 @@ Prompt compatibility should remain independent from the runtime provider impleme
 
 ### 6.1 Implemented
 
-`pi-rs prompts [--project]` scans, in order, `$HOME/.pi/agent/prompts/*.md` then
+`rupi prompts [--project]` scans, in order, `$HOME/.pi/agent/prompts/*.md` then
 `<ancestor>/.pi/prompts/*.md` from the working directory up to the git root — the
 locations Pi documents, in the order it reads them, so first-found-wins naming is
 reproducible. Discovery is non-recursive and matches `*.md`, which is why a
@@ -123,14 +123,14 @@ this says so in the listing rather than presenting an unauthored line as a summa
 body is kept with only its surrounding blank lines removed — line breaks inside a template
 are part of the prompt.
 
-`pi-rs prompt [--project] <name> [arguments…]` performs Pi's substitution and writes the
+`rupi prompt [--project] <name> [arguments…]` performs Pi's substitution and writes the
 prompt to stdout and nothing else: `$1`…`$n`, `$@` and `$ARGUMENTS`, `${1:-default}`,
 `${@:-default}`, `${ARGUMENTS:-default}`, `${@:N}`, `${@:N:L}`. Since `$1` is a
 placeholder, so is every digit after a `$`; a placeholder that matches none of the grammar
 is left in the output exactly as written rather than deleted or rejected. Options are read
-before the name, so `pi-rs prompt lint --strict` passes `--strict` to the template.
+before the name, so `rupi prompt lint --strict` passes `--strict` to the template.
 
-`pi-rs interactive` invokes a loaded template as `/name [arguments…]`: the typed string
+`rupi interactive` invokes a loaded template as `/name [arguments…]`: the typed string
 is split by Pi's editor rule (`parseCommandArgs`) — bash-style quotes whose quirks are
 reproduced, not smoothed — and the expansion is sent as the turn.
 
@@ -140,7 +140,7 @@ and `--no-prompt-templates` are supported. The `prompts` array in settings is de
 ## 7. Packages
 
 Support Pi-style package discovery and installation as early as practical. Discovery and
-surface diagnostics are supported, and `pi-rs packages install <local-directory>` now copies
+surface diagnostics are supported, and `rupi packages install <local-directory>` now copies
 an explicit local package into the global or `--project` package root without running
 scripts. npm/git/HTTP sources, dependency installation, update/remove settings, and
 automatic extension discovery remain deferred; extension execution is `Partial` through
@@ -173,7 +173,7 @@ Package compatibility
 
 ### 7.1 Implemented
 
-`pi-rs packages [--project]` scans, in order: `$HOME/.pi/agent/packages`,
+`rupi packages [--project]` scans, in order: `$HOME/.pi/agent/packages`,
 `$HOME/.pi/packages`, then `<ancestor>/.pi/packages` from the working directory up
 to the git root. `--trust-store <dir>` can resolve the project scope before those
 locations are read. Discovery is non-recursive at each package root: every child
@@ -191,11 +191,11 @@ Deferred or unsupported surfaces produce per-surface diagnostics without rejecti
 package. Extension entry points are marked partial until a trusted caller explicitly
 constructs the Node host; project-local files are never executed implicitly.
 
-`pi-rs packages --show <name>` displays detailed surface status and contained locations.
+`rupi packages --show <name>` displays detailed surface status and contained locations.
 
 ## 8. TypeScript extensions
 
-Selected Pi TypeScript extensions run through the optional `pi-rs-extension` host.
+Selected Pi TypeScript extensions run through the optional `rupi-extension` host.
 The host is an explicit, trusted boundary: constructing it performs no process I/O, an
 empty module list never launches Node, and only `start`/dispatch of configured modules
 loads code. The host accepts Pi's default factory shape and Node's type-only imports for
@@ -206,9 +206,9 @@ scope.
 Architecture:
 
 ```text
-pi-rs / pi-rs-compat caller
+rupi / rupi-compat caller
   |
-pi-rs-extension (typed JSON-lines RPC + Tool wrapper)
+rupi-extension (typed JSON-lines RPC + Tool wrapper)
   |
 Node host bootstrap
   |
@@ -255,25 +255,25 @@ Preferred architecture:
 - provide Pi import/export adapters;
 - preserve compatible message semantics;
 - preserve model/tool metadata when representable;
-- warn when `pi-rs`-specific provenance cannot round-trip.
+- warn when `rupi`-specific provenance cannot round-trip.
 
 Do not weaken the internal event model merely to force exact storage-format equivalence.
 
 ### 10.1 Importing a Pi session
 
-`pi-rs import-pi <session.jsonl>` reads one Pi session file and files it as a pi-rs
+`rupi import-pi <session.jsonl>` reads one Pi session file and files it as a rupi
 session. It is a reader and a writer, never an executor: a tool call in Pi's file records
-work Pi already did, and `pi-rs` will not do it again.
+work Pi already did, and `rupi` will not do it again.
 
 The path may also be a directory: every `*.jsonl` directly inside it is imported, in name
 order, each as its own session. That is also the boundary of what a batch carries — lineage
 Pi records *across* files (a fork written as a second file pointing at the first) is not
-reconstructed, because no pi-rs session state has that shape. One file's failure is one
+reconstructed, because no rupi session state has that shape. One file's failure is one
 report line; the sessions beside it still land, and the exit says the batch was partial.
 
 Mapped, at the fidelity the file supports:
 
-| Pi | `pi-rs` |
+| Pi | `rupi` |
 | --- | --- |
 | `message` (role `user`) | `user_message`, with non-text blocks counted as attachments |
 | `message` (role `assistant`) | one request span: `reasoning_delta`, `assistant_delta`, `tool_requested`, `model_request_completed` carrying Pi's usage and stop reason |
@@ -296,11 +296,11 @@ Deliberately not carried, each reported by kind with its reason:
 
 * `compaction` — the boundary is kept as a diagnostic; re-importing the summary text would
   put the conversation in twice;
-* `label`, `custom`, `custom_message` — UI- or extension-owned content with no `pi-rs`
+* `label`, `custom`, `custom_message` — UI- or extension-owned content with no `rupi`
   event, which importing as prose would misattribute to the user or the model;
-* `usage.cacheRead` / `cacheWrite` / `cost` — `pi-rs` events have no field for them;
+* `usage.cacheRead` / `cacheWrite` / `cost` — `rupi` events have no field for them;
 * an image whose Pi entry carried no bytes — counted as an attachment and reported. An image
-  that did carry bytes is kept inline in the session's messages, where `pi-rs` keeps one;
+  that did carry bytes is kept inline in the session's messages, where `rupi` keeps one;
 * reasoning on a request that stored none receives **no** provenance rather than a plausible one.
 
 Timestamps are parsed without a date library. `Z` and `±HH:MM` are honoured; a zone-less
@@ -314,8 +314,8 @@ than something to paper over.
 
 ### 10.2 Exporting a Pi session
 
-`pi-rs export <session-id> [--out <path>]` writes one `pi-rs` session back out in Pi's JSONL shape.
-The emitted shape is derived from what `pi-rs import-pi` accepts:
+`rupi export <session-id> [--out <path>]` writes one `rupi` session back out in Pi's JSONL shape.
+The emitted shape is derived from what `rupi import-pi` accepts:
 
 - A version 3 header (`type: "session"`, `id`, `cwd`, `timestamp`);
 - Linear message entries linked sequentially with `parentId`;
@@ -329,32 +329,32 @@ stderr as a dropped item rather than silently discarded or falsified.
 See [`docs/SESSION_COMPATIBILITY.md`](docs/SESSION_COMPATIBILITY.md) for the complete bidirectional
 fidelity matrix and design invariants.
 
-Summary of metadata that cannot round-trip between Pi and `pi-rs`:
+Summary of metadata that cannot round-trip between Pi and `rupi`:
 
-1. **Reasoning provenance**: `pi-rs` models 4 distinct provenance tiers (`Native`, `ProviderSummary`,
+1. **Reasoning provenance**: `rupi` models 4 distinct provenance tiers (`Native`, `ProviderSummary`,
    `Declared`, `Reconstructed`). Pi has untyped `thinking` blocks with no
    provenance concept. Export reports dropped provenance on stderr; import never invents native
    provenance for unlabelled foreign thinking.
-2. **Multi-branch DAGs vs linear turns**: Pi records branching trees (`id`/`parentId`). `pi-rs`
+2. **Multi-branch DAGs vs linear turns**: Pi records branching trees (`id`/`parentId`). `rupi`
    imports only the active path from the newest-written entry to root; off-path forks are dropped
    and reported by type on stderr.
-3. **Model epochs & failovers**: `pi-rs` tracks typed model epochs (`ModelEpochStarted`) and
+3. **Model epochs & failovers**: `rupi` tracks typed model epochs (`ModelEpochStarted`) and
    reasons for failover. Pi stores only string `model` fields per assistant message.
-4. **Tool lifecycle & safety invariants**: `pi-rs` tracks 5 execution states (`Requested`, `Started`,
+4. **Tool lifecycle & safety invariants**: `rupi` tracks 5 execution states (`Requested`, `Started`,
    `Completed`, `Failed`, `Unknown`) and `read_only` safety flags in `trace.jsonl`. Pi records only
    coarse messages.
 5. **Payload externalization & blob stores**: Payloads exceeding 8 KiB reside in `blobs/sha256/...`
-   in `pi-rs`. Pi has no session blob store; export emits the inline preview.
+   in `rupi`. Pi has no session blob store; export emits the inline preview.
 6. **Context reductions & redactions**: `ContextReduced` token/byte statistics and durable redaction
-   counts exist only in `pi-rs` canonical traces.
+   counts exist only in `rupi` canonical traces.
 7. **Diagnostics & checkpoints**: Operational events (`Diagnostic`, `Checkpoint`, `SessionEnded`)
-   have no counterpart in Pi message logs and stay in `pi-rs` traces.
+   have no counterpart in Pi message logs and stay in `rupi` traces.
 8. **Compaction summaries**: Pi compaction summaries are marked as diagnostic boundaries on import,
    preventing duplicate turn replay.
 9. **UI / Extension entries**: Pi `label`, `custom`, and `custom_message` records are dropped on
    import with explicit stderr warnings.
 10. **Provider billing & cache usage**: Pi's `usage.cacheRead`, `usage.cacheWrite`, and `cost` are
-    omitted since `pi-rs` tracks only token quantities.
+    omitted since `rupi` tracks only token quantities.
 
 ## 11. Themes and UI
 
@@ -363,7 +363,7 @@ Basic theme semantics may be supported.
 Complex Pi custom UI behavior should be best-effort because:
 
 - the TUI implementation differs;
-- `pi-rs` adds new provenance and runtime states;
+- `rupi` adds new provenance and runtime states;
 - exact widget-level parity may be costly.
 
 Compatibility should focus first on preserving intent rather than exact rendering.
@@ -401,7 +401,7 @@ Requirements:
 - no assumption that every server supports the latest optional extensions;
 - stable internal tool/resource normalization.
 
-`rkb-rs` is integrated through the independent `pi-rs-rkb` adapter. The adapter
+`rkb-rs` is integrated through the independent `rupi-rkb` adapter. The adapter
 recognizes the verified `rkb mcp` stdio contract, marks its retrieval tools read-only,
 keeps activation lazy, parses citation-bearing `get_agent_context` responses, and
 rehydrates compact references through exact-id `search_chunks` queries. RKB source URL,
@@ -409,16 +409,16 @@ document, page, record id, citation, and provenance are retained in the generic 
 context reference and durable retrieval event. No direct dependency on the external
 `rkb-rs` crate is introduced.
 
-The server-side worker boundary is implemented separately in `pi-rs-mcp::worker`. It
+The server-side worker boundary is implemented separately in `rupi-mcp::worker`. It
 supports the five coarse `agent.*` operations and `session://` resource projections over
 stdio JSON-RPC. An embedding application must explicitly provide a trusted headless
 `WorkerEngine`; the adapter never discovers project code or starts a provider by itself.
 Run handles are asynchronous and cancellable, waits are capped, summaries are kept
 separate from coarse trace projections, and unavailable diff/artifact data is reported
-explicitly. Read-only replay/history analysis is provided by `pi-rs-replay`; worker-side
+explicitly. Read-only replay/history analysis is provided by `rupi-replay`; worker-side
 execution of historical branches and streamable HTTP worker transport remain deferred.
 
-`pi-rs replay <trace-or-session.jsonl>` provides deterministic tools/reasoning/timing filters,
+`rupi replay <trace-or-session.jsonl>` provides deterministic tools/reasoning/timing filters,
 inclusive historical cutoffs, model-visible context snapshots, dry branch plans, structural
 continuation comparison, timelines, provenance summaries, and redacted trace export. It does
 not launch a provider or execute a recorded tool.
@@ -446,7 +446,7 @@ Tests should cover both:
 Inspects an artifact or package candidate against Pi compatibility targets:
 
 ```bash
-pi-rs compat [options] <path-or-package>
+rupi compat [options] <path-or-package>
 ```
 
 Options:
@@ -471,7 +471,7 @@ Target: with-extension (package)
 
 ## 16. Version policy
 
-`pi-rs` should declare which Pi behavior/version family it targets.
+`rupi` should declare which Pi behavior/version family it targets.
 
 Compatibility changes should be documented in release notes.
 
@@ -484,7 +484,7 @@ When upstream Pi changes behavior:
 
 ## 17. Deliberate divergences
 
-`pi-rs` may intentionally diverge where its runtime architecture requires stronger semantics.
+`rupi` may intentionally diverge where its runtime architecture requires stronger semantics.
 
 Expected divergences include:
 

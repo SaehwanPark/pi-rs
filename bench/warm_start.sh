@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Warm-start benchmark for pi-rs: relaunching a process that continues a stored session.
+# Warm-start benchmark for rupi: relaunching a process that continues a stored session.
 #
 # Definition (pinned in docs/archive/slices/SLICE_WARM_START.md)
 #   Warm start is the time from exec to exit for
-#     pi-rs run --config <file> --cwd <workspace> --resume <id> --prompt <text>
+#     rupi run --config <file> --cwd <workspace> --resume <id> --prompt <text>
 #   against a session that already exists in the store, compared against the same
 #   argv without --resume against an empty store. It measures resolve + Store::restore
 #   + context rebuild: the launch-path work that continuing a recorded session added.
@@ -29,7 +29,7 @@
 #   has no endpoint is a false alarm.
 #
 # Safety
-#   The config named by $PI_RS_CONFIG is read, never written. Its `state_dir` is
+#   The config named by $RUPI_CONFIG is read, never written. Its `state_dir` is
 #   rewritten into a throwaway store under a mktemp workdir, so this script never opens
 #   the real store and never touches an existing session. The workdir is removed on
 #   exit. The workspace passed to --cwd is inside the same workdir.
@@ -38,8 +38,8 @@
 #   N is the number of iterations; each iteration contributes one resume sample and one
 #   fresh-session sample (default 5).
 #
-# Config: PI_RS_CONFIG=<file> (default ~/.config/pi-rs/config.json)
-#   The same JSON a user passes to `pi-rs run --config`. Only `state_dir` is overridden.
+# Config: RUPI_CONFIG=<file> (default ~/.config/rupi/config.json)
+#   The same JSON a user passes to `rupi run --config`. Only `state_dir` is overridden.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -72,18 +72,18 @@ done
 cd "$REPO_ROOT"
 
 # Build once. Same target as bench/startup.sh; keep the tail short.
-cargo build --release --bin pi-rs 2>&1 | tail -3
+cargo build --release --bin rupi 2>&1 | tail -3
 
-BINARY="${REPO_ROOT}/target/release/pi-rs"
+BINARY="${REPO_ROOT}/target/release/rupi"
 
 # Created here rather than in python so the trap below owns it even if python dies.
-WORKDIR="$(mktemp -d -t pi-rs-warm-start-XXXXXX)"
+WORKDIR="$(mktemp -d -t rupi-warm-start-XXXXXX)"
 trap 'rm -rf "${WORKDIR}"' EXIT INT TERM
 
 BINARY="$BINARY" \
   ITERATIONS="$ITERATIONS" \
   JSON_OUT="$JSON_OUT" \
-  CONFIG="${PI_RS_CONFIG:-${HOME}/.config/pi-rs/config.json}" \
+  CONFIG="${RUPI_CONFIG:-${HOME}/.config/rupi/config.json}" \
   WORKDIR="$WORKDIR" \
   python3 - <<'PY'
 import json
@@ -112,7 +112,7 @@ def skip(reason):
     sys.exit(0)
 
 def reason_line(text):
-    """The line that names a failure. `pi-rs run` writes its one-line failure as
+    """The line that names a failure. `rupi run` writes its one-line failure as
     `error: <text>` on stderr, after any transcript chrome, so prefer that."""
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
     for line in lines:
@@ -140,7 +140,7 @@ def spread(samples):
 
 
 def run_pi(config_file, resume_id=None):
-    """One timed exec-to-exit of `pi-rs run`.
+    """One timed exec-to-exit of `rupi run`.
 
     The argv is the one named in the definition, so both arms differ only by
     `--resume <id>`. stdin is detached and stdout is discarded exactly as
@@ -185,7 +185,7 @@ if iterations < 1:
     sys.exit(1)
 
 if not os.path.isfile(config_path):
-    skip(f"no provider config at {config_path} (set PI_RS_CONFIG)")
+    skip(f"no provider config at {config_path} (set RUPI_CONFIG)")
 
 try:
     with open(config_path) as f:
@@ -260,7 +260,7 @@ fresh = stat_block(fresh_times)
 delta_median_ms = resume["median"] - fresh["median"]
 noise_floor_ms = max(spread(resume_times), spread(fresh_times))
 
-print("Warm-start benchmark (pi-rs):")
+print("Warm-start benchmark (rupi):")
 print(f"  Resume an existing session ({iterations} runs, --resume {session_id[:8]}...):")
 print(f"    min:          {resume['min']:.2f} ms")
 print(f"    mean:         {resume['mean']:.2f} ms")

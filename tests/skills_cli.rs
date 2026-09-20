@@ -1,8 +1,8 @@
-//! `pi-rs skills` as a process: what belongs on stdout, and what does not.
+//! `rupi skills` as a process: what belongs on stdout, and what does not.
 //!
 //! The scan itself is covered by `tests/compat_skills.rs`. What only a process can show
 //! is the partition: the listing is the answer, so it goes to stdout and nothing else
-//! does, because `pi-rs skills | fzf` is the way this command actually gets used.
+//! does, because `rupi skills | fzf` is the way this command actually gets used.
 
 use std::{
   path::{Path, PathBuf},
@@ -10,7 +10,7 @@ use std::{
 };
 
 fn binary() -> &'static str {
-  env!("CARGO_BIN_EXE_pi-rs")
+  env!("CARGO_BIN_EXE_rupi")
 }
 
 /// Scan the committed fixture tree as `$HOME`, from `cwd`.
@@ -22,7 +22,7 @@ fn skills(args: &[&str], home: &Path, cwd: &Path) -> (String, String) {
     .current_dir(cwd)
     .env("NO_COLOR", "1")
     .output()
-    .expect("run pi-rs");
+    .expect("run rupi");
   (
     String::from_utf8_lossy(&output.stdout).into_owned(),
     String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -96,7 +96,7 @@ fn the_control_prompt_replaces_the_listing_when_asked_for() {
   let (stdout, _stderr) = skills(&["skills", "--control-prompt"], &home, temp.path());
   assert!(stdout.contains("<available_skills>"), "{stdout}");
   assert!(stdout.contains("<name>pdf-tools</name>"), "{stdout}");
-  // The fixture's one disable-model-invocation skill: listed by `pi-rs skills`, never
+  // The fixture's one disable-model-invocation skill: listed by `rupi skills`, never
   // offered to a model.
   assert!(
     !stdout.contains("loose"),

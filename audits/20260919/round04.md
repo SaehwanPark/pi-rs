@@ -159,8 +159,8 @@ This is the most concerning new architectural side effect of the HTTP fix.
 Both:
 
 ```text
-crates/pi-rs-provider/src/relay.rs
-crates/pi-rs-mcp/src/relay.rs
+crates/rupi-provider/src/relay.rs
+crates/rupi-mcp/src/relay.rs
 ```
 
 implement their own DNS resolver.
@@ -324,7 +324,7 @@ that has no matching `ModelRequestCompleted`.
 
 This is exactly what a normal kill, power loss, OOM, harness crash, or terminal closure while a model is generating will produce.
 
-Nothing unsafe needs to be replayed here. The request may have reached the provider and may have consumed compute, so **do not automatically retry it**. But pi-rs can safely record that the request was abandoned and allow the user to start a new turn.
+Nothing unsafe needs to be replayed here. The request may have reached the provider and may have consumed compute, so **do not automatically retry it**. But rupi can safely record that the request was abandoned and allow the user to start a new turn.
 
 Today it instead makes `--resume` fail indefinitely.
 

@@ -236,7 +236,7 @@ The remaining issue is that every acquisition rewrites the persistent lock marke
 ```rust
 file.set_len(0)?;
 file.seek(...)?;
-writeln!(file, "pi-rs-lock-v1 ...")?;
+writeln!(file, "rupi-lock-v1 ...")?;
 file.sync_all()?;
 ```
 

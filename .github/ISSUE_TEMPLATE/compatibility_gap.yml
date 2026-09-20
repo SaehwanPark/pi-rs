@@ -1,5 +1,5 @@
 name: Pi compatibility gap
-description: pi-rs and Pi disagree about skills, prompts, packages, sessions, or extensions
+description: rupi and Pi disagree about skills, prompts, packages, sessions, or extensions
 labels: ["compatibility"]
 body:
   - type: input
@@ -36,11 +36,11 @@ body:
     validations:
       required: true
   - type: textarea
-    id: pi-rs-says
+    id: rupi-says
     attributes:
-      label: What pi-rs does
+      label: What rupi does
       description: >
-        Include the pi-rs command you ran. Where a compatibility report exists, paste the
+        Include the rupi command you ran. Where a compatibility report exists, paste the
         line for this path: a report that stayed silent about it is part of the bug.
     validations:
       required: true
@@ -51,7 +51,7 @@ body:
       description: >
         A minimal fixture that shows the disagreement, or a description precise enough that
         one could be written. COMPATIBILITY.md treats silence as a claim, so the fixture is
-        what decides whether pi-rs should follow Pi, report a warning, or refuse.
+        what decides whether rupi should follow Pi, report a warning, or refuse.
       render: json
   - type: textarea
     id: decision

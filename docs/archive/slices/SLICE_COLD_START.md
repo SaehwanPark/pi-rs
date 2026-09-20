@@ -10,7 +10,7 @@ preserves this slice's design and verification contract.
 ## Definition, pinned (write it in the script header)
 Dropping the page cache needs root, which this project does not assume. So define cold as:
 **the first execution of a freshly-linked binary inode, with no prior exec of that inode** — copy
-`target/release/pi-rs` to a unique path per iteration and time the first exec of that path against
+`target/release/rupi` to a unique path per iteration and time the first exec of that path against
 the second and third execs of the same path. That isolates first-exec effects (page-in of the
 text, relocation, dynamic linking) from steady-state, which is the thing a user on a cold machine
 actually pays more of.
@@ -23,7 +23,7 @@ actually pays more of.
 - Report min / median / max for cold and warm, and the delta. Same output shape as `bench/startup.sh`
   so existing tooling and habits carry over.
 - **Do not write a budget you have not measured.** If you do write one, use the rule from
-  `crates/pi-rs-tui/benches/keystroke.rs` (median x 10, floored) and say why that floor.
+  `crates/rupi-tui/benches/keystroke.rs` (median x 10, floored) and say why that floor.
 - Header states plainly: this is a pre-merge gate on a dev machine, **not** a CI check, because CI
   runners have page-cache behaviour that makes the number meaningless.
 

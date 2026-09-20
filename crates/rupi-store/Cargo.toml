@@ -1,0 +1,26 @@
+[package]
+name = "rupi-store"
+description = "Durable session records, JSONL event journals, checkpoints, content-addressed blobs, and bounded trace retention for rupi."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rupi-core.workspace = true
+serde.workspace = true
+flate2.workspace = true
+fs4.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[[bench]]
+name = "restore"
+harness = false

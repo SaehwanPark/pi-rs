@@ -43,12 +43,12 @@ bounded transports, conservative tool state, and clearer public documentation.
 ### Added
 
 #### Core Runtime & Presentation
-- **Interactive TUI (`pi-rs interactive`)**: High-performance terminal user interface with a terminal-native semantic renderer and `crossterm`, featuring a multi-line editing buffer, ANSI-clean line rendering, live stream display, and real-time statusline.
-- **One-Shot Runner (`pi-rs run`)**: Headless command-line runner with strict stream separation (assistant answer on `stdout`; provenance, tool lifecycle, and diagnostics on `stderr`).
+- **Interactive TUI (`rupi interactive`)**: High-performance terminal user interface with a terminal-native semantic renderer and `crossterm`, featuring a multi-line editing buffer, ANSI-clean line rendering, live stream display, and real-time statusline.
+- **One-Shot Runner (`rupi run`)**: Headless command-line runner with strict stream separation (assistant answer on `stdout`; provenance, tool lifecycle, and diagnostics on `stderr`).
 - **Workspace Confinement**: Strict realpath confinement to `--cwd` for built-in file operations (`read`, `write`, `edit`). Mutating operations require explicit `auto_approve_mutating` configuration.
-- **Durable Event Store**: Append-only event logging (`trace.jsonl`), session index, and blob storage under `.pi-rs-state`.
-- **Deterministic Replay (`pi-rs replay`)**: Replay recorded sessions identically to live runs without network calls or mutating side-effects.
-- **Trace Inspection (`pi-rs trace`)**: Chronological structured event log viewer.
+- **Durable Event Store**: Append-only event logging (`trace.jsonl`), session index, and blob storage under `.rupi-state`.
+- **Deterministic Replay (`rupi replay`)**: Replay recorded sessions identically to live runs without network calls or mutating side-effects.
+- **Trace Inspection (`rupi trace`)**: Chronological structured event log viewer.
 
 #### Honest Reasoning Provenance
 - Explicit typed labels for reasoning streams:
@@ -63,12 +63,12 @@ bounded transports, conservative tool state, and clearer public documentation.
 - Resilient primary/backup failover with pre-flight capability matching (tools, modalities, context limits) and lazy adapter initialization.
 
 #### Pi Ecosystem Compatibility
-- **Skills (`pi-rs skills`)**: Behavioral-compatible discovery for user (`~/.pi/agent/skills`, `~/.agents/skills`) and project-level skills (`.pi/skills`, `.agents/skills`) guarded by explicit `--project` trust checks.
-- **Prompt Templates (`pi-rs prompts`, `pi-rs prompt`)**: Template discovery and positional argument expansion (`$1`, `$@`, `${1:-default}`).
-- **Packages (`pi-rs packages`)**: Manifest discovery and local package installation.
-- **Session Migration (`pi-rs import`, `pi-rs export`)**: Loss-diagnostic bidirectional migration between `pi-rs` store and Pi JSONL formats.
-- **Trust Store (`pi-rs trust`)**: Per-project allow/deny trust record management.
-- **Compatibility Diagnostics (`pi-rs compat`)**: Compatibility auditing for external packages and artifacts.
+- **Skills (`rupi skills`)**: Behavioral-compatible discovery for user (`~/.pi/agent/skills`, `~/.agents/skills`) and project-level skills (`.pi/skills`, `.agents/skills`) guarded by explicit `--project` trust checks.
+- **Prompt Templates (`rupi prompts`, `rupi prompt`)**: Template discovery and positional argument expansion (`$1`, `$@`, `${1:-default}`).
+- **Packages (`rupi packages`)**: Manifest discovery and local package installation.
+- **Session Migration (`rupi import`, `rupi export`)**: Loss-diagnostic bidirectional migration between `rupi` store and Pi JSONL formats.
+- **Trust Store (`rupi trust`)**: Per-project allow/deny trust record management.
+- **Compatibility Diagnostics (`rupi compat`)**: Compatibility auditing for external packages and artifacts.
 
 #### Integrations & Latency
 - **Model Context Protocol (MCP)**: Lazy stdio client architecture initializing servers on demand.

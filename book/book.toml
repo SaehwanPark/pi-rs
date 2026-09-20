@@ -1,15 +1,15 @@
 [book]
-authors = ["pi-rs contributors"]
+authors = ["rupi contributors"]
 language = "en"
 multilingual = false
 src = "src"
-title = "pi-rs Documentation"
+title = "rupi Documentation"
 description = "A minimal, Pi-inspired coding-agent runtime implemented in Rust."
 
 [output.html]
-git-repository-url = "https://github.com/SaehwanPark/pi-rs"
-edit-url-template = "https://github.com/SaehwanPark/pi-rs/edit/main/book/src/{path}"
-site-url = "/pi-rs/"
+git-repository-url = "https://github.com/SaehwanPark/rupi"
+edit-url-template = "https://github.com/SaehwanPark/rupi/edit/main/book/src/{path}"
+site-url = "/rupi/"
 default-theme = "coal"
 preferred-dark-theme = "coal"
 mathjax-support = false

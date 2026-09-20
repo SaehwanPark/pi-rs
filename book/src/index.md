@@ -1,6 +1,6 @@
-# Introduction to pi-rs
+# Introduction to rupi
 
-`pi-rs` is a minimal, Pi-inspired coding-agent runtime implemented in Rust. The
+`rupi` is a minimal, Pi-inspired coding-agent runtime implemented in Rust. The
 current public release is **v0.2.0 (2026-09-19)**.
 
 It delivers a fast, trustworthy runtime for coding-agent sessions that preserves the interaction ergonomics of Pi while establishing rigorous architectural boundaries for provenance, determinism, and performance.
@@ -31,7 +31,7 @@ The project is a **clean reimplementation**, not a mechanical translation or for
 | Feature | Description |
 | :--- | :--- |
 | **Interactive TUI** | Keyboard-first terminal UI with multi-line editor, real-time streaming, and semantic statusline. |
-| **One-Shot CLI** | Headless runner (`pi-rs run`) streaming output directly to stdout/stderr with strict workspace confinement. |
+| **One-Shot CLI** | Headless runner (`rupi run`) streaming output directly to stdout/stderr with strict workspace confinement. |
 | **Deterministic Replay** | Replay any historical session identically without re-querying providers or re-executing mutating tools. |
 | **Pi Compatibility** | Tested behavioral support for Pi skills, prompt templates, packages, selected extensions, and session import/export. |
 | **Model Failover** | Automatic fallback to backup models with capability validation (tools, modalities, context limits). |

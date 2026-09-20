@@ -57,10 +57,10 @@ No blocking findings.
 ## Verification evidence
 
 - `cargo fmt --all --check`
-- `cargo check -p pi-rs-core --all-features`
+- `cargo check -p rupi-core --all-features`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test -p pi-rs-runtime decoded_tool_call_before_stream_failure_closes_store_wal -- --nocapture`
-- `cargo test -p pi-rs-mcp relay::tests -- --nocapture`
+- `cargo test -p rupi-runtime decoded_tool_call_before_stream_failure_closes_store_wal -- --nocapture`
+- `cargo test -p rupi-mcp relay::tests -- --nocapture`
 - `cargo test --workspace`
 - `cargo doc --workspace --no-deps`
 - `bash bench/startup.sh --json bench/results/startup-ci.json` (run with a local

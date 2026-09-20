@@ -34,6 +34,6 @@ and reporting red to me instead).
 ## Limits
 
 Three `read` calls, ≤40 lines each; one grep per file `| head -20`; command output ≤15 lines;
-`cargo test --bin pi-rs` only. **Commit before running cargo.** Never weaken an assertion. Leave ROADMAP
+`cargo test --bin rupi` only. **Commit before running cargo.** Never weaken an assertion. Leave ROADMAP
 unchecked. No merges, rebases, pushes, PRs; stay in this worktree. `git rev-parse HEAD` before each
 commit — if it moved without your commit, stop and report.

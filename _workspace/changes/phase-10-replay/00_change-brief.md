@@ -2,7 +2,7 @@
 
 ## Scope
 
-Add a pure `pi-rs-replay` projection boundary and the read-only `pi-rs replay` CLI. The
+Add a pure `rupi-replay` projection boundary and the read-only `rupi replay` CLI. The
 implementation consumes redacted canonical trace entries and optional semantic session records;
 it never starts a provider, executes tools, or treats historical events as a new generation.
 
@@ -21,8 +21,8 @@ it never starts a provider, executes tools, or treats historical events as a new
 
 ## Verification
 
-- `cargo test -p pi-rs-replay --all-features`
-- `cargo test -p pi-rs --test replay_cli --all-features`
+- `cargo test -p rupi-replay --all-features`
+- `cargo test -p rupi --test replay_cli --all-features`
 - `cargo test --workspace --all-features -- --test-threads=1`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo doc --workspace --no-deps`

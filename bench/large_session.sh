@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Entry point for the large-session restore benchmark, with the same interface as
 # bench/startup.sh and bench/render.sh. The measured cases, budgets, and pass/fail rules
-# live in crates/pi-rs-store/benches/restore.rs; this script builds and runs it.
+# live in crates/rupi-store/benches/restore.rs; this script builds and runs it.
 #
 # Usage: bench/large_session.sh [--iterations <N>] [--json <path>]
 
@@ -47,4 +47,4 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$REPO_ROOT"
-exec cargo bench --quiet -p pi-rs-store --bench restore -- ${ARGS[@]+"${ARGS[@]}"}
+exec cargo bench --quiet -p rupi-store --bench restore -- ${ARGS[@]+"${ARGS[@]}"}

@@ -3,10 +3,10 @@ use std::{
   path::PathBuf,
 };
 
-use pi_rs_tui::{ColorChoice, DiagnosticFilter, TraceSelection};
+use rupi_tui::{ColorChoice, DiagnosticFilter, TraceSelection};
 
 pub const TOP_HELP: &str = concat!(
-  "Usage: pi-rs <command> [options]\n",
+  "Usage: rupi <command> [options]\n",
   "\n",
   "Commands:\n",
   "  run          Run one durable coding-agent turn\n",
@@ -26,10 +26,10 @@ pub const TOP_HELP: &str = concat!(
   "Options:\n",
   "  -h, --help   Show this help\n",
   "\n",
-  "Run `pi-rs <command> --help` for that command's flags.\n",
+  "Run `rupi <command> --help` for that command's flags.\n",
 );
 pub const RUN_HELP: &str = concat!(
-  "Usage: pi-rs run --config <file> --cwd <workspace> --prompt <text> [surface flags]\n",
+  "Usage: rupi run --config <file> --cwd <workspace> --prompt <text> [surface flags]\n",
   "\n",
   "Runs one durable coding-agent turn. The answer is written to stdout exactly as\n",
   "the model produced it; everything else is written to stderr. Surface flags\n",
@@ -45,7 +45,7 @@ pub const RUN_HELP: &str = concat!(
   "  --resume <id>            Continue a recorded session rather than starting a\n",
   "                           new one, so the next turn is appended to the session\n",
   "                           named. An id or a unique prefix names it, exactly as\n",
-  "                           in `pi-rs trace`.\n",
+  "                           in `rupi trace`.\n",
   "\n",
   "Surface:\n",
   "  --color <auto|always|never>\n",
@@ -67,15 +67,15 @@ pub const RUN_HELP: &str = concat!(
   // The two commands read the same flag differently on purpose: for `run` the
   // transcript is commentary on an answer, for `trace` it is the answer.
   "\n",
-  "See also: pi-rs trace, which reads a session's transcript back out of the store.",
+  "See also: rupi trace, which reads a session's transcript back out of the store.",
 );
 
 pub const INTERACTIVE_HELP: &str = concat!(
-  "Usage: pi-rs interactive --config <file> --cwd <workspace>\n",
+  "Usage: rupi interactive --config <file> --cwd <workspace>\n",
   "\n",
   "Holds one durable session across many turns in this process. Type a prompt, press\n",
   "enter, and one turn runs; what earlier turns established carries into it. The\n",
-  "answer is written to stdout and the transcript to stderr, as with `pi-rs run`.\n",
+  "answer is written to stdout and the transcript to stderr, as with `rupi run`.\n",
   "\n",
   "Keys:\n",
   "  enter                    run one turn with what is typed\n",
@@ -91,7 +91,7 @@ pub const INTERACTIVE_HELP: &str = concat!(
   "  /help                    this list\n",
   "  /quit, /exit             end the session\n",
   "  /<name> [args]           expand a prompt template into the turn\n",
-  "                           (pi-rs prompts lists the loaded ones)\n",
+  "                           (rupi prompts lists the loaded ones)\n",
   "\n",
   "Required:\n",
   "  --config <file>          Provider configuration\n",
@@ -101,11 +101,11 @@ pub const INTERACTIVE_HELP: &str = concat!(
   "  -h, --help               Show this help\n",
   "\n",
   "A turn interrupted with ctrl-c stops without failing the session, which stays\n",
-  "open for the next prompt. For one turn from a script, use `pi-rs run`.",
+  "open for the next prompt. For one turn from a script, use `rupi run`.",
 );
 
 pub const TRACE_HELP: &str = concat!(
-  "Usage: pi-rs trace [session-id] [options]\n",
+  "Usage: rupi trace [session-id] [options]\n",
   "\n",
   "Reads a session's canonical trace back out of the store and renders it as a\n",
   "transcript. With no session id, reads the most recent session. Unlike `run`, this\n",
@@ -134,7 +134,7 @@ pub const TRACE_HELP: &str = concat!(
 );
 
 pub const REPLAY_HELP: &str = concat!(
-  "Usage: pi-rs replay <trace-or-session.jsonl> [options]\n",
+  "Usage: rupi replay <trace-or-session.jsonl> [options]\n",
   "\n",
   "Inspects recorded history deterministically. Replay never starts a provider,\n",
   "executes a tool, or treats historical events as a new generation. Output is a\n",
@@ -159,11 +159,11 @@ pub const REPLAY_HELP: &str = concat!(
 );
 
 pub const SKILLS_HELP: &str = concat!(
-  "Usage: pi-rs skills [--project] [--trust-store <dir>]\n",
+  "Usage: rupi skills [--project] [--trust-store <dir>]\n",
   "\n",
   "Lists the skills that would be offered to a model, one per pair of lines: source\n",
   "and name, then the description the model sees. The listing goes to stdout; every\n",
-  "file that was skipped, and why, goes to stderr, so `pi-rs skills | fzf` gets names\n",
+  "file that was skipped, and why, goes to stderr, so `rupi skills | fzf` gets names\n",
   "and nothing else.\n",
   "\n",
   "Reads $HOME/.pi/agent/skills, $HOME/.agents/skills, and --project's\n",
@@ -183,7 +183,7 @@ pub const SKILLS_HELP: &str = concat!(
 );
 
 pub const PROMPTS_HELP: &str = concat!(
-  "Usage: pi-rs prompts [--project] [--trust-store <dir>]\n",
+  "Usage: rupi prompts [--project] [--trust-store <dir>]\n",
   "\n",
   "Lists the prompt templates a session would offer, one per pair of lines: source\n",
   "and name -- with the declared argument hint when there is one -- then the\n",
@@ -202,11 +202,11 @@ pub const PROMPTS_HELP: &str = concat!(
   "  --no-prompt-templates    Do not discover prompt templates from standard locations\n",
   "  -h, --help               Show this help.\n",
   "\n",
-  "See also: pi-rs prompt <name>, which expands one of these templates.",
+  "See also: rupi prompt <name>, which expands one of these templates.",
 );
 
 pub const PROMPT_HELP: &str = concat!(
-  "Usage: pi-rs prompt [--project] [--trust-store <dir>] <name> [arguments...]\n",
+  "Usage: rupi prompt [--project] [--trust-store <dir>] <name> [arguments...]\n",
   "Expands one template the way Pi would and writes the prompt to stdout, raw, as\n",
   "the only thing on it. Nothing is sent to a model: this is the expansion, not the\n",
   "run. Options come before the name; everything after the name is an argument to\n",
@@ -226,8 +226,8 @@ pub const PROMPT_HELP: &str = concat!(
 );
 
 pub const PACKAGES_HELP: &str = concat!(
-  "Usage: pi-rs packages [--project] [--trust-store <dir>] [--show <name>]\n",
-  "       pi-rs packages install [--project] <local-directory>\n",
+  "Usage: rupi packages [--project] [--trust-store <dir>] [--show <name>]\n",
+  "       rupi packages install [--project] <local-directory>\n",
   "\n",
   "Lists the packages discovered on disk, one per pair of lines: source, name,\n",
   "and version, then description. The listing goes to stdout; every package that\n",
@@ -245,8 +245,8 @@ pub const PACKAGES_HELP: &str = concat!(
 );
 
 pub const TRUST_HELP: &str = concat!(
-  "Usage: pi-rs trust --store <dir> --list\n",
-  "       pi-rs trust --store <dir> --project <path> [--grant|--deny|--clear]\n",
+  "Usage: rupi trust --store <dir> --list\n",
+  "       rupi trust --store <dir> --project <path> [--grant|--deny|--clear]\n",
   "\n",
   "Records explicit project-trust decisions without loading a provider, model, or\n",
   "project-local content. The store path is supplied by the caller and is never read\n",
@@ -263,7 +263,7 @@ pub const TRUST_HELP: &str = concat!(
 );
 
 pub const COMPAT_HELP: &str = concat!(
-  "Usage: pi-rs compat [options] <path-or-package>\n",
+  "Usage: rupi compat [options] <path-or-package>\n",
   "\n",
   "Inspect an artifact or package for Pi behavioral compatibility.\n",
   "\n",
@@ -279,12 +279,12 @@ pub const COMPAT_HELP: &str = concat!(
 );
 
 pub const IMPORT_HELP: &str = concat!(
-  "Usage: pi-rs import-pi <pi-session.jsonl|session-dir> [options]\n",
+  "Usage: rupi import-pi <pi-session.jsonl|session-dir> [options]\n",
   "\n",
   "Reads one Pi session file — or every *.jsonl directly inside a directory, each as\n",
-  "its own session, in name order — and reports what a pi-rs session would hold.\n",
+  "its own session, in name order — and reports what a rupi session would hold.\n",
   "Nothing is executed and nothing is written: the default is a dry run, and an entry\n",
-  "pi-rs cannot carry is named with the reason rather than mapped onto the\n",
+  "rupi cannot carry is named with the reason rather than mapped onto the\n",
   "nearest-looking event. The report goes to stdout; where a session was written goes\n",
   "to stderr. A directory imports files as separate sessions: lineage Pi records\n",
   "across files is not reconstructed. One unreadable file fails the batch at the end\n",
@@ -299,9 +299,9 @@ pub const IMPORT_HELP: &str = concat!(
 );
 
 pub const EXPORT_HELP: &str = concat!(
-  "Usage: pi-rs export <session-id> --config <file> [--out <path>]\n",
+  "Usage: rupi export <session-id> --config <file> [--out <path>]\n",
   "\n",
-  "Writes one pi-rs session back out as a Pi session file: a `session` header line, then\n",
+  "Writes one rupi session back out as a Pi session file: a `session` header line, then\n",
   "one `message` entry per user turn and per assistant reply, in trace order. The JSONL\n",
   "goes to stdout unless --out names a file. The trace is already redacted, so an export\n",
   "is redacted output, never the bytes a provider sent.\n",
@@ -311,7 +311,7 @@ pub const EXPORT_HELP: &str = concat!(
   "labelling one kind of reasoning as another is not a loss this tool will make quietly.\n",
   "\n",
   "Selection:\n",
-  "  <session-id>             Session id or prefix, resolved exactly as `pi-rs trace`\n",
+  "  <session-id>             Session id or prefix, resolved exactly as `rupi trace`\n",
   "                           resolves it: one match or an error. Required, because\n",
   "                           exporting the newest session by accident is worse than\n",
   "                           asking which one.\n",
@@ -340,7 +340,7 @@ pub enum Command {
   Export(ExportArgs),
 }
 
-/// `pi-rs compat`: inspect an artifact or package for compatibility.
+/// `rupi compat`: inspect an artifact or package for compatibility.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CompatArgs {
   /// The path or package name to inspect.
@@ -353,7 +353,7 @@ pub struct CompatArgs {
   pub json: bool,
 }
 
-/// `pi-rs trust`: durable project-trust decisions.
+/// `rupi trust`: durable project-trust decisions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustArgs {
   /// State root that owns trust.json; never inferred from project files.
@@ -371,7 +371,7 @@ pub enum TrustAction {
   Clear,
 }
 
-/// `pi-rs packages`: packages discovered on disk.
+/// `rupi packages`: packages discovered on disk.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PackagesArgs {
   /// Whether the project's own package locations may be read or installed into.
@@ -384,7 +384,7 @@ pub struct PackagesArgs {
   pub install: Option<PathBuf>,
 }
 
-/// `pi-rs prompts`: the templates a session would offer.
+/// `rupi prompts`: the templates a session would offer.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PromptsArgs {
   /// Whether the project's own locations may be read, for the same reason as skills:
@@ -398,7 +398,7 @@ pub struct PromptsArgs {
   pub no_prompt_templates: bool,
 }
 
-/// `pi-rs prompt <name> [args...]`: expand one template.
+/// `rupi prompt <name> [args...]`: expand one template.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptArgs {
   pub name: String,
@@ -414,7 +414,7 @@ pub struct PromptArgs {
   pub no_prompt_templates: bool,
 }
 
-/// `pi-rs skills`: what a model would be offered, and what was declined.
+/// `rupi skills`: what a model would be offered, and what was declined.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SkillsArgs {
   /// Whether the project's own locations may be read. Off by default because a skill
@@ -445,7 +445,7 @@ pub struct RunArgs {
   pub surface: SurfaceArgs,
 }
 
-/// What `pi-rs interactive` needs to open a session.
+/// What `rupi interactive` needs to open a session.
 ///
 /// Deliberately narrower than [`RunArgs`]: the transcript of an interactive session
 /// is drawn on the terminal it was opened from, so colour and width are what that
@@ -512,7 +512,7 @@ impl Default for TraceArgs {
   }
 }
 
-/// `pi-rs replay`: inspect historical execution without generating a continuation.
+/// `rupi replay`: inspect historical execution without generating a continuation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayArgs {
   pub input: PathBuf,
@@ -528,7 +528,7 @@ pub struct ReplayArgs {
   pub sequence: bool,
 }
 
-/// `pi-rs import-pi`: read a Pi session file, and write it only when asked to.
+/// `rupi import-pi`: read a Pi session file, and write it only when asked to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportArgs {
   pub path: PathBuf,
@@ -550,7 +550,7 @@ impl Default for ImportArgs {
   }
 }
 
-/// `pi-rs export`: one session out of the store, in the shape Pi reads.
+/// `rupi export`: one session out of the store, in the shape Pi reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportArgs {
   /// Session id or prefix. Required: this command never guesses a session.
@@ -623,7 +623,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
   ))
 }
 
-/// `pi-rs skills`: what a model would be offered, and what was declined.
+/// `rupi skills`: what a model would be offered, and what was declined.
 fn parse_skills(remaining: &[OsString]) -> Result<Command, String> {
   let mut project = false;
   let mut trust_store: Option<PathBuf> = None;
@@ -681,7 +681,7 @@ fn parse_skills(remaining: &[OsString]) -> Result<Command, String> {
   }))
 }
 
-/// `pi-rs prompts`: list the templates.
+/// `rupi prompts`: list the templates.
 fn parse_prompts(remaining: &[OsString]) -> Result<Command, String> {
   let mut project = false;
   let mut trust_store: Option<PathBuf> = None;
@@ -730,8 +730,8 @@ fn parse_prompts(remaining: &[OsString]) -> Result<Command, String> {
   }))
 }
 
-/// `pi-rs prompt <name> [args...]`: expand one template. Flags stop at the name, so
-/// `pi-rs prompt review --strict` hands `--strict` to the template.
+/// `rupi prompt <name> [args...]`: expand one template. Flags stop at the name, so
+/// `rupi prompt review --strict` hands `--strict` to the template.
 fn parse_prompt(remaining: &[OsString]) -> Result<Command, String> {
   let mut project = false;
   let mut trust_store: Option<PathBuf> = None;
@@ -801,7 +801,7 @@ fn parse_prompt(remaining: &[OsString]) -> Result<Command, String> {
   }))
 }
 
-/// `pi-rs packages`: list the packages.
+/// `rupi packages`: list the packages.
 fn parse_packages(remaining: &[OsString]) -> Result<Command, String> {
   let mut project = false;
   let mut trust_store: Option<PathBuf> = None;
@@ -868,7 +868,7 @@ fn parse_packages(remaining: &[OsString]) -> Result<Command, String> {
   }))
 }
 
-/// `pi-rs trust`: record or inspect project-trust decisions.
+/// `rupi trust`: record or inspect project-trust decisions.
 fn parse_trust(remaining: &[OsString]) -> Result<Command, String> {
   let mut store: Option<PathBuf> = None;
   let mut project: Option<PathBuf> = None;
@@ -928,7 +928,7 @@ fn set_trust_action(action: &mut Option<TrustAction>, next: TrustAction) -> Resu
   Ok(())
 }
 
-/// `pi-rs compat`: inspect an artifact or package for compatibility.
+/// `rupi compat`: inspect an artifact or package for compatibility.
 fn parse_compat(remaining: &[OsString]) -> Result<Command, String> {
   let mut project = false;
   let mut trust_store: Option<PathBuf> = None;
@@ -981,7 +981,7 @@ fn parse_compat(remaining: &[OsString]) -> Result<Command, String> {
   }))
 }
 
-/// `pi-rs run`: the answer goes to stdout, the transcript goes to stderr.
+/// `rupi run`: the answer goes to stdout, the transcript goes to stderr.
 fn parse_run(remaining: &[OsString]) -> Result<Command, String> {
   if remaining.iter().any(|arg| arg == "--help" || arg == "-h") {
     return Ok(Command::Help(RUN_HELP));
@@ -1097,7 +1097,7 @@ fn parse_run(remaining: &[OsString]) -> Result<Command, String> {
   }))
 }
 
-/// `pi-rs interactive`: many turns, one session, one terminal.
+/// `rupi interactive`: many turns, one session, one terminal.
 fn parse_interactive(remaining: &[OsString]) -> Result<Command, String> {
   if remaining.iter().any(|arg| arg == "--help" || arg == "-h") {
     return Ok(Command::Help(INTERACTIVE_HELP));
@@ -1140,7 +1140,7 @@ fn parse_interactive(remaining: &[OsString]) -> Result<Command, String> {
   }))
 }
 
-/// `pi-rs trace`: read a session's transcript back out of the store.
+/// `rupi trace`: read a session's transcript back out of the store.
 fn parse_trace(remaining: &[OsString]) -> Result<Command, String> {
   if remaining.iter().any(|arg| arg == "--help" || arg == "-h") {
     return Ok(Command::Help(TRACE_HELP));
@@ -1221,7 +1221,7 @@ fn parse_trace(remaining: &[OsString]) -> Result<Command, String> {
         reasoning_only = true;
       }
       "--sequence" => sequence = true,
-      // A bare argument is the session id, because `pi-rs trace 0194...` is how this
+      // A bare argument is the session id, because `rupi trace 0194...` is how this
       // command actually gets used. A second one is a mistake, not a second session.
       other if !other.starts_with('-') => {
         if positional.is_some() || session.is_some() {
@@ -1264,7 +1264,7 @@ fn expand_inline(remaining: &[OsString]) -> Vec<OsString> {
     .collect()
 }
 
-/// Split `--flag=value` when `flag` is a value-taking flag of `pi-rs run`.
+/// Split `--flag=value` when `flag` is a value-taking flag of `rupi run`.
 fn inline_value(arg: &std::ffi::OsStr) -> Option<(&str, &std::ffi::OsStr)> {
   let (flag, value) = arg.to_str()?.split_once('=')?;
   matches!(
@@ -1288,7 +1288,7 @@ fn inline_value(arg: &std::ffi::OsStr) -> Option<(&str, &std::ffi::OsStr)> {
   .then_some((flag, OsStr::new(value)))
 }
 
-/// `pi-rs replay`: inspect recorded history without opening a provider.
+/// `rupi replay`: inspect recorded history without opening a provider.
 fn parse_replay(remaining: &[OsString]) -> Result<Command, String> {
   if remaining.iter().any(|arg| arg == "--help" || arg == "-h") {
     return Ok(Command::Help(REPLAY_HELP));
@@ -1362,7 +1362,7 @@ fn parse_replay(remaining: &[OsString]) -> Result<Command, String> {
   }))
 }
 
-/// `pi-rs import-pi`: one Pi session file, and where to put the pi-rs session made from it.
+/// `rupi import-pi`: one Pi session file, and where to put the rupi session made from it.
 fn parse_import(remaining: &[OsString]) -> Result<Command, String> {
   if remaining.iter().any(|arg| arg == "--help" || arg == "-h") {
     return Ok(Command::Help(IMPORT_HELP));
@@ -1414,7 +1414,7 @@ fn parse_import(remaining: &[OsString]) -> Result<Command, String> {
     }
   }
   let path = path.ok_or_else(|| {
-    format!("a Pi session file is required: pi-rs import-pi <session.jsonl>\n{IMPORT_HELP}")
+    format!("a Pi session file is required: rupi import-pi <session.jsonl>\n{IMPORT_HELP}")
   })?;
   // Writing needs a destination named on purpose. Importing into whatever root a default
   // would pick is how a session ends up somewhere the reader then cannot find.
@@ -1431,7 +1431,7 @@ fn parse_import(remaining: &[OsString]) -> Result<Command, String> {
   }))
 }
 
-/// `pi-rs export`: one session id, the config that says where the store is, and an
+/// `rupi export`: one session id, the config that says where the store is, and an
 /// optional destination.
 fn parse_export(remaining: &[OsString]) -> Result<Command, String> {
   if remaining.iter().any(|arg| arg == "--help" || arg == "-h") {
@@ -1482,14 +1482,14 @@ fn parse_export(remaining: &[OsString]) -> Result<Command, String> {
     }
   }
   let session = session
-    .ok_or_else(|| format!("a session id is required: pi-rs export <session-id>\n{EXPORT_HELP}"))?;
+    .ok_or_else(|| format!("a session id is required: rupi export <session-id>\n{EXPORT_HELP}"))?;
   // An empty prefix matches every session, so accepting it would turn a typo into an
   // ambiguity error that does not mention what was actually wrong.
   if session.is_empty() {
     return Err(format!("a session id cannot be empty\n{EXPORT_HELP}"));
   }
   // The store is not guessed from a default location: an export is read out of a state
-  // root the caller named, the same way `pi-rs trace` reads it.
+  // root the caller named, the same way `rupi trace` reads it.
   let config = config
     .ok_or_else(|| format!("an export needs a state root: --config <file>\n{EXPORT_HELP}"))?;
   Ok(Command::Export(ExportArgs {
@@ -1619,7 +1619,7 @@ mod tests {
 
   #[test]
   fn interactive_accepts_no_other_argument() {
-    // A surface flag is `pi-rs run`'s vocabulary, and accepting it here silently
+    // A surface flag is `rupi run`'s vocabulary, and accepting it here silently
     // would be accepting a statement the terminal already answers.
     let error = parse(strings(&[
       "interactive",
@@ -2054,7 +2054,7 @@ mod tests {
 
   #[test]
   fn a_prompt_flag_typed_where_the_name_belongs_is_still_an_error() {
-    // `pi-rs prompt --strict review` cannot mean "pass --strict to review": there is no
+    // `rupi prompt --strict review` cannot mean "pass --strict to review": there is no
     // name yet, so it is a flag this command does not have, and guessing would expand a
     // template the user did not ask for.
     let error = match parse(strings(&["prompt", "--strict", "review"])) {

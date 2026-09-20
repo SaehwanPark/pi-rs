@@ -2,10 +2,10 @@
 
 use std::path::PathBuf;
 
-use pi_rs_compat::{compat, scan::Discovery};
-use pi_rs_core::{CancelToken, ToolChunk, ToolExecutionState, ToolRequest};
-use pi_rs_extension::{ExtensionHost, ExtensionHostConfig, HostError, HostStatus};
-use pi_rs_tools::{AutoApprove, ToolRegistry, Workspace};
+use rupi_compat::{compat, scan::Discovery};
+use rupi_core::{CancelToken, ToolChunk, ToolExecutionState, ToolRequest};
+use rupi_extension::{ExtensionHost, ExtensionHostConfig, HostError, HostStatus};
+use rupi_tools::{AutoApprove, ToolRegistry, Workspace};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -86,7 +86,7 @@ fn pi_style_typescript_fixture_registers_selected_apis() {
 
   let lifecycle = host
     .dispatch_event(
-      pi_rs_extension::LifecycleEvent::SessionStart,
+      rupi_extension::LifecycleEvent::SessionStart,
       json!({"reason": "startup"}),
     )
     .expect("lifecycle dispatch");
@@ -140,7 +140,7 @@ fn extension_errors_are_isolated_and_mutating_failure_is_unknown() {
   host.start().expect("load fixtures");
 
   let lifecycle_error = host
-    .dispatch_event(pi_rs_extension::LifecycleEvent::TurnEnd, json!({}))
+    .dispatch_event(rupi_extension::LifecycleEvent::TurnEnd, json!({}))
     .expect_err("failing extension hook is reported");
   assert!(matches!(lifecycle_error, HostError::Extension { .. }));
   assert_eq!(host.status(), HostStatus::Ready);
@@ -152,7 +152,7 @@ fn extension_errors_are_isolated_and_mutating_failure_is_unknown() {
     .find(|tool| tool.info().name == "fixture-failing-tool")
     .expect("failing tool is registered");
   let request = ToolRequest {
-    call_id: pi_rs_core::ids::ToolCallId::new(),
+    call_id: rupi_core::ids::ToolCallId::new(),
     name: tool.info().name.clone(),
     arguments: json!({}),
   };

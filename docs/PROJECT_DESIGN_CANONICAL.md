@@ -5,16 +5,16 @@ date: 2026-09-04
 ---
 
 **Status:** Canonical design draft  
-**Project:** `pi-rs`  
+**Project:** `rupi`  
 **Primary language:** Rust  
 **Design lineage:** Heavily inspired by Pi  
-**Document purpose:** Define the stable project philosophy, architectural boundaries, runtime primitives, UX principles, compatibility goals, and staged implementation direction for `pi-rs`.
+**Document purpose:** Define the stable project philosophy, architectural boundaries, runtime primitives, UX principles, compatibility goals, and staged implementation direction for `rupi`.
 
 ---
 
 ## 1. Project Definition
 
-`pi-rs` is a clean Rust reimplementation of the core ideas behind Pi, designed as a minimal coding-agent runtime with stronger first-class support for:
+`rupi` is a clean Rust reimplementation of the core ideas behind Pi, designed as a minimal coding-agent runtime with stronger first-class support for:
 
 - execution observability and provenance;
 - local and remote models;
@@ -31,7 +31,7 @@ It should instead preserve Pi's most valuable behavioral and philosophical prope
 
 A concise project description is:
 
-> **`pi-rs` is a minimal, Pi-inspired and Pi-compatible agent runtime for observable, context-efficient, fault-tolerant coding sessions across local and remote models.**
+> **`rupi` is a minimal, Pi-inspired and Pi-compatible agent runtime for observable, context-efficient, fault-tolerant coding sessions across local and remote models.**
 
 A shorter design mantra is:
 
@@ -39,13 +39,13 @@ A shorter design mantra is:
 
 ---
 
-## 2. Why `pi-rs` Exists
+## 2. Why `rupi` Exists
 
 The project should not exist merely because Rust is appealing.
 
 A language-only port would provide insufficient differentiation and could fragment the Pi ecosystem without creating enough value.
 
-`pi-rs` is justified by a specific architectural thesis:
+`rupi` is justified by a specific architectural thesis:
 
 > **The coding-agent runtime should remain small, but execution state, provenance, context lifecycle, interoperability, and recovery should be explicit runtime primitives rather than loosely coupled afterthoughts.**
 
@@ -70,7 +70,7 @@ Rust is not the project's raison d'être.
 
 ### 3.1 Preserve Pi's core philosophy
 
-`pi-rs` should benchmark against and learn heavily from Pi's design language.
+`rupi` should benchmark against and learn heavily from Pi's design language.
 
 The project should preserve, as far as practical:
 
@@ -83,7 +83,7 @@ The project should preserve, as far as practical:
 - package/skill/prompt-based customization;
 - a low-friction default experience.
 
-`pi-rs` should feel familiar to Pi users.
+`rupi` should feel familiar to Pi users.
 
 Where it differs, the difference should usually come from stronger runtime semantics rather than from adding workflow complexity.
 
@@ -194,7 +194,7 @@ The user should always be able to distinguish:
 
 ### 3.7 One model is active at a time
 
-Normal `pi-rs` execution is not an ensemble.
+Normal `rupi` execution is not an ensemble.
 
 The core runtime may have:
 
@@ -241,7 +241,7 @@ The engineering version is:
 
 ### 4.1 Primary goals
 
-`pi-rs` should:
+`rupi` should:
 
 1. remain recognizably Pi-like in interaction and philosophy;
 2. support common Pi ecosystem artifacts with little or no modification;
@@ -300,7 +300,7 @@ These capabilities may exist outside core through:
 
 ```text
 +---------------------------------------------------------+
-|                         pi-rs                           |
+|                         rupi                           |
 |                                                         |
 |   +-------------+        +-------------------------+    |
 |   | Agent Loop  |<------>| Provider Abstraction    |    |
@@ -339,7 +339,7 @@ higher-level orchestrator
          MCP
           |
           v
-        pi-rs
+        rupi
           |
      coding session
 ```
@@ -351,16 +351,16 @@ higher-level orchestrator
 A possible crate-level decomposition is:
 
 ```text
-pi-rs-core
-pi-rs-provider
-pi-rs-session
-pi-rs-context
-pi-rs-trace
-pi-rs-tools
-pi-rs-mcp
-pi-rs-pi-compat
-pi-rs-cli
-pi-rs-tui
+rupi-core
+rupi-provider
+rupi-session
+rupi-context
+rupi-trace
+rupi-tools
+rupi-mcp
+rupi-pi-compat
+rupi-cli
+rupi-tui
 ```
 
 Exact crate boundaries may evolve.
@@ -559,11 +559,11 @@ Replay should become a first-class capability after the foundational runtime is 
 Potential interfaces:
 
 ```bash
-pi-rs replay session.jsonl
-pi-rs replay session.jsonl --tools
-pi-rs replay session.jsonl --reasoning
-pi-rs replay session.jsonl --timing
-pi-rs replay session.jsonl --until event:381
+rupi replay session.jsonl
+rupi replay session.jsonl --tools
+rupi replay session.jsonl --reasoning
+rupi replay session.jsonl --timing
+rupi replay session.jsonl --until event:381
 ```
 
 Longer-term possibilities:
@@ -576,7 +576,7 @@ Longer-term possibilities:
 - audit tool side effects.
 
 Historical execution must remain clearly separated from newly generated continuation. The
-verified `pi-rs-replay` boundary treats replay as a pure projection over redacted trace entries
+verified `rupi-replay` boundary treats replay as a pure projection over redacted trace entries
 joined with persisted session messages; it uses sequence numbers for order, preserves explicit
 reasoning provenance, and emits dry historical branch plans rather than executing them. Context
 snapshots keep canonical history intact while representing compaction/checkpoint substitutions
@@ -629,11 +629,11 @@ Existing Pi TypeScript extensions are strategically important.
 Do not force them to become Rust extensions.
 
 A Node compatibility host is preferred initially and is implemented as the optional
-`pi-rs-extension` adapter. It accepts trusted module paths and exposes only the selected
+`rupi-extension` adapter. It accepts trusted module paths and exposes only the selected
 Pi API subset through a typed JSON-lines boundary:
 
 ```text
-                 pi-rs
+                 rupi
                    |
              extension RPC
                    |
@@ -881,7 +881,7 @@ A configured environment may contain hundreds of MCP tools.
 
 Injecting every schema into model context is undesirable, especially for local models.
 
-`pi-rs` should support lazy discovery or filtering.
+`rupi` should support lazy discovery or filtering.
 
 Potential mechanisms:
 
@@ -909,7 +909,7 @@ The invariant is:
 
 ## 21. MCP Server / Worker Mode
 
-`pi-rs-mcp::worker` now provides the explicit MCP-accessible worker boundary. An embedding
+`rupi-mcp::worker` now provides the explicit MCP-accessible worker boundary. An embedding
 application supplies a trusted headless `WorkerEngine`; the adapter owns asynchronous run
 handles, cancellation, bounded waits, and stable JSON projections rather than terminal
 transcript scraping.
@@ -956,11 +956,11 @@ Example:
             +----------+----------+
             |          |          |
             v          v          v
-         pi-rs A    pi-rs B    pi-rs C
+         rupi A    rupi B    rupi C
          backend    frontend    reviewer
 ```
 
-Each `pi-rs` worker may independently be:
+Each `rupi` worker may independently be:
 
 - stateful;
 - inspectable;
@@ -1019,10 +1019,10 @@ It should not become a core dependency.
 Instead:
 
 ```text
-pi-rs core
+rupi core
   `- generic external-context primitives
 
-pi-rs-rkb
+rupi-rkb
   `- official integration
 
 rkb-rs
@@ -1039,11 +1039,11 @@ The integration provides:
 - exact-id `search_chunks` rehydration hooks;
 - lazy MCP activation with read-only retrieval tools.
 
-`rkb-rs` remains an independent project and is not a dependency of `pi-rs-core`.
-`pi-rs-rkb` serves as the architectural reference implementation for provenance-aware
+`rkb-rs` remains an independent project and is not a dependency of `rupi-core`.
+`rupi-rkb` serves as the architectural reference implementation for provenance-aware
 external knowledge.
 
-The generic feature extracted into `pi-rs` is not "RAG."
+The generic feature extracted into `rupi` is not "RAG."
 
 It is:
 
@@ -1335,7 +1335,7 @@ Tool execution should also be easy to skim:
 ```text
 read        src/context.rs
 edit        src/session.rs
-test        cargo test -p pi-rs-context
+test        cargo test -p rupi-context
 ```
 
 The operation, structured argument, path, and free text should have consistent visual roles.
@@ -1693,7 +1693,7 @@ Trust-sensitive capabilities include:
 - enabling custom native extensions.
 
 Global and project configuration should have explicit precedence and trust rules. Compatibility
-readers take trust as a caller-owned input, and `pi-rs trust` records canonical project scopes
+readers take trust as a caller-owned input, and `rupi trust` records canonical project scopes
 in a private, schema-versioned store; no project file can grant its own trust. The current
 interactive resolver remains deliberately explicit rather than guessing on `NeedsUser`.
 
@@ -1977,7 +1977,7 @@ Implement:
 
 Add:
 
-- deterministic `pi-rs replay` over canonical trace/session records;
+- deterministic `rupi replay` over canonical trace/session records;
 - tools, reasoning, timing, and inclusive replay-until-event projections;
 - historical model-visible context reconstruction with canonical/working separation;
 - dry branch-from-event plans and structural continuation comparison;
@@ -1989,7 +1989,7 @@ remain reconciliation barriers.
 
 ### Phase 11: Adaptive optimization experiments
 
-Completed as opt-in experiments with verified baselines (`pi-rs-experiments` and `bench/context_prefill.sh`):
+Completed as opt-in experiments with verified baselines (`rupi-experiments` and `bench/context_prefill.sh`):
 
 - learned context-performance knees: `KneeDetector` and `AdaptiveContextPolicy` cap thresholds at performance cliffs;
 - optional warm backup: `evaluate_standby_tradeoff` models startup vs takeover trade-offs while keeping cold backup default;
@@ -2031,7 +2031,7 @@ Do not delay the MVP for:
 
 ### 46.1 Compatibility
 
-A Pi user can move common skills and packages to `pi-rs` with little friction.
+A Pi user can move common skills and packages to `rupi` with little friction.
 
 ### 46.2 Minimalism
 
@@ -2072,7 +2072,7 @@ The active prompt can shrink without losing the canonical trace or durable evide
 
 ### 46.7 Composability
 
-An external orchestrator can operate `pi-rs` without scraping terminal output.
+An external orchestrator can operate `rupi` without scraping terminal output.
 
 ### 46.8 Visual clarity
 
@@ -2197,13 +2197,13 @@ Unless explicitly revised, the following should be treated as architectural rule
 
 ## 50. Long-Term Vision
 
-A mature `pi-rs` session may look like:
+A mature `rupi` session may look like:
 
 ```text
 User
  |
  v
-pi-rs
+rupi
  |
  +-- Qwen local model
  |      |
@@ -2257,6 +2257,6 @@ That leads to the central architectural idea:
 
 > **Working memory is disposable, evidence is rehydratable, execution is traceable, and the model itself is replaceable.**
 
-`pi-rs` should remain a minimal coding harness at the surface while providing a more explicit, reliable runtime underneath.
+`rupi` should remain a minimal coding harness at the surface while providing a more explicit, reliable runtime underneath.
 
 That distinction should guide every major design decision.

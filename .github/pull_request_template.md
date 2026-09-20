@@ -15,7 +15,7 @@ alternative a reviewer will ask you to revisit.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo test --workspace`
 - [ ] `cargo doc --workspace --no-deps`
-- [ ] compatibility fixture added or updated (`pi-rs-compat`), when Pi behaviour changed
+- [ ] compatibility fixture added or updated (`rupi-compat`), when Pi behaviour changed
 - [ ] benchmark run or added, when a startup, render, resume, context, package, MCP, or
       extension-host path changed
 

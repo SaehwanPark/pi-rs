@@ -4,7 +4,7 @@ set -euo pipefail
 # Entry point for the context prefill and optimization experiments benchmark,
 # with the same interface as bench/startup.sh, bench/large_session.sh, and bench/render.sh.
 # The measured cases, budgets, and pass/fail rules live in
-# crates/pi-rs-experiments/benches/context_prefill.rs; this script builds and runs it.
+# crates/rupi-experiments/benches/context_prefill.rs; this script builds and runs it.
 #
 # Usage: bench/context_prefill.sh [--iterations <N>] [--json <path>]
 
@@ -48,4 +48,4 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$REPO_ROOT"
-exec cargo bench --quiet -p pi-rs-experiments --bench context_prefill -- ${ARGS[@]+"${ARGS[@]}"}
+exec cargo bench --quiet -p rupi-experiments --bench context_prefill -- ${ARGS[@]+"${ARGS[@]}"}

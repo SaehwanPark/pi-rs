@@ -122,7 +122,7 @@ child.kill()
 
 It then waits for that direct child.
 
-That does **not** generally kill subprocesses created by the shell. A command can spawn a child/background process that continues writing files, consuming GPU/CPU, or talking to the network after pi-rs reports that the timed-out command was killed.
+That does **not** generally kill subprocesses created by the shell. A command can spawn a child/background process that continues writing files, consuming GPU/CPU, or talking to the network after rupi reports that the timed-out command was killed.
 
 This contradicts a particularly important safety comment in the implementation:
 
@@ -179,7 +179,7 @@ before call:     file already ends with "DONE\n"
 requested append: "DONE\n"
 ```
 
-If pi-rs durably records `ToolStarted` and crashes before `write()` executes, restoration sees the pre-existing suffix and can conclude that the call was committed even though nothing happened.
+If rupi durably records `ToolStarted` and crashes before `write()` executes, restoration sees the pre-existing suffix and can conclude that the call was committed even though nothing happened.
 
 That undermines one of the project's strongest architectural contracts: `Unknown` side effects are supposed to be honestly reconciled rather than guessed. The core replay machinery explicitly relies on reliable reconciliation and idempotence metadata.
 

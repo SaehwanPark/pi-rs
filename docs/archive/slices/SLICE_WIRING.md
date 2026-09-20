@@ -21,8 +21,8 @@ plain SIGINT: the process dies and the closing flush is lost. PR #24 added
 ## Hard constraints
 - Keep the interrupt decision a PURE tty-free function in `src/interactive.rs`, unit-tested with no
   tty: `(turn_in_flight, buffer_empty) -> InterruptAction::{Cancel,Quit,KeepText}` or equivalent.
-- Do not modify `src/run.rs`, `crates/pi-rs-runtime`, `crates/pi-rs-provider`, or `src/cli.rs`.
-- No new crate. `pi-rs-tui` imports neither runtime nor store. Startup path untouched:
+- Do not modify `src/run.rs`, `crates/rupi-runtime`, `crates/rupi-provider`, or `src/cli.rs`.
+- No new crate. `rupi-tui` imports neither runtime nor store. Startup path untouched:
   `bash bench/startup.sh` must not move.
 - Keep the diff small. This is a wiring slice, not a rewrite: if you feel the urge to restructure
   `interactive.rs`, stop and report instead.

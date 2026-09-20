@@ -10,7 +10,7 @@
 //! and a renderer that labelled every block "reasoning" would pass a test written only
 //! against the event.
 
-use pi_rs_core::{
+use rupi_core::{
   capability::ModelRef,
   event::{AgentEvent, EventEnvelope, EventMeta, ReasoningDelta, UserMessage},
   ids::{SessionId, SpanId, TraceId, TurnId, uuidv7},
@@ -18,8 +18,8 @@ use pi_rs_core::{
   provenance::{ReasoningChunk, ReasoningProvenance},
   session::{SESSION_SCHEMA_VERSION, SessionHeader},
 };
-use pi_rs_store::{Store, TempDir, TraceJournal, WritePolicy};
-use pi_rs_tui::{
+use rupi_store::{Store, TempDir, TraceJournal, WritePolicy};
+use rupi_tui::{
   // The render role, not the message role: one says how a line is styled, the other who
   // spoke. They share a name in the two crates, and the distinction is the point here.
   style::Role as RenderRole,
@@ -53,7 +53,7 @@ fn header(session: &SessionId) -> SessionHeader {
 
 fn meta(session: &SessionId, turn: &TurnId) -> EventMeta {
   EventMeta {
-    event_id: pi_rs_core::ids::EventId::new(),
+    event_id: rupi_core::ids::EventId::new(),
     session_id: session.clone(),
     turn_id: Some(turn.clone()),
     seq: None,
@@ -170,7 +170,7 @@ fn only_native_reasoning_may_be_called_emitted_thought() {
       "{provenance:?} must be described as emitted reasoning only if it is native",
     );
   }
-  // Inference is the narrowest claim of all: only reconstructed text is pi-rs speaking.
+  // Inference is the narrowest claim of all: only reconstructed text is rupi speaking.
   assert_eq!(
     ALL
       .iter()

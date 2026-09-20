@@ -1,0 +1,8 @@
+{
+  "name": "rupi-rkb",
+  "version": "0.2.0",
+  "description": "Citation-preserving RKB knowledge retrieval skill for rupi.",
+  "pi": {
+    "skills": ["SKILL.md"]
+  }
+}

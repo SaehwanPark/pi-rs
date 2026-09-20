@@ -1,14 +1,14 @@
 # Interactive TUI
 
-`pi-rs interactive` provides a high-efficiency terminal interface inspired by Pi, built
+`rupi interactive` provides a high-efficiency terminal interface inspired by Pi, built
 with a terminal-native semantic renderer and `crossterm`. The renderer stays separate
 from runtime state and does not start optional providers.
 
 ```bash
-pi-rs interactive --config config.json
+rupi interactive --config config.json
 ```
 
-![pi-rs Interactive TUI](../assets/screenshots/interactive-tui.png)
+![rupi Interactive TUI](../assets/screenshots/interactive-tui.png)
 
 ---
 
@@ -51,7 +51,7 @@ The terminal interface consists of three distinct visual zones:
 
 ## Semantic Visual Hierarchy
 
-`pi-rs` avoids distracting, decorative UI chrome in favor of high-signal semantic color coding:
+`rupi` avoids distracting, decorative UI chrome in favor of high-signal semantic color coding:
 
 - **Reasoning**: Dim italic or bordered block tagged with explicit provenance (e.g. `[native reasoning]`).
 - **Tool Requests**: Cyan action indicator showing tool name (`read`, `write`, `edit`, `exec`) and canonicalized path.

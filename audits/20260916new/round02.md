@@ -53,7 +53,7 @@ The `continue` does **not** continue reading the same HTTP request. It construct
 
 After a response-read timeout, the client cannot know that the original server-side generation never started. Quite the opposite: an inference server may have fully accepted the request and simply be queued, prefilling, or reasoning before it sends HTTP response headers.
 
-Under those circumstances pi-rs can submit:
+Under those circumstances rupi can submit:
 
 ```text
 POST generation A
@@ -64,7 +64,7 @@ POST generation A again
 ...
 ```
 
-This is particularly concerning for exactly the workloads pi-rs targets: slow local models, queued local inference servers, and cloud models with potentially expensive requests.
+This is particularly concerning for exactly the workloads rupi targets: slow local models, queued local inference servers, and cloud models with potentially expensive requests.
 
 The test suite currently covers a quiet interval **after response headers have already arrived**, and cancellation after a stream has started. Those are good tests, but they do not exercise a server that accepts the request and delays the HTTP headers beyond the 2-second socket poll.
 
@@ -238,9 +238,9 @@ or an equivalent runtime-abort reason distinct from provider failure.
 Then distinguish surfaces:
 
 * an interactive session can report budget exhaustion and remain usable for another user turn;
-* `pi-rs run` should return a non-success exit when its sole requested turn never reached a final answer.
+* `rupi run` should return a non-success exit when its sole requested turn never reached a final answer.
 
-Add both runtime and process-level tests. The important process test is that a provider endlessly returning tool calls causes `pi-rs run` to exit nonzero rather than merely printing a warning to stderr.
+Add both runtime and process-level tests. The important process test is that a provider endlessly returning tool calls causes `rupi run` to exit nonzero rather than merely printing a warning to stderr.
 
 ---
 
@@ -297,7 +297,7 @@ I do **not** consider these Round 2 blockers, but I would keep them on the roadm
 
 On Windows, process-tree termination currently invokes `taskkill /T /F`, ignores its result, and then falls back to killing only the direct child.  A Windows Job Object would provide a stronger lifecycle guarantee, especially if `taskkill` is unavailable or denied. Given that Windows CI now exists and the primary Round 1 defect is addressed, I would classify this as P2 rather than reopening P1-4.
 
-Likewise, the new filesystem confinement still performs validation separately from the later filesystem mutation, so it is not a capability-secure sandbox against a hostile concurrent local process. The README was correctly changed to stop claiming that it is one, and for pi-rs's stated guardrail threat model I consider that residual P2 hardening rather than an unresolved Round 1 vulnerability.
+Likewise, the new filesystem confinement still performs validation separately from the later filesystem mutation, so it is not a capability-secure sandbox against a hostile concurrent local process. The README was correctly changed to stop claiming that it is one, and for rupi's stated guardrail threat model I consider that residual P2 hardening rather than an unresolved Round 1 vulnerability.
 
 ## Round 2 verdict
 

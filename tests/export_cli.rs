@@ -1,4 +1,4 @@
-//! End-to-end tests for `pi-rs export`.
+//! End-to-end tests for `rupi export`.
 //!
 //! These drive the real binary, because the command's contract is a stream contract: the
 //! JSONL is stdout, the dropped-detail report is stderr, and a refused selection must leave
@@ -14,7 +14,7 @@ use std::{
   process::Output,
 };
 
-use pi_rs_core::{ModelCapabilities, ModelEndpoint, ModelRef, ReasoningExposure, RuntimeConfig};
+use rupi_core::{ModelCapabilities, ModelEndpoint, ModelRef, ReasoningExposure, RuntimeConfig};
 use tempfile::TempDir;
 
 /// The id the importer gives the fixture below, because it namespaces Pi ids.
@@ -82,26 +82,26 @@ fn write_config(root: &Path, state: &Path) -> PathBuf {
 }
 
 fn export(config: &Path, args: &[&str]) -> Output {
-  std::process::Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+  std::process::Command::new(env!("CARGO_BIN_EXE_rupi"))
     .args(["export"])
     .args(args)
     .args(["--config"])
     .arg(config)
     .env_remove("NO_COLOR")
     .output()
-    .expect("run pi-rs export")
+    .expect("run rupi export")
 }
 
 /// Imports `file` as a real session under `config`'s state root.
 fn import(file: &Path, config: &Path) -> Output {
-  std::process::Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+  std::process::Command::new(env!("CARGO_BIN_EXE_rupi"))
     .args(["import-pi"])
     .arg(file)
     .args(["--write", "--config"])
     .arg(config)
     .env_remove("NO_COLOR")
     .output()
-    .expect("run pi-rs import-pi")
+    .expect("run rupi import-pi")
 }
 
 fn stdout(out: &Output) -> String {

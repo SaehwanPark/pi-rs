@@ -1,9 +1,9 @@
-//! End-to-end tests for `pi-rs import-pi`.
+//! End-to-end tests for `rupi import-pi`.
 //!
 //! These run the real binary over the committed Pi fixture, because the command's contract
 //! is a stream contract: the report is stdout, the destination line is stderr, and a dry run
 //! must not create a byte on disk. The store-level fidelity of the mapping is covered by
-//! `crates/pi-rs-store/tests/pi_import.rs`; what is under test here is what a user gets.
+//! `crates/rupi-store/tests/pi_import.rs`; what is under test here is what a user gets.
 
 use std::{
   fs,
@@ -11,18 +11,18 @@ use std::{
   process::Output,
 };
 
-use pi_rs_core::{ModelCapabilities, ModelEndpoint, ModelRef, ReasoningExposure, RuntimeConfig};
-use pi_rs_store::StateLayout;
+use rupi_core::{ModelCapabilities, ModelEndpoint, ModelRef, ReasoningExposure, RuntimeConfig};
+use rupi_store::StateLayout;
 use tempfile::TempDir;
 
 const FIXTURE: &str = concat!(
   env!("CARGO_MANIFEST_DIR"),
-  "/crates/pi-rs-store/tests/fixtures/pi/branched.jsonl"
+  "/crates/rupi-store/tests/fixtures/pi/branched.jsonl"
 );
 const SESSION_ID: &str = "pi-a1b2c3d4-0000-7000-8000-000000000001";
 
 fn import(args: &[&str]) -> Output {
-  let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_pi-rs"));
+  let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_rupi"));
   command
     .arg("import-pi")
     .args(args)
@@ -30,7 +30,7 @@ fn import(args: &[&str]) -> Output {
     .env_remove("TERM")
     .env_remove("CLICOLOR")
     .env_remove("CLICOLOR_FORCE");
-  command.output().expect("run pi-rs import-pi")
+  command.output().expect("run rupi import-pi")
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -127,14 +127,14 @@ fn write_files_a_session_the_store_lists_and_trace_reads() {
   assert!(stderr.contains(SESSION_ID), "{stderr}");
 
   let layout = StateLayout::new(&state);
-  let session_id = pi_rs_core::SessionId::from_string(SESSION_ID);
+  let session_id = rupi_core::SessionId::from_string(SESSION_ID);
   assert!(
     layout.session_path(&session_id).exists(),
     "no session file at {}",
     layout.session_path(&session_id).display()
   );
   let journal = fs::read_to_string(layout.trace_path(&session_id)).expect("trace journal exists");
-  // Content fidelity through the CLI: what Pi's file said, in the journal pi-rs reads back.
+  // Content fidelity through the CLI: what Pi's file said, in the journal rupi reads back.
   assert!(journal.contains("which files changed?"), "{journal}");
   assert!(journal.contains("Checking the working tree."), "{journal}");
   assert!(journal.contains("provider_summary"), "{journal}");
@@ -177,7 +177,7 @@ fn write_files_a_session_the_store_lists_and_trace_reads() {
 
 #[test]
 fn an_imported_session_reads_back_through_trace() {
-  // The point of the import is a session pi-rs can keep working in, so the proof is that
+  // The point of the import is a session rupi can keep working in, so the proof is that
   // the other read command — which knows nothing about Pi — renders it.
   let root = TempDir::new().expect("temp root");
   let config = write_config(root.path());
@@ -189,7 +189,7 @@ fn an_imported_session_reads_back_through_trace() {
   ]);
   assert!(imported.status.success(), "{}", text(&imported.stderr));
 
-  let output = std::process::Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+  let output = std::process::Command::new(env!("CARGO_BIN_EXE_rupi"))
     .args(["trace", "--config"])
     .arg(&config)
     .env_remove("NO_COLOR")
@@ -197,7 +197,7 @@ fn an_imported_session_reads_back_through_trace() {
     .env_remove("CLICOLOR")
     .env_remove("CLICOLOR_FORCE")
     .output()
-    .expect("run pi-rs trace");
+    .expect("run rupi trace");
   assert!(output.status.success(), "{}", text(&output.stderr));
   let stdout = text(&output.stdout);
   assert!(stdout.contains("which files changed?"), "{stdout}");
@@ -261,7 +261,7 @@ fn usage_errors_exit_two_and_help_exits_zero() {
 
   let help = import(&["--help"]);
   assert!(help.status.success(), "{}", text(&help.stderr));
-  assert!(text(&help.stdout).contains("pi-rs import-pi <pi-session.jsonl|session-dir>"));
+  assert!(text(&help.stdout).contains("rupi import-pi <pi-session.jsonl|session-dir>"));
 }
 
 #[test]
@@ -356,7 +356,7 @@ fn a_directory_imports_every_session_file_it_holds() {
   for id in [FIRST_ID, SECOND_ID] {
     assert!(
       layout
-        .session_path(&pi_rs_core::SessionId::from_string(id))
+        .session_path(&rupi_core::SessionId::from_string(id))
         .exists(),
       "{id} was not filed"
     );
@@ -398,7 +398,7 @@ fn a_file_that_fails_in_a_batch_is_named_and_the_rest_still_lands() {
   let layout = StateLayout::new(&state);
   assert!(
     layout
-      .session_path(&pi_rs_core::SessionId::from_string(FIRST_ID))
+      .session_path(&rupi_core::SessionId::from_string(FIRST_ID))
       .exists(),
     "the valid file next to the broken one must still land"
   );

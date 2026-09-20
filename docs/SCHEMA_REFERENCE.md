@@ -20,7 +20,7 @@ repository won and the mismatch is recorded in place.
 
   ```sh
   # <Variant> is the variant name, e.g. ToolCompleted
-  grep -rEn "AgentEvent::<Variant>\((pi_rs_core::)?<Variant> *\\{" --include=*.rs <stripped tree>
+  grep -rEn "AgentEvent::<Variant>\((rupi_core::)?<Variant> *\\{" --include=*.rs <stripped tree>
   ```
 
   `yes (file:line)` is one production construction site; **`none found`** means no
@@ -35,7 +35,7 @@ fixtures remain the final authority for fields and producer call sites.
 
 ## 1. Events
 
-Source of truth: `crates/pi-rs-core/src/event.rs`.
+Source of truth: `crates/rupi-core/src/event.rs`.
 
 ### 1.1 Envelope and sequencing contract
 
@@ -82,10 +82,10 @@ The sequencing contract, as the module states it (`event.rs:12-15`):
   timestamps, because clocks may step backwards."* (`ids.rs:79-80`)
 * The log, not the producer, assigns it:
   `let seq = EventSeq(self.last_seq.map(|seq| seq.0 + 1).unwrap_or(1));`
-  (`crates/pi-rs-store/src/journal.rs:105`), written into the envelope at
+  (`crates/rupi-store/src/journal.rs:105`), written into the envelope at
   `journal.rs:113` (`entry.envelope.meta.seq = Some(seq);`) and remembered at
   `journal.rs:125`. Sequence numbers therefore start at `1`.
-* `Store::emit` (`crates/pi-rs-store/src/store.rs:338`) returns that journal sequence and
+* `Store::emit` (`crates/rupi-store/src/store.rs:338`) returns that journal sequence and
   stamps it back into the caller's envelope, which is why `append_message` rejects an
   envelope with `seq == None` (`store.rs:387-393`, `let seq = envelope.meta.seq
   .ok_or_else(|| {`): a session line may only point at a real journal position.
@@ -97,7 +97,7 @@ The sequencing contract, as the module states it (`event.rs:12-15`):
 
 ### 1.2 `AgentEvent` variants
 
-Enumerated from `crates/pi-rs-core/src/event.rs`, including the unit variant
+Enumerated from `crates/rupi-core/src/event.rs`, including the unit variant
 `ContextSummary`, the current `AgentEvent` has 24 variants. Wire tags are the
 snake_case variant names (`event.rs`).
 
@@ -106,32 +106,32 @@ snake_case variant names (`event.rs`).
 Purpose: the session exists and which model owns the first epoch.
 Fields: `working_dir: String`, `model: ModelRef`, `capabilities: ModelCapabilities`,
 `resumed: bool` (`#[serde(default)]`).
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:520`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:520`)
 
 #### `user_message` — `AgentEvent::UserMessage` (`event.rs:173`), payload `event.rs:294`
 
 Purpose: a user message was accepted into canonical history.
 Fields: `text: String`, `attachments: u32` (`#[serde(default)]`).
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:408`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:408`)
 
 #### `model_request_started` — `AgentEvent::ModelRequestStarted` (`event.rs:178`), payload `event.rs:303`
 
 Purpose: a model request began, which is the boundary for partial output.
 Fields: `epoch: u32`, `model: ModelRef`, `message_count: u32`,
 `context_tokens_est: u64` (estimate, not a measurement), `tools_exposed: u32`.
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:643`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:643`)
 
 #### `reasoning_delta` — `AgentEvent::ReasoningDelta` (`event.rs:184`), payload `event.rs:314`
 
 Purpose: reasoning-like text arrived, with its provenance claim.
 Fields: `text: String`, `provenance: ReasoningProvenance`, `chunk_index: u32`.
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:1329`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:1329`)
 
 #### `assistant_delta` — `AgentEvent::AssistantDelta` (`event.rs:190`), payload `event.rs:321`
 
 Purpose: assistant prose arrived.
 Fields: `text: String`, `chunk_index: u32`.
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:1342`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:1342`)
 
 #### `model_request_completed` — `AgentEvent::ModelRequestCompleted` (`event.rs:195`), payload `event.rs:327`
 
@@ -140,21 +140,21 @@ Fields: `epoch: u32`, `model: ModelRef`, `finish_reason: Option<String>`,
 `input_tokens: Option<u64>`, `output_tokens: Option<u64>`, `duration_ms: u64`,
 `tool_calls: u32`, `reasoning_provenance: Option<ReasoningProvenance>` (all `Option`
 fields `#[serde(default, skip_serializing_if = "Option::is_none")]`).
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:695`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:695`)
 
 #### `model_retry` — `AgentEvent::ModelRetry` (`event.rs:200`), payload `event.rs:346`
 
 Purpose: the same request is being retried against the same model.
 Fields: `attempt: u32`, `max_attempts: u32`, `kind: ModelFailureKind`,
 `retry_after_ms: Option<u64>`, `will_failover: bool` (`#[serde(default)]`).
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:815`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:815`)
 
 #### `model_failover` — `AgentEvent::ModelFailover` (`event.rs:205`), payload `event.rs:358`
 
 Purpose: availability failure moved generation to the backup model.
 Fields: `from: ModelRef`, `to: ModelRef`, `kind: ModelFailureKind`,
 `gaps: Vec<CapabilityGap>` (`#[serde(default)]`), `compacted: bool` (`#[serde(default)]`).
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:867`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:867`)
 
 #### `model_epoch_started` — `AgentEvent::ModelEpochStarted` (`event.rs:211`), payload `event.rs:371`
 
@@ -162,20 +162,20 @@ Purpose: which model owned a span of generation, and what it was believed capabl
 that moment.
 Fields: `epoch: u32`, `model: ModelRef`, `reason: EpochReason`,
 `capabilities: ModelCapabilities`.
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:530`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:530`)
 
 #### `tool_requested` — `AgentEvent::ToolRequested` (`event.rs:216`), payload `event.rs:379`
 
 Purpose: the model asked for a tool call and arguments are fully decoded.
 Fields: `call_id: ToolCallId`, `name: String`, `arguments: serde_json::Value`,
 `read_only: bool` (`#[serde(default)]`).
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:1014`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:1014`)
 
 #### `tool_started` — `AgentEvent::ToolStarted` (`event.rs:221`), payload `event.rs:388`
 
 Purpose: execution began, so a later crash has an observed boundary.
 Fields: `call_id: ToolCallId`, `name: String`.
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:1110`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:1110`)
 
 #### `tool_completed` — `AgentEvent::ToolCompleted` (`event.rs:226`), payload `event.rs:394`
 
@@ -184,20 +184,20 @@ Fields: `call_id: ToolCallId`, `name: String`, `state: ToolExecutionState` (*"Al
 [`ToolExecutionState::Succeeded`]; kept explicit so that the journal states the claim
 instead of implying it."*), `duration_ms: u64`, `status: Option<i64>`, `reduced: bool`
 (`#[serde(default)]`), `blob: Option<BlobRef>`, `visible_bytes: u64`.
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:1175`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:1175`)
 
 #### `tool_failed` — `AgentEvent::ToolFailed` (`event.rs:231`), payload `event.rs:414`
 
 Purpose: the call completed with an observed failure.
 Fields: `call_id: ToolCallId`, `name: String`, `message: String`, `duration_ms: u64`,
 `status: Option<i64>`.
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:1023`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:1023`)
 
 #### `tool_unknown` — `AgentEvent::ToolUnknown` (`event.rs:237`), payload `event.rs:424`
 
 Purpose: completion could not be observed, which is not the same as failure.
 Fields: `call_id: ToolCallId`, `name: String`, `why: String`, `mutating: bool`.
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:1196`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:1196`)
 
 #### `external_context_retrieved` — `AgentEvent::ExternalContextRetrieved` (`event.rs:242`), payload `event.rs:435`
 
@@ -205,7 +205,7 @@ Purpose: external knowledge entered context, with citation and provenance.
 Fields: `source: ExternalContextSource`, `citation: Option<String>`, `bytes: u64`,
 `inline: bool`, and provider-owned `metadata: BTreeMap<String, String>`.
 Producer: `TurnLoop::run_turn_with_external_context`
-(`crates/pi-rs-runtime/src/turn.rs`) emits the event and records the associated
+(`crates/rupi-runtime/src/turn.rs`) emits the event and records the associated
 model-visible message; the session projection carries the typed
 `SessionMessage.external_context` reference for resume. The TUI renders the
 resource, citation, source metadata, byte count, and inline/reference state.
@@ -217,14 +217,14 @@ Fields: `reason: ReductionReason`, `original_bytes: u64`, `visible_bytes: u64`,
 optional `removed_messages`/`retained_messages` history counts, optional `blob: BlobRef`,
 optional `recovery_ref: String`, and optional `tool_call_id: ToolCallId`. Nonzero
 `removed_messages` is also projected as a session `reduction` record.
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:921`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:921`)
 
 #### `context_compaction_started` — `AgentEvent::ContextCompactionStarted` (`event.rs:253`), payload `event.rs:458`
 
 Purpose: compaction began at a safe boundary.
 Fields: `level: ContextLevel`, `reason: String`.
 Producer: `TurnLoop::compact_range`/phase paths. Consumed at
-`crates/pi-rs-tui/src/transcript.rs:419`. See §1.4.
+`crates/rupi-tui/src/transcript.rs:419`. See §1.4.
 
 #### `context_compaction_completed` — `AgentEvent::ContextCompactionCompleted` (`event.rs:258`), payload `event.rs:464`
 
@@ -233,7 +233,7 @@ Fields: `level: ContextLevel`, `removed_messages: u32`, `retained_messages: u32`
 `context_epoch: u32`. L1/L2 retained counts exclude a protected checkpoint
 capsule; L3 checkpoint counts include that capsule.
 Producer: `TurnLoop::compact_range`/checkpoint paths; consumed at
-`crates/pi-rs-tui/src/transcript.rs:426`. See §1.4.
+`crates/rupi-tui/src/transcript.rs:426`. See §1.4.
 
 #### `context_summary` — `AgentEvent::ContextSummary` (`event.rs`)
 
@@ -255,27 +255,27 @@ Fields: `checkpoint_id: CheckpointId`, `capsule_version: u32`,
 `summarized_events: u64`, `path: String`, `context_epoch: u32` (optional for
 legacy traces).
 Producer: `TurnLoop::checkpoint`/`checkpoint_turn_prefix`. Consumed at
-`crates/pi-rs-tui/src/transcript.rs:445`; the store
+`crates/rupi-tui/src/transcript.rs:445`; the store
 documents that the caller still owes the event
-(`crates/pi-rs-store/src/store.rs:409`). See §1.4.
+(`crates/rupi-store/src/store.rs:409`). See §1.4.
 
 #### `turn_completed` — `AgentEvent::TurnCompleted` (`event.rs:268`), payload `event.rs:480`
 
 Purpose: a turn ended and how.
 Fields: `status: TurnStatus`, `duration_ms: u64`.
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:601`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:601`)
 
 #### `diagnostic` — `AgentEvent::Diagnostic` (`event.rs:275`), payload `event.rs:486`
 
 Purpose: an operator-visible condition that is not a domain event.
 Fields: `level: DiagnosticLevel`, `message: String`.
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:582`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:582`)
 
 #### `session_ended` — `AgentEvent::SessionEnded` (`event.rs:280`), payload `event.rs:492`
 
 Purpose: the session ended.
 Fields: `reason: SessionEndReason`.
-Producers: yes (`crates/pi-rs-runtime/src/turn.rs:493`)
+Producers: yes (`crates/rupi-runtime/src/turn.rs:493`)
 
 ### 1.3 Supporting enums carried by payloads
 
@@ -303,8 +303,8 @@ recognized as a checkpoint lifecycle.
 
 ## 2. Session records
 
-Source of truth: `crates/pi-rs-core/src/session.rs` (schema) and
-`crates/pi-rs-store/src/session_log.rs` plus `crates/pi-rs-store/src/store.rs` (the write
+Source of truth: `crates/rupi-core/src/session.rs` (schema) and
+`crates/rupi-store/src/session_log.rs` plus `crates/rupi-store/src/store.rs` (the write
 path).
 
 ### 2.1 Spec correction: `session_record_kind()` is not found
@@ -328,13 +328,13 @@ commit that wrote the slice spec — and in no file at any revision. The name wa
 introduced, so it was never removed or renamed. It has **not** been recreated, renamed to
 something else, or "regenerated" here. Root `src/` is the CLI binary (`cli.rs`,
 `main.rs`, `run.rs`, `trace.rs`); the session schema lives at
-`crates/pi-rs-core/src/session.rs`. §2.2 documents what the spec wanted — the discriminant
+`crates/rupi-core/src/session.rs`. §2.2 documents what the spec wanted — the discriminant
 mapping — using the code that actually produces it.
 
 ### 2.2 `SessionRecord` and its discriminant mapping
 
 `SessionRecord` is documented as one line of `sessions/<id>.jsonl`
-(`crates/pi-rs-core/src/session.rs`) and declared in `session.rs`:
+(`crates/rupi-core/src/session.rs`) and declared in `session.rs`:
 
 ```rust
 /// One line of the semantic session JSONL log.
@@ -360,16 +360,16 @@ Enumerated with:
 ```sh
 grep -n 'serde(rename_all = "snake_case", tag = "type")\|pub enum SessionRecord\
 \|^  Header\|^  Message\|^  Epoch\|^  Compaction\|^  CheckpointBarrier' \
-  crates/pi-rs-core/src/session.rs
+  crates/rupi-core/src/session.rs
 ```
 
 The `"header"` / `"message"` / `"epoch"` / `"compaction"` / `"checkpoint_barrier"` strings
 above are derived from the attribute at `session.rs:31`; **no fixture pins them.**
 `grep -rn "checkpoint_barrier" . --exclude-dir=.git` returns only
-`crates/pi-rs-core/src/session.rs:200`, which is the test function name
+`crates/rupi-core/src/session.rs:200`, which is the test function name
 `checkpoint_barrier_carries_the_capsule`, not a wire string. The only test that pins tag
 strings for an internally-tagged union is the event-side one at
-`crates/pi-rs-runtime/src/turn.rs:1926-1934` (`"session_started"`,
+`crates/rupi-runtime/src/turn.rs:1926-1934` (`"session_started"`,
 `"model_epoch_started"`, `"user_message"`, `"model_request_started"`,
 `"model_request_completed"`, `"turn_completed"`).
 
@@ -378,7 +378,7 @@ Version 1 remains readable for files using only its original record variants;
 version-1 files containing the version-2 `reduction` record are rejected rather
 than partially read or silently shortened. Version 2 remains readable with a
 zero/default checkpoint context epoch. A file claiming a newer version is also
-refused (`crates/pi-rs-store/src/session_log.rs`).
+refused (`crates/rupi-store/src/session_log.rs`).
 
 ### 2.3 Record payload fields, quoted from `session.rs`
 
@@ -433,9 +433,9 @@ capsule is "duplicated here so that resume needs one read" (`session.rs:110-111`
 `messages: u32`, `last_model: Option<ModelRef>`, `last_turn_preview: Option<String>`,
 `closed: bool` — built "from headers plus a tail read, never from full hydration: session
 metadata lookup is a startup-path concern" (`session.rs:117-118`). Produced by
-`SessionLog::summary` (`crates/pi-rs-store/src/session_log.rs:164`) and
+`SessionLog::summary` (`crates/rupi-store/src/session_log.rs:164`) and
 `SessionLog::summary_report` (`session_log.rs:172`), exposed through
-`Store::summaries` (`crates/pi-rs-store/src/store.rs:217`).
+`Store::summaries` (`crates/rupi-store/src/store.rs:217`).
 
 ### 2.4 The JSONL write path
 
@@ -465,14 +465,14 @@ retention takes the same lease nonblocking before deleting a victim.
   doc states why: "Attribution is not decoration: without the epoch and model that produced
   a message, a session cannot say which model is responsible for a claim after a failover."
   (`store.rs:373-375`). The runtime's only production caller is
-  `crates/pi-rs-runtime/src/store_trace.rs:52`.
+  `crates/rupi-runtime/src/store_trace.rs:52`.
 * `Store::checkpoint` (`store.rs:415`) writes the capsule file atomically —
   `path.with_extension("json.tmp")` then `std::fs::rename` (`store.rs:424-426`) — and only
   then appends the barrier (`store.rs:434-436`).
-* Producers, same rule as §1: `Header` yes (`crates/pi-rs-store/src/session_log.rs:66`),
-  `Message` yes (`crates/pi-rs-store/src/store.rs:403`), `CheckpointBarrier` yes
+* Producers, same rule as §1: `Header` yes (`crates/rupi-store/src/session_log.rs:66`),
+  `Message` yes (`crates/rupi-store/src/store.rs:403`), `CheckpointBarrier` yes
   (`store.rs:436`); `Epoch`, `Compaction`, and `Reduction` are emitted by `StoreTrace`
-  (`crates/pi-rs-runtime/src/store_trace.rs:48-108`) and recovered with their canonical
+  (`crates/rupi-runtime/src/store_trace.rs:48-108`) and recovered with their canonical
   joins. Legacy low-level callers may still append only the older record variants.
 
 ### 2.5 What the checkpoint barrier is for
@@ -516,7 +516,7 @@ lifecycle validation. The resumed model state does not re-expand the pre-barrier
 
 ## 3. Provenance
 
-`ReasoningProvenance` — `crates/pi-rs-core/src/provenance.rs:25`, `#[serde(rename_all = "snake_case")]`
+`ReasoningProvenance` — `crates/rupi-core/src/provenance.rs:25`, `#[serde(rename_all = "snake_case")]`
 at line 24, `Copy + Eq + Hash`, `Serialize + Deserialize`. `as_str()` (line 38) is the stable machine
 label used in trace, exports, and UI tags; `label()` (line 51) is the human label. The two are
 deliberately different words for the same variant, and `label()`'s doc comment says why: *"intentionally
@@ -524,7 +524,7 @@ different from each other so that a reader cannot mistake inference for emitted 
 
 | Variant | `as_str()` | `label()` | Producers |
 |---|---|---|---|
-| `Native` | `native` | `reasoning` | yes — `crates/pi-rs-provider/src/decode.rs:100`, on a decoded reasoning delta |
+| `Native` | `native` | `reasoning` | yes — `crates/rupi-provider/src/decode.rs:100`, on a decoded reasoning delta |
 | `ProviderSummary` | `provider_summary` | `provider summary` | yes — provider decode when `capabilities.exposed_reasoning` declares a provider summary |
 | `Declared` | `declared` | `declared rationale` | yes — provider decode when the endpoint declares `declared` exposure |
 | `Reconstructed` | `reconstructed` | `reconstructed rationale` | no automatic producer; reserved for evidence-scoped analysis and covered as a typed/rendered form |

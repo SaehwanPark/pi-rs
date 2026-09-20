@@ -1,15 +1,15 @@
 # Slice: a compact status line, as a pure projection
 
-`pi-rs-tui` has a `Role::Status` in its palette and no module that produces one. This slice adds
+`rupi-tui` has a `Role::Status` in its palette and no module that produces one. This slice adds
 that module: a snapshot in, a `RenderLine` out. No terminal, no runtime, no state.
 
 ## Existing API to build on (do not reinvent)
-`crates/pi-rs-tui/src/line.rs`: `RenderLine::new()`, `push(text, role)`, `width()`, `plain()`,
+`crates/rupi-tui/src/line.rs`: `RenderLine::new()`, `push(text, role)`, `width()`, `plain()`,
 `render(palette)`, `wrapped(width, NarrowDecoration)`.
-`crates/pi-rs-tui/src/style.rs`: roles already exist — `Role::Meta` ("machine facts that are not
+`crates/rupi-tui/src/style.rs`: roles already exist — `Role::Meta` ("machine facts that are not
 content: counts, durations, ids"), `Role::Status` ("the status line"), `Role::Muted` ("quiet
 context that should recede"), `Role::Warning`. Use these; do not add a role.
-`crates/pi-rs-tui/src/width.rs`: `MIN_COLUMN`, `display_width`, `fits`, `truncate`.
+`crates/rupi-tui/src/width.rs`: `MIN_COLUMN`, `display_width`, `fits`, `truncate`.
 
 ## Contract
 ```rust
@@ -32,9 +32,9 @@ pub fn line(status: &Status<'_>) -> RenderLine
   this module as the turn-status surface.
 
 ## Constraints
-- `pi-rs-tui` imports nothing from runtime/store/core-provider; it may depend on `pi-rs-core` only.
+- `rupi-tui` imports nothing from runtime/store/core-provider; it may depend on `rupi-core` only.
 - Pure and deterministic: same snapshot, same line. No clock, no env, no IO.
-- New file `crates/pi-rs-tui/src/statusline.rs`, `pub mod statusline;` plus re-exports at the crate
+- New file `crates/rupi-tui/src/statusline.rs`, `pub mod statusline;` plus re-exports at the crate
   root, matching how `editor`/`keys` are exported in `lib.rs`.
 - 2-space indent, 100 columns, edition 2024.
 
@@ -45,7 +45,7 @@ assigned (assert via the segments, not via ANSI) · `plain()` of the narrowest c
 
 ## Verify (paste real numbers)
 `cargo fmt --all --check` · `cargo clippy --workspace --all-targets -- -D warnings` ·
-`cargo test -p pi-rs-tui` and `cargo test --workspace` · `bash bench/startup.sh`
+`cargo test -p rupi-tui` and `cargo test --workspace` · `bash bench/startup.sh`
 
 Commit `--allow-empty -m "chore: start"` first, then commit after every step, always compiling.
 Do not merge, rebase, push, open PRs, or touch other branches.

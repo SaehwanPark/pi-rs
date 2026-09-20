@@ -19,10 +19,10 @@ use std::{
 
 mod fake_provider;
 
-use pi_rs_core::{
+use rupi_core::{
   AgentEvent, ModelCapabilities, ModelEndpoint, ModelRef, ReasoningExposure, RuntimeConfig,
 };
-use pi_rs_store::{StateLayout, TraceJournal};
+use rupi_store::{StateLayout, TraceJournal};
 use tempfile::TempDir;
 
 use fake_provider::{FakeServer, text_response, tool_call};
@@ -426,12 +426,12 @@ fn write_config(root: &Path, base_url: &str, auto_approve_mutating: bool) -> Pat
 }
 
 fn run(config: &Path, cwd: &Path, prompt: &str) -> std::process::Output {
-  Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+  Command::new(env!("CARGO_BIN_EXE_rupi"))
     .args(["run", "--config"])
     .arg(config)
     .arg("--cwd")
     .arg(cwd)
     .args(["--prompt", prompt])
     .output()
-    .expect("run pi-rs")
+    .expect("run rupi")
 }

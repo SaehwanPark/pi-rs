@@ -1,13 +1,13 @@
 # CLI Command Reference
 
-Comprehensive reference of all CLI commands and options available in `pi-rs`.
+Comprehensive reference of all CLI commands and options available in `rupi`.
 
 ---
 
 ## Global Synopsis
 
 ```text
-Usage: pi-rs <command> [options]
+Usage: rupi <command> [options]
 ```
 
 Global Options:
@@ -21,7 +21,7 @@ Global Options:
 Run one durable coding-agent turn in one shot.
 
 ```bash
-pi-rs run --config <file> --cwd <workspace> --prompt <text> [options]
+rupi run --config <file> --cwd <workspace> --prompt <text> [options]
 ```
 
 Flags:
@@ -37,7 +37,7 @@ Flags:
 Start an interactive terminal session holding context across multiple turns.
 
 ```bash
-pi-rs interactive --config <file> [--cwd <workspace>]
+rupi interactive --config <file> [--cwd <workspace>]
 ```
 
 ---
@@ -46,7 +46,7 @@ pi-rs interactive --config <file> [--cwd <workspace>]
 Read a session's canonical event log out of the configured store in chronological order.
 
 ```bash
-pi-rs trace --config <file> [session-id] [options]
+rupi trace --config <file> [session-id] [options]
 ```
 
 The session id may be omitted to read the newest session. Additional selectors include
@@ -59,7 +59,7 @@ The session id may be omitted to read the newest session. Additional selectors i
 Inspect a trace or session JSONL file without starting a provider or executing tools.
 
 ```bash
-pi-rs replay <trace-or-session.jsonl> [options]
+rupi replay <trace-or-session.jsonl> [options]
 ```
 
 Use `--until`, `--tools`, `--reasoning`, `--timing`, `--context-at`, `--branch`,
@@ -71,7 +71,7 @@ Use `--until`, `--tools`, `--reasoning`, `--timing`, `--context-at`, `--branch`,
 List skills discovered across user and project paths that would be presented to a model.
 
 ```bash
-pi-rs skills [--project] [--trust-store <dir>]
+rupi skills [--project] [--trust-store <dir>]
 ```
 
 ---
@@ -80,7 +80,7 @@ pi-rs skills [--project] [--trust-store <dir>]
 List prompt templates discovered across configured paths.
 
 ```bash
-pi-rs prompts [--project] [--trust-store <dir>] [--prompt-template <path>] [--no-prompt-templates]
+rupi prompts [--project] [--trust-store <dir>] [--prompt-template <path>] [--no-prompt-templates]
 ```
 
 ---
@@ -90,7 +90,7 @@ Expand a single prompt template with positional parameters. This command only pr
 text; it does not send a model request.
 
 ```bash
-pi-rs prompt [--project] [--trust-store <dir>] <name> [arg1] [arg2] ...
+rupi prompt [--project] [--trust-store <dir>] <name> [arg1] [arg2] ...
 ```
 
 ---
@@ -99,8 +99,8 @@ pi-rs prompt [--project] [--trust-store <dir>] <name> [arg1] [arg2] ...
 List discovered Pi packages, inspect one package, or install an explicit local package.
 
 ```bash
-pi-rs packages [--project] [--trust-store <dir>] [--show <name>]
-pi-rs packages install [--project] <local-directory>
+rupi packages [--project] [--trust-store <dir>] [--show <name>]
+rupi packages install [--project] <local-directory>
 ```
 
 ---
@@ -110,10 +110,10 @@ Record or inspect explicit project-level trust decisions. The store is supplied 
 caller and is never inferred from the project being trusted.
 
 ```bash
-pi-rs trust --store <dir> --list
-pi-rs trust --store <dir> --project <path> --grant
-pi-rs trust --store <dir> --project <path> --deny
-pi-rs trust --store <dir> --project <path> --clear
+rupi trust --store <dir> --list
+rupi trust --store <dir> --project <path> --grant
+rupi trust --store <dir> --project <path> --deny
+rupi trust --store <dir> --project <path> --clear
 ```
 
 ---
@@ -122,25 +122,25 @@ pi-rs trust --store <dir> --project <path> --clear
 Audit an artifact or directory for Pi behavioral compatibility.
 
 ```bash
-pi-rs compat <path>
+rupi compat <path>
 ```
 
 ---
 
 ### `import`
 Plan or write an upstream Pi session JSONL file (or a directory of files) into the
-native `pi-rs` store. Nothing is executed; use `--write` to persist the import.
+native `rupi` store. Nothing is executed; use `--write` to persist the import.
 
 ```bash
-pi-rs import-pi <session-path> [--config <file> | --store <dir>] [--write]
+rupi import-pi <session-path> [--config <file> | --store <dir>] [--write]
 ```
 
 ---
 
 ### `export`
-Export a `pi-rs` session to an upstream Pi-compatible session JSONL format. Dropped
+Export a `rupi` session to an upstream Pi-compatible session JSONL format. Dropped
 metadata is reported on stderr rather than silently relabelled.
 
 ```bash
-pi-rs export <session-id> --config <file> [--out <file>]
+rupi export <session-id> --config <file> [--out <file>]
 ```

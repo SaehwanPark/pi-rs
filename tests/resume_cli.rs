@@ -1,4 +1,4 @@
-//! `pi-rs run --resume`: the flag surface, the paths that refuse to run, and a turn
+//! `rupi run --resume`: the flag surface, the paths that refuse to run, and a turn
 //! appended to a recorded session.
 //!
 //! These tests drive the binary and check what the command leaves behind, because the
@@ -23,11 +23,11 @@ use std::{
   time::{Duration, Instant},
 };
 
-use pi_rs_core::{
+use rupi_core::{
   AgentEvent, EpochReason, ModelCapabilities, ModelEndpoint, ModelRef, ReasoningExposure,
   RuntimeConfig, SessionHeader, SessionId, SessionRecord, session::SESSION_SCHEMA_VERSION,
 };
-use pi_rs_store::{StateLayout, TraceJournal};
+use rupi_store::{StateLayout, TraceJournal};
 use tempfile::TempDir;
 
 /// A session id shape the store would list, used as the name of a session that exists.
@@ -103,7 +103,7 @@ fn run(config: &Path, cwd: &Path, extra: &[&str]) -> Output {
 }
 
 fn run_prompt(config: &Path, cwd: &Path, prompt: &str, extra: &[&str]) -> Output {
-  Command::new(env!("CARGO_BIN_EXE_pi-rs"))
+  Command::new(env!("CARGO_BIN_EXE_rupi"))
     .args(["run", "--config"])
     .arg(config)
     .arg("--cwd")
@@ -112,7 +112,7 @@ fn run_prompt(config: &Path, cwd: &Path, prompt: &str, extra: &[&str]) -> Output
     .arg(prompt)
     .args(extra)
     .output()
-    .expect("run pi-rs")
+    .expect("run rupi")
 }
 
 fn stderr(out: &Output) -> String {
@@ -301,7 +301,7 @@ fn a_persisted_active_model_missing_from_config_is_refused_before_request() {
     branched_from_event: None,
     imported_from: None,
   });
-  let epoch = SessionRecord::Epoch(pi_rs_core::SessionEpochRecord {
+  let epoch = SessionRecord::Epoch(rupi_core::SessionEpochRecord {
     epoch: 1,
     model: ModelRef::new("fake", "removed-backup"),
     reason: EpochReason::AutomaticFailover,
@@ -353,7 +353,7 @@ fn a_recorded_session_gains_a_second_turn_under_the_same_id() {
   assert_eq!(recorded.len(), 1, "the first turn creates one session");
   let session_id = &recorded[0];
 
-  // The second turn names that session by a prefix, exactly as `pi-rs trace` would.
+  // The second turn names that session by a prefix, exactly as `rupi trace` would.
   let second = FakeServer::answer(vec![text_response("the second answer")]);
   let config = write_config_at(temp.path(), &second.base_url());
   let out = run_prompt(
@@ -429,7 +429,7 @@ fn a_session_whose_log_cannot_be_read_is_refused_without_creating_a_session() {
   let session = record_session(&state, RECORDED);
   let before = fs::read(&session).expect("read the session file");
 
-  // A prefix names the session, exactly as it does for `pi-rs trace`.
+  // A prefix names the session, exactly as it does for `rupi trace`.
   let out = run(&config, temp.path(), &["--resume", "resume-fixture"]);
   assert!(!out.status.success(), "stderr: {}", stderr(&out));
   let message = stderr(&out);

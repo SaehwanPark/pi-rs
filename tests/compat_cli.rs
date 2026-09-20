@@ -1,9 +1,9 @@
-//! `pi-rs compat` CLI end-to-end integration tests.
+//! `rupi compat` CLI end-to-end integration tests.
 
 use std::{path::Path, process::Command};
 
 fn binary() -> &'static str {
-  env!("CARGO_BIN_EXE_pi-rs")
+  env!("CARGO_BIN_EXE_rupi")
 }
 
 fn fixture_home() -> &'static str {
@@ -22,7 +22,7 @@ fn run(args: &[&str], home: &str, cwd: &str) -> (String, String, bool) {
     .current_dir(Path::new(cwd))
     .env("NO_COLOR", "1")
     .output()
-    .expect("run pi-rs");
+    .expect("run rupi");
   (
     String::from_utf8_lossy(&output.stdout).into_owned(),
     String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -150,7 +150,7 @@ fn compat_inspect_json_output() {
 fn compat_help_flag() {
   let (stdout, _stderr, success) = run(&["compat", "--help"], fixture_home(), fixture_project());
   assert!(success, "compat --help should succeed");
-  assert!(stdout.contains("Usage: pi-rs compat"));
+  assert!(stdout.contains("Usage: rupi compat"));
   assert!(stdout.contains("--json"));
   assert!(stdout.contains("--project"));
 }
@@ -160,5 +160,5 @@ fn compat_missing_target_fails_with_helpful_error() {
   let (_stdout, stderr, success) = run(&["compat"], fixture_home(), fixture_project());
   assert!(!success, "compat without target should fail");
   assert!(stderr.contains("compat needs a target to inspect"));
-  assert!(stderr.contains("Usage: pi-rs compat"));
+  assert!(stderr.contains("Usage: rupi compat"));
 }
