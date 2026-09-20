@@ -277,6 +277,27 @@ covers ordered fan-in, selected output references, retry/blocked state, lease
 reclaim, and bounded trace/replay evidence. The checked-in fixture passes after
 tester repair; the case reports do not claim model-authored completion.
 
+## Live example: Lease Fence
+
+[Lease Fence](https://saehwanpark.github.io/rupi/getting-started/lease-fence.html)
+is an eighth dependency-free Python example: an authenticated HTTP/SQLite
+pipeline worker with ordered barrier fan-in, private per-claim fencing tokens,
+stale-worker rejection, retryable and terminal failures, leases, and a
+direct-argv sink. Verify its project suite and independent fresh-process oracle:
+
+```bash
+cd docs/cases/2026-09-20-lease-fence/project
+python -W error::ResourceWarning -m unittest discover -s tests -p "test_*.py" -v
+cd ..
+python -W error::ResourceWarning -m unittest discover -s acceptance -p "test_*.py" -v
+```
+
+The [Lease Fence walkthrough](https://saehwanpark.github.io/rupi/getting-started/lease-fence.html)
+covers stale completion after lease reclaim, token-conditional finalization,
+ordered fan-in, and bounded trace/replay evidence. The checked-in fixture
+passes after tester repair; the case reports do not claim model-authored
+completion.
+
 ## Commands
 
 | Command | Purpose |
