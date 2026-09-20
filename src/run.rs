@@ -227,6 +227,13 @@ pub(crate) fn open_session(
   .with_working_dir(canonical_cwd)
   .with_thinking(config.thinking)
   .with_max_requests(config.limits.max_model_requests_per_turn as usize)
+  .with_progress_boundary(
+    config
+      .limits
+      .max_model_requests_without_progress
+      .map(|limit| limit as usize),
+    config.limits.progress_tool_names.clone(),
+  )
   .with_compaction_strategy(rupi_runtime::CompactionStrategy::Summarize);
   if !skills_prompt.is_empty() {
     // The skill-control prompt is the whole system prompt rupi speaks today, and

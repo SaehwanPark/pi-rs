@@ -8,6 +8,7 @@
 - [Live example: Test Ledger](getting-started/test-ledger.md)
 - [Live example: Read Queue](getting-started/read-queue.md)
 - [Live example: Event Outbox](getting-started/event-outbox.md)
+- [Live example: Webhook Inbox](getting-started/webhook-inbox.md)
 
 # User Guide
 - [Interactive TUI](user-guide/interactive-tui.md)

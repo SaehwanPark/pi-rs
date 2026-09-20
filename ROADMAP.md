@@ -783,6 +783,14 @@ Do not begin until stable baselines exist.
       and includes recovery in the request budget. Final live evidence recorded
       one typed timeout with no retry/failover, six project tests, the independent
       HTTP/restart/sink oracle, trace, and replay green (PR #110, 2026-09-20).
+- [!] Validate the next live project, Webhook Inbox: a dependency-free Python
+      HMAC-authenticated HTTP/SQLite inbox with expiring delivery leases,
+      crash reclaim, and a direct-argv sink worker. The checked-in project suite
+      and independent fresh-process oracle pass after bounded tester repair, and
+      the opt-in one-shot progress boundary is verified. The final fresh-model
+      retries still produced only partial files and failed both acceptance
+      checks, so the model-authoring stopgate remains active; see PR #111 and
+      `docs/cases/2026-09-20-webhook-inbox/BUDGET_RETRY_REPORT.md` (2026-09-20).
 
 ### P2 — Later / deliberately deferred
 

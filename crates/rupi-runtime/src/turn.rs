@@ -403,6 +403,15 @@ pub struct TurnLoop<'a> {
   working_dir: String,
   thinking: ThinkingLevel,
   max_requests: usize,
+  /// Optional boundary for coding turns that must make a named kind of
+  /// progress instead of spending the request budget on inspection alone.
+  progress_request_limit: Option<usize>,
+  /// Explicit progress tools, or an empty list meaning every permitted
+  /// mutating tool when the boundary is active.
+  progress_tool_names: Vec<String>,
+  progress_requests_without_progress: usize,
+  progress_boundary_active: bool,
+  progress_boundary_used: bool,
   /// Model requests spent by the current turn, retries and takeovers included.
   ///
   /// Counted where requests are issued rather than where rounds are driven, so the
@@ -484,6 +493,11 @@ impl<'a> TurnLoop<'a> {
       working_dir: String::new(),
       thinking: ThinkingLevel::default(),
       max_requests: MAX_MODEL_REQUESTS_PER_TURN,
+      progress_request_limit: None,
+      progress_tool_names: Vec::new(),
+      progress_requests_without_progress: 0,
+      progress_boundary_active: false,
+      progress_boundary_used: false,
       requests: AtomicUsize::new(0),
       tools_enabled: true,
       session_started: false,
@@ -582,6 +596,22 @@ impl<'a> TurnLoop<'a> {
     self.max_requests = max
       .max(1)
       .min(MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN as usize);
+    self
+  }
+
+  /// Require a configured kind of tool progress after a bounded number of
+  /// tool-bearing requests without it. While active, the next provider request
+  /// exposes only the named tools; an empty name list exposes all permitted
+  /// mutating tools. A successful configured progress tool satisfies the
+  /// boundary for the rest of that turn. The boundary is opt-in because
+  /// read-only turns are valid.
+  pub fn with_progress_boundary(
+    mut self,
+    max_requests_without_progress: Option<usize>,
+    progress_tool_names: Vec<String>,
+  ) -> Self {
+    self.progress_request_limit = max_requests_without_progress.filter(|limit| *limit > 0);
+    self.progress_tool_names = progress_tool_names;
     self
   }
 
@@ -997,6 +1027,9 @@ impl<'a> TurnLoop<'a> {
     let clock = Instant::now();
     let mut report = TurnReport::new(turn_id.clone(), self.epoch_index());
     self.requests.store(0, Ordering::SeqCst);
+    self.progress_requests_without_progress = 0;
+    self.progress_boundary_active = false;
+    self.progress_boundary_used = false;
     // Recovery may rewrite only the history that predates this turn. Keep the
     // boundary local so one turn's emergency state cannot leak into the next.
     let mut turn_history_start = self.messages.len();
@@ -1139,13 +1172,14 @@ impl<'a> TurnLoop<'a> {
         .tool_calls
         .checked_add(tool_calls)
         .ok_or_else(|| TurnError::Sink("turn tool-call count is exhausted".into()))?;
-      self.execute_calls(
+      let progress_succeeded = self.execute_calls(
         turn_id.clone(),
         assistant_event_id,
         &calls,
         cancel,
         progress,
       )?;
+      self.observe_progress(&turn_id, progress_succeeded)?;
     }
 
     if self.max_requests > 1 && self.requests.load(Ordering::SeqCst) < self.max_requests {
@@ -2648,7 +2682,12 @@ impl<'a> TurnLoop<'a> {
   fn assemble_request(&self, messages: Vec<Message>) -> ModelRequest {
     let capabilities = self.provider().capabilities();
     let tools = if self.tools_enabled && capabilities.tools {
-      self.tools.specs()
+      self
+        .tools
+        .specs()
+        .into_iter()
+        .filter(|spec| self.progress_tool_is_exposed(&spec.name))
+        .collect()
     } else {
       Vec::new()
     };
@@ -2659,6 +2698,108 @@ impl<'a> TurnLoop<'a> {
       request = request.with_system(system);
     }
     request
+  }
+
+  /// Whether a tool remains available after the opt-in progress boundary has
+  /// activated. The registry remains the authority for risk metadata; the
+  /// allowlist only narrows it and never turns a read-only tool into progress.
+  fn progress_tool_is_exposed(&self, name: &str) -> bool {
+    if !self.progress_boundary_active {
+      return true;
+    }
+    let Some(metadata) = self.tools.metadata_for(name) else {
+      return false;
+    };
+    if metadata.read_only {
+      return false;
+    }
+    self.progress_tool_names.is_empty()
+      || self
+        .progress_tool_names
+        .iter()
+        .any(|candidate| candidate == name)
+  }
+
+  /// A requested tool counts as progress only when it is both permitted and
+  /// classified as mutating. This records an attempted boundary crossing; the
+  /// existing tool lifecycle still decides whether its side effect is
+  /// Succeeded, Failed, or Unknown.
+  fn call_makes_progress(&self, call: &ToolCallBlock) -> bool {
+    let Some(metadata) = self.tools.metadata_for(&call.name) else {
+      return false;
+    };
+    !metadata.read_only
+      && (self.progress_tool_names.is_empty()
+        || self
+          .progress_tool_names
+          .iter()
+          .any(|candidate| candidate == &call.name))
+  }
+
+  /// Record a no-progress request and, at the configured threshold, add a
+  /// durable model-visible nudge before narrowing the following request.
+  fn observe_progress(
+    &mut self,
+    turn_id: &TurnId,
+    progress_succeeded: bool,
+  ) -> Result<(), TurnError> {
+    let Some(limit) = self.progress_request_limit else {
+      return Ok(());
+    };
+    if progress_succeeded {
+      self.progress_requests_without_progress = 0;
+      self.progress_boundary_active = false;
+      self.progress_boundary_used = true;
+      return Ok(());
+    }
+    if self.progress_boundary_used {
+      return Ok(());
+    }
+    self.progress_requests_without_progress =
+      self.progress_requests_without_progress.saturating_add(1);
+    if self.progress_requests_without_progress >= limit && !self.progress_boundary_active {
+      self.progress_boundary_active = true;
+      self.append_progress_instruction(turn_id)?;
+      let tools = if self.progress_tool_names.is_empty() {
+        "permitted mutating tools".to_string()
+      } else {
+        self.progress_tool_names.join(", ")
+      };
+      self.diagnostic(
+        Some(turn_id.clone()),
+        DiagnosticLevel::Info,
+        format!(
+          "progress boundary active after {} model request(s) without a configured progress tool; next request exposes {tools}",
+          self.progress_requests_without_progress
+        ),
+      )?;
+    }
+    Ok(())
+  }
+
+  /// Put the boundary in the same model-visible history path as the existing
+  /// request-budget finalization instruction. It is runtime-owned guidance, not
+  /// a claim that the user wrote these words.
+  fn append_progress_instruction(&mut self, turn_id: &TurnId) -> Result<(), TurnError> {
+    let tools = if self.progress_tool_names.is_empty() {
+      "a permitted mutating tool".to_string()
+    } else {
+      self.progress_tool_names.join(", ")
+    };
+    let text = format!(
+      "Runtime progress boundary: this implementation turn has spent the configured inspection budget without calling a progress tool. In your next response, call one of {tools} to make the requested change. Do not spend another request reading, probing, or planning; the turn remains incomplete until the change is attempted."
+    );
+    let message = Message::user(text.clone());
+    let envelope = self.emit_message(
+      Some(turn_id.clone()),
+      AgentEvent::UserMessage(UserMessage {
+        text,
+        attachments: 0,
+      }),
+      &message,
+    )?;
+    self.push_message(message, envelope.meta.seq);
+    Ok(())
   }
 
   /// Build the model request, consulting the context policy first.
@@ -2874,7 +3015,8 @@ impl<'a> TurnLoop<'a> {
     calls: &[ToolCallBlock],
     cancel: &CancelToken,
     progress: &mut dyn TurnProgress,
-  ) -> Result<(), TurnError> {
+  ) -> Result<bool, TurnError> {
+    let mut progress_succeeded = false;
     for call in calls {
       let metadata = self.tools.metadata_for(&call.name);
       let read_only = metadata
@@ -2971,13 +3113,16 @@ impl<'a> TurnLoop<'a> {
         read_only,
         executed.2.or(Some(requested.meta.event_id.clone())),
       )?;
+      if self.call_makes_progress(call) && executed.0.state == ToolExecutionState::Succeeded {
+        progress_succeeded = true;
+      }
       progress.on_tool_finished(call, &executed.0);
       self.push_message(
         Message::new(Role::Tool, vec![ContentBlock::ToolResult(block)]),
         seq,
       );
     }
-    Ok(())
+    Ok(progress_succeeded)
   }
 
   /// Turn one executed call into its session block and its terminal event.
@@ -3787,6 +3932,34 @@ mod tests {
       progress.emit(&ToolChunk::new("working"));
       self.0.lock().unwrap().push(request.arguments.clone());
       Ok(ToolOutcome::succeeded("noted"))
+    }
+  }
+
+  /// A tool that represents the requested mutation for the progress-boundary
+  /// test without touching the host filesystem.
+  #[derive(Clone)]
+  struct MutatingSpy {
+    seen: Arc<Mutex<Vec<serde_json::Value>>>,
+    outcome: ToolOutcome,
+  }
+
+  impl Tool for MutatingSpy {
+    fn metadata(&self) -> ToolMetadata {
+      ToolMetadata::mutating("write_probe", "records a requested mutation", true)
+    }
+
+    fn arguments_schema(&self) -> serde_json::Value {
+      serde_json::json!({"type":"object"})
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn execute(
+      &self,
+      request: &ToolRequest,
+      _progress: &mut dyn rupi_core::ToolProgress,
+    ) -> Result<ToolOutcome, rupi_core::ToolError> {
+      self.seen.lock().unwrap().push(request.arguments.clone());
+      Ok(self.outcome.clone())
     }
   }
 
@@ -4858,6 +5031,151 @@ mod tests {
     assert!(
       at("tool_requested") < at("tool_started") && at("tool_started") < at("tool_completed"),
       "{kinds:?}"
+    );
+  }
+
+  #[test]
+  fn progress_boundary_narrows_the_next_request_to_configured_tools() {
+    let read_seen = Arc::new(Mutex::new(Vec::new()));
+    let write_seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![
+      Box::new(Spy(Arc::clone(&read_seen))),
+      Box::new(MutatingSpy {
+        seen: Arc::clone(&write_seen),
+        outcome: ToolOutcome::succeeded("mutated"),
+      }),
+    ]);
+    let provider = Scripted::new(
+      "progress-boundary",
+      vec![
+        tool_call("spy", serde_json::json!({})),
+        tool_call("write_probe", serde_json::json!({"path": "app.py"})),
+        tool_call("spy", serde_json::json!({"after": "write"})),
+        text("done"),
+      ],
+    );
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_progress_boundary(Some(1), vec!["write_probe".into()])
+    .run_turn(
+      "build the project",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .expect("progress boundary should preserve a valid tool loop");
+
+    assert_eq!(report.status, TurnStatus::Completed);
+    assert_eq!(report.text, "done");
+    assert_eq!(read_seen.lock().unwrap().len(), 2);
+    assert_eq!(write_seen.lock().unwrap().len(), 1);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+      requests[1]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>(),
+      vec!["write_probe"]
+    );
+    assert_eq!(
+      requests[2].tools.len(),
+      2,
+      "a successful progress tool ends the one-shot boundary"
+    );
+    assert!(
+      requests[1]
+        .messages
+        .iter()
+        .any(|message| message.text().contains("Runtime progress boundary")),
+      "the boundary must be visible to the model"
+    );
+    let diagnostics = trace.0.lock().unwrap();
+    assert!(diagnostics.iter().any(|(_, kind, payload)| {
+      kind == "diagnostic"
+        && payload["message"]
+          .as_str()
+          .unwrap_or_default()
+          .contains("progress boundary active")
+    }));
+  }
+
+  #[test]
+  fn failed_progress_attempt_keeps_the_boundary_narrowed() {
+    let read_seen = Arc::new(Mutex::new(Vec::new()));
+    let write_seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![
+      Box::new(Spy(Arc::clone(&read_seen))),
+      Box::new(MutatingSpy {
+        seen: Arc::clone(&write_seen),
+        outcome: ToolOutcome::failed("rejected"),
+      }),
+    ]);
+    let provider = Scripted::new(
+      "failed-progress-boundary",
+      vec![
+        tool_call("spy", serde_json::json!({})),
+        tool_call("write_probe", serde_json::json!({"path": "app.py"})),
+        tool_call("write_probe", serde_json::json!({"path": "app.py"})),
+        text("done"),
+      ],
+    );
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_progress_boundary(Some(1), vec!["write_probe".into()])
+    .run_turn(
+      "build the project",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .expect("a failed progress attempt should remain recoverable");
+
+    assert_eq!(report.status, TurnStatus::Completed);
+    assert_eq!(report.text, "done");
+    assert_eq!(read_seen.lock().unwrap().len(), 1);
+    assert_eq!(write_seen.lock().unwrap().len(), 2);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+      requests[1]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>(),
+      vec!["write_probe"]
+    );
+    assert_eq!(
+      requests[2]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>(),
+      vec!["write_probe"],
+      "failed progress must not restore the unrestricted tool set"
     );
   }
 

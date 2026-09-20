@@ -256,12 +256,22 @@ pub struct RuntimeLimits {
   /// Maximum model round-trips for one user input, including retries and failover.
   #[serde(default = "default_max_model_requests_per_turn")]
   pub max_model_requests_per_turn: u32,
+  /// Optional number of model requests that may invoke tools without making
+  /// configured progress before the next request is narrowed to progress tools.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub max_model_requests_without_progress: Option<u32>,
+  /// Tool names that count as progress when the progress boundary is active.
+  /// An empty list uses every permitted mutating tool instead.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub progress_tool_names: Vec<String>,
 }
 
 impl Default for RuntimeLimits {
   fn default() -> Self {
     Self {
       max_model_requests_per_turn: DEFAULT_MAX_MODEL_REQUESTS_PER_TURN,
+      max_model_requests_without_progress: None,
+      progress_tool_names: Vec::new(),
     }
   }
 }
@@ -441,6 +451,35 @@ impl RuntimeConfig {
       return Err(ConfigError(format!(
         "limits.max_model_requests_per_turn must not exceed {MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN}"
       )));
+    }
+    if let Some(limit) = self.limits.max_model_requests_without_progress {
+      if limit == 0 {
+        return Err(ConfigError(
+          "limits.max_model_requests_without_progress must be greater than zero".into(),
+        ));
+      }
+      if limit > MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN {
+        return Err(ConfigError(format!(
+          "limits.max_model_requests_without_progress must not exceed {MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN}"
+        )));
+      }
+    } else if !self.limits.progress_tool_names.is_empty() {
+      return Err(ConfigError(
+        "limits.progress_tool_names requires max_model_requests_without_progress".into(),
+      ));
+    }
+    let mut progress_tool_names = HashSet::new();
+    for name in &self.limits.progress_tool_names {
+      if name.trim().is_empty() {
+        return Err(ConfigError(
+          "limits.progress_tool_names must not contain empty names".into(),
+        ));
+      }
+      if !progress_tool_names.insert(name) {
+        return Err(ConfigError(format!(
+          "limits.progress_tool_names contains duplicate tool '{name}'"
+        )));
+      }
     }
     if let Some(backup) = &self.backup {
       if backup == &self.primary {
@@ -731,6 +770,8 @@ mod tests {
       parsed.limits.max_model_requests_per_turn,
       DEFAULT_MAX_MODEL_REQUESTS_PER_TURN
     );
+    assert_eq!(parsed.limits.max_model_requests_without_progress, None);
+    assert!(parsed.limits.progress_tool_names.is_empty());
   }
 
   #[test]
@@ -756,6 +797,38 @@ mod tests {
     );
     config.limits.max_model_requests_per_turn = MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN + 1;
     assert!(config.validate().unwrap_err().0.contains("must not exceed"));
+  }
+
+  #[test]
+  fn progress_boundary_round_trips_and_rejects_ambiguous_limits() {
+    let mut config = sample_config();
+    config.limits.max_model_requests_without_progress = Some(2);
+    config.limits.progress_tool_names = vec!["write".into(), "edit".into()];
+    let parsed = RuntimeConfig::parse(&config.to_json_string().unwrap()).unwrap();
+    assert_eq!(parsed.limits.max_model_requests_without_progress, Some(2));
+    assert_eq!(parsed.limits.progress_tool_names, ["write", "edit"]);
+
+    config.limits.max_model_requests_without_progress = Some(0);
+    assert!(
+      config
+        .validate()
+        .unwrap_err()
+        .0
+        .contains("max_model_requests_without_progress")
+    );
+
+    config.limits.max_model_requests_without_progress = None;
+    assert!(
+      config
+        .validate()
+        .unwrap_err()
+        .0
+        .contains("requires max_model_requests_without_progress")
+    );
+
+    config.limits.max_model_requests_without_progress = Some(2);
+    config.limits.progress_tool_names = vec!["write".into(), "write".into()];
+    assert!(config.validate().unwrap_err().0.contains("duplicate tool"));
   }
 
   #[test]

@@ -316,6 +316,19 @@ pub struct ToolMetadata {
 }
 ```
 
+### Opt-in progress boundary
+
+Coding workflows may configure `RuntimeLimits::max_model_requests_without_progress` and
+an optional `progress_tool_names` allowlist. After the configured number of tool-bearing
+requests without one of those tools, `TurnLoop` records a runtime-owned model-visible
+instruction and exposes only the allowlisted tools on the next request. With no allowlist,
+all permitted mutating tools are exposed. The boundary is a bounded nudge, not a claim that
+the host changed: the normal `Requested`/`Started`/`Succeeded`/`Failed`/`Unknown` lifecycle
+still decides what actually happened. A successful configured progress tool satisfies the
+one-shot boundary for the rest of that turn, and callers must verify the workspace
+independently.
+The default is disabled so read-only questions and inspection workflows remain unchanged.
+
 ## 10. Context engine
 
 The context engine owns model-visible working memory.

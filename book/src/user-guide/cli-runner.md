@@ -2,6 +2,14 @@
 
 `rupi run` executes a single, durable coding-agent turn against an explicitly configured endpoint. It is designed for headless workflows, CI/CD automation, scripts, and quick one-off coding tasks. Each turn has a configurable model-request safety budget (`limits.max_model_requests_per_turn`, default 32); near-limit progress is shown as sparse stderr milestones, and exhaustion is recoverable rather than a claim of successful completion.
 
+For bounded implementation slices, `limits.max_model_requests_without_progress` can
+activate an opt-in progress boundary. After that many tool-bearing requests without a
+configured progress tool, rupi records a runtime-owned instruction and exposes only the
+configured `limits.progress_tool_names` (or all permitted mutating tools when the list is
+empty) on the next request. This is a nudge and tool-schema narrowing, not proof that a
+file changed; verify the workspace and tests independently. Leave it unset for read-only
+turns or workflows where inspection is the intended result.
+
 ---
 
 ## Basic Invocation
