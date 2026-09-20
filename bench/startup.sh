@@ -42,12 +42,21 @@ cd "$REPO_ROOT"
 
 cargo build --release --bin rupi --quiet
 
-BINARY="${REPO_ROOT}/target/release/rupi"
-if [[ -f "${REPO_ROOT}/target/release/rupi.exe" ]]; then
-  BINARY="${REPO_ROOT}/target/release/rupi.exe"
+# Keep the child path relative to the repository. Git Bash on Windows exposes the
+# checkout as `/c/...`, but native Python subprocesses require a Windows path or a
+# path relative to their current directory.
+BINARY="target/release/rupi"
+if [[ -f "target/release/rupi.exe" ]]; then
+  BINARY="target/release/rupi.exe"
 fi
 
-COLD_MODE="$COLD_MODE" BINARY="$BINARY" ITERATIONS="$ITERATIONS" JSON_OUT="$JSON_OUT" python3 - <<'EOF'
+PYTHON=python3
+if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+  # Windows App Execution Aliases expose a broken `python3` shim in Git Bash;
+  # the installed interpreter is available as `python` instead.
+  PYTHON=python
+fi
+COLD_MODE="$COLD_MODE" BINARY="$BINARY" ITERATIONS="$ITERATIONS" JSON_OUT="$JSON_OUT" "$PYTHON" - <<'EOF'
 import json
 import os
 import shutil
