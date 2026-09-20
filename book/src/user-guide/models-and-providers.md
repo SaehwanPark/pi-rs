@@ -53,6 +53,22 @@ unbounded amount of time. It defaults to unset for users who intentionally allow
 long-running generation; a timeout is reported as incomplete and can be followed by
 `--resume` with a smaller prompt.
 
+When a coding turn must begin making changes rather than repeatedly inspecting the
+workspace, add an opt-in progress boundary under `limits`:
+
+```json
+{
+  "max_model_requests_per_turn": 8,
+  "max_model_requests_without_progress": 1,
+  "progress_tool_names": ["write", "edit", "append"]
+}
+```
+
+The named tools must be permitted and mutating. The boundary is recorded in the trace,
+narrows only the next model request, and preserves normal tool lifecycle and `Unknown`
+semantics. It does not claim that a write succeeded; inspect the resulting files and run
+the project’s independent checks.
+
 Check the server before debugging rupi:
 
 ```powershell

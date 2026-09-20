@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- Added an opt-in model progress boundary for bounded implementation turns. It can
+  narrow the next request to configured mutating tools after repeated inspection-only
+  tool requests while preserving normal tool lifecycle and `Unknown` semantics.
+
+---
+
 ## [0.2.2] - 2026-09-20
 
 This release makes the first installation and first-project path usable without requiring

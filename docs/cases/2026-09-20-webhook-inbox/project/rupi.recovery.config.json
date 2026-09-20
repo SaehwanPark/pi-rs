@@ -4,7 +4,9 @@
   "thinking": "off",
   "state_dir": ".rupi-state-recovery",
   "limits": {
-    "max_model_requests_per_turn": 3
+    "max_model_requests_per_turn": 3,
+    "max_model_requests_without_progress": 1,
+    "progress_tool_names": ["write", "edit", "append"]
   },
   "endpoints": [
     {
