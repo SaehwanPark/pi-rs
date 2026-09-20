@@ -331,6 +331,7 @@ class LeaseFenceOracle(unittest.TestCase):
         self.assertEqual(code, 0, stderr)
         entries = read_log(log)
         self.assertEqual([entry["job_id"] for entry in entries], ["source", "part-a", "part-b", "barrier", "publish"])
+        self.assertNotIn("lease_token", json.dumps(entries))
         barrier = next(entry for entry in entries if entry["job_id"] == "barrier")
         self.assertEqual([item["job_id"] for item in barrier["fan_in"]["items"]], ["part-a", "part-b"])
         self.assertEqual([item["value"] for item in barrier["fan_in"]["items"]], [
