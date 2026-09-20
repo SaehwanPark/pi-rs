@@ -592,10 +592,14 @@ mod tests {
     // have already changed the world.
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("touched");
+    #[cfg(windows)]
+    let command = "echo touched > touched & ping -n 31 127.0.0.1 >nul";
+    #[cfg(not(windows))]
+    let command = format!("touch '{}' && sleep 30", marker.display());
     let outcome = exec(
       &dir,
       json!({
-        "command": format!("touch '{}' && sleep 30", marker.display()),
+        "command": command,
         "timeout_ms": 300
       }),
     );
@@ -652,6 +656,10 @@ mod tests {
   #[test]
   fn cancellation_kills_a_running_command_promptly() {
     let dir = tempfile::tempdir().unwrap();
+    #[cfg(windows)]
+    let command = "ping -n 31 127.0.0.1 >nul";
+    #[cfg(not(windows))]
+    let command = "sleep 30";
     let tool = ExecTool::new(runtime(&dir));
     let cancel = rupi_core::CancelToken::new();
     let trigger = cancel.clone();
@@ -663,7 +671,7 @@ mod tests {
     let mut recorder = Recorder::default();
     let outcome = tool
       .execute_with_context(
-        &request(json!({"command": "sleep 30"})),
+        &request(json!({"command": command})),
         &mut recorder,
         &rupi_core::ToolExecutionContext::new(cancel, Duration::from_secs(10)),
       )
@@ -685,7 +693,11 @@ mod tests {
   #[test]
   fn huge_output_is_bounded_and_marked() {
     let dir = tempfile::tempdir().unwrap();
-    let outcome = exec(&dir, json!({"command": "yes abcdefghij | head -c 4000000"}));
+    #[cfg(windows)]
+    let command = r#"powershell -NoProfile -Command [Console]::Out.Write(('abcdefghij' * 400000))"#;
+    #[cfg(not(windows))]
+    let command = "yes abcdefghij | head -c 4000000";
+    let outcome = exec(&dir, json!({"command": command}));
     // The *reported* result is bounded; the process may still have produced more.
     assert!(
       outcome.reduced || outcome.text.contains("truncated"),
@@ -809,7 +821,11 @@ mod tests {
   #[test]
   fn empty_output_says_so_instead_of_passing_as_no_output() {
     let dir = tempfile::tempdir().unwrap();
-    let outcome = exec(&dir, json!({"command": "true"}));
+    #[cfg(windows)]
+    let command = "ver >nul";
+    #[cfg(not(windows))]
+    let command = "true";
+    let outcome = exec(&dir, json!({"command": command}));
     assert!(outcome.text.contains("(no output)"), "{}", outcome.text);
   }
 }
