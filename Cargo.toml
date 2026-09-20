@@ -24,18 +24,18 @@ repository = "https://github.com/SaehwanPark/rupi"
 authors = ["rupi contributors"]
 
 [workspace.dependencies]
-rupi-core = { path = "crates/rupi-core" }
-rupi-store = { path = "crates/rupi-store" }
-rupi-provider = { path = "crates/rupi-provider" }
-rupi-tools = { path = "crates/rupi-tools" }
-rupi-compat = { path = "crates/rupi-compat" }
-rupi-runtime = { path = "crates/rupi-runtime" }
-rupi-tui = { path = "crates/rupi-tui" }
-rupi-mcp = { path = "crates/rupi-mcp" }
-rupi-rkb = { path = "crates/rupi-rkb" }
-rupi-extension = { path = "crates/rupi-extension" }
-rupi-replay = { path = "crates/rupi-replay" }
-rupi-experiments = { path = "crates/rupi-experiments" }
+rupi-core = { path = "crates/rupi-core", version = "0.2.1" }
+rupi-store = { path = "crates/rupi-store", version = "0.2.1" }
+rupi-provider = { path = "crates/rupi-provider", version = "0.2.1" }
+rupi-tools = { path = "crates/rupi-tools", version = "0.2.1" }
+rupi-compat = { path = "crates/rupi-compat", version = "0.2.1" }
+rupi-runtime = { path = "crates/rupi-runtime", version = "0.2.1" }
+rupi-tui = { path = "crates/rupi-tui", version = "0.2.1" }
+rupi-mcp = { path = "crates/rupi-mcp", version = "0.2.1" }
+rupi-rkb = { path = "crates/rupi-rkb", version = "0.2.1" }
+rupi-extension = { path = "crates/rupi-extension", version = "0.2.1" }
+rupi-replay = { path = "crates/rupi-replay", version = "0.2.1" }
+rupi-experiments = { path = "crates/rupi-experiments", version = "0.2.1" }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
