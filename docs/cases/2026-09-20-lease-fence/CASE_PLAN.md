@@ -1,6 +1,6 @@
 # Loop 7 live case: Lease Fence
 
-Status: designed; implementation and live evidence pending
+Status: complete as tester case; model-authoring stopgate open
 Date: 2026-09-20
 Test operator: Codex acting as a fresh `rupi` user
 Model target: local Qwen-compatible server, `qwen3.8-flash-next`
