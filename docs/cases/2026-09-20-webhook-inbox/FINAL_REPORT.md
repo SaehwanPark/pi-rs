@@ -13,7 +13,10 @@ dependency-free Python service through the earlier tester repair, and its
 independent fresh-process oracle passed. That result is not a claim that a
 model turn completed T. The parent-fix retry in
 [`RETRY_REPORT.md`](RETRY_REPORT.md) again produced no model-authored project
-files, so the high rupi implementation stopgate remains unresolved.
+files, so the high rupi implementation stopgate remains unresolved. The final
+progress-boundary retry is recorded in
+[`PROGRESS_RETRY_REPORT.md`](PROGRESS_RETRY_REPORT.md): the boundary activated
+and narrowed schemas, but the model still made no first write before timeout.
 
 No rupi runtime/source/tests or canonical documents changed.
 
@@ -24,6 +27,7 @@ No rupi runtime/source/tests or canonical documents changed.
 - `3ae8bb0` — project implementation, tests, observations, and report.
 - `96ca4b3` — parent-fix retry configs: 30,000 ms request timeout, initial
   request limit 8, recovery request limit 3, and `thinking: off`.
+- `e2e00f3` — opt-in progress boundary and Webhook Inbox progress-tool config.
 
 All changed files are under
 `docs/cases/2026-09-20-webhook-inbox/`. The runtime, Rust crates, repository
@@ -42,6 +46,9 @@ unchanged.
   5,389 entries/replay exit 0;
 - parent-fix retry traces: R-03 788 entries/replay exit 0; R-04 237
   entries/replay exit 0; neither retry wrote project files;
+- final progress-boundary retry traces: R-05 214 entries/replay exit 0; R-06
+  473 entries/replay exit 0; both boundaries activated, neither retry wrote
+  project files;
 - source import review found only Python standard-library modules;
 - no file outside the case directory was modified.
 
@@ -57,9 +64,10 @@ unchanged.
 
 ## Parent retry request
 
-Use this exact case as the next runtime retry after adding a supported
-first-write/progress boundary: rerun the same initial and recovery prompts in a
-fresh missing-project workspace, require the model to create the package and
-README and pass the project suite without tester repair, then run the unchanged
-oracle and verify trace/replay again. The parent fix reduced wall-time exposure
-but did not resolve the high stopgate.
+The progress boundary is now verified as active and schema-narrowing, but the
+high stopgate remains because the provider timed out before a write/edit/append
+call. The next retry must make the narrowed progress request complete within
+the deadline, or add a runtime enforcement that produces actual first-write
+progress. Keep the same fresh missing-project workspace, prompts, and unchanged
+oracle; require model-authored project-suite and oracle passes without tester
+repair, followed by trace/replay.

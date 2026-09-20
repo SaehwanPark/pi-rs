@@ -321,3 +321,25 @@ Running them against the prior tester repair would have invalidated the retry
 measurement. Both final trace reads and tool replays exited `0` (788 and 237
 trace entries respectively). The high stopgate remains: wall-time exposure was
 reduced, but the first-write/implementation failure was not resolved.
+
+## Final progress-boundary retry (2026-09-20)
+
+The parent runtime fix `e2e00f3` was built before this retry. Detailed evidence
+is in [`PROGRESS_RETRY_REPORT.md`](PROGRESS_RETRY_REPORT.md). A brand-new
+ignored workspace contained only copied specs/configs/ignore rules plus an
+unchanged oracle; no prior retry state or tester implementation was visible in
+the model cwd.
+
+All configs parsed successfully. The initial session
+`01a0c03c-0168-7e3d-901b-4bff5ceac0dd` ran 37,121 ms with 2/2 model request
+starts/completions and 2/2/0 tool request/completion/failure counts. The
+recovery session `01a0c03c-d318-7228-a8af-eace6d50c489` ran 38,077 ms with the
+same counts. Both made no project write and exited `1` with typed timeout.
+
+The boundary evidence is positive but incomplete: each trace exposed 7 normal
+tool schemas, appended the exact runtime nudge and info diagnostic after one
+no-progress request, then exposed 3 schemas (`write`, `edit`, `append`). Neither
+model requested a progress tool before timing out. No model package, README,
+tests, project suite, or oracle result exists. Trace/replay exited `0` for both
+sessions (214 and 473 entries). The high stopgate remains, operationally
+reduced by the boundary but not resolved.
