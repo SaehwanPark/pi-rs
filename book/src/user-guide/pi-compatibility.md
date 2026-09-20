@@ -62,7 +62,9 @@ Reports supported features, unsupported runtime hooks, and migration advice.
 
 ---
 
-## 5. Bidirectional Session Migration (`import` & `export`)
+## 5. Bidirectional Session Migration (`import-pi` & `export`)
+
+`import` remains accepted as a legacy alias for `import-pi`.
 
 ### Import Pi Sessions
 Convert an upstream Pi session JSONL into the native `rupi` event store:

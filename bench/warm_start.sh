@@ -139,7 +139,7 @@ def spread(samples):
     return quartiles[2] - quartiles[0]
 
 
-def run_pi(config_file, resume_id=None):
+def run_rupi(config_file, resume_id=None):
     """One timed exec-to-exit of `rupi run`.
 
     The argv is the one named in the definition, so both arms differ only by
@@ -216,7 +216,7 @@ config_fresh = write_config("config-fresh.json", fresh_store)
 
 # Fixture: one real turn creating the session a warm start continues. This is the run
 # that decides whether the machine can do the measurement at all.
-fixture_ms, fixture_rc, fixture_stderr = run_pi(config_fixture)
+fixture_ms, fixture_rc, fixture_stderr = run_rupi(config_fixture)
 if fixture_ms is None or fixture_rc != 0:
     skip(f"fixture run cannot complete: {failure_text(fixture_ms, fixture_rc, fixture_stderr)}")
 
@@ -239,7 +239,7 @@ for i in range(iterations):
     # fresh arm starts against an empty store, never the store the last sample wrote.
     shutil.rmtree(resume_store, ignore_errors=True)
     shutil.copytree(fixture_store, resume_store)
-    resume_ms, resume_rc, resume_stderr = run_pi(config_resume, resume_id=session_id)
+    resume_ms, resume_rc, resume_stderr = run_rupi(config_resume, resume_id=session_id)
     if resume_ms is None or resume_rc != 0:
         reason = failure_text(resume_ms, resume_rc, resume_stderr)
         sys.stderr.write(f"resume sample #{i + 1} failed: {reason}\n")
@@ -248,7 +248,7 @@ for i in range(iterations):
 
     shutil.rmtree(fresh_store, ignore_errors=True)
     os.makedirs(fresh_store)
-    fresh_ms, fresh_rc, fresh_stderr = run_pi(config_fresh)
+    fresh_ms, fresh_rc, fresh_stderr = run_rupi(config_fresh)
     if fresh_ms is None or fresh_rc != 0:
         reason = failure_text(fresh_ms, fresh_rc, fresh_stderr)
         sys.stderr.write(f"fresh-session sample #{i + 1} failed: {reason}\n")

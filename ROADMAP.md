@@ -721,10 +721,9 @@ Do not begin until stable baselines exist.
 
 ## Current priorities — plan of record
 
-> Reconstructed 2026-09-19 after the full merge of the open PR series into `main` and
-> the Round 9 audit sign-off. The prose list that lived here was never committed and did
-> not survive the merge; this section rebuilds it from the merged state, phase by phase.
-> The current release target is `v0.2.0`.
+> Updated 2026-09-20 after the Round 9 audit archive and the `rupi` rebrand work. This
+> section remains the phase-by-phase record of verified implementation state; release
+> evidence belongs in the release notes and CI. The current release target is `v0.2.1`.
 
 ### P0 — Next
 

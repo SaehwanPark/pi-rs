@@ -333,7 +333,7 @@ mod tests {
     line.push("crates/rupi-tui/src/lib.rs", Role::Path);
     line.push(" --offset=10", Role::Flag);
     assert_eq!(line.segments.len(), 4);
-    assert_eq!(line.width(), 4 + 1 + 27 + 12);
+    assert_eq!(line.width(), 4 + 1 + 26 + 12);
     assert_eq!(line.plain(), "read crates/rupi-tui/src/lib.rs --offset=10");
   }
 

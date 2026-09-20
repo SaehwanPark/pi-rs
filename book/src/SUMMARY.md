@@ -26,5 +26,6 @@
 - [CLI Reference](reference/cli.md)
 
 # Releases
+- [Release v0.2.1](releases/v0.2.1.md)
 - [Release v0.2.0](releases/v0.2.0.md)
 - [Release v0.1.0](releases/v0.1.0.md)

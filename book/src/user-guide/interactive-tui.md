@@ -22,9 +22,9 @@ The terminal interface consists of three distinct visual zones:
 2. **Bottom Statusline**:
    - Single-line persistent snapshot:
      ```text
-     qwen2.5-coder · idle · turn 4 · 1.2k tokens
+     qwen3.8-flash-next · idle · turn 1 · ctx 262,144
      ```
-   - Segment roles: active model name, activity (`idle` vs `working`), current turn counter, cumulative token usage.
+   - Segment roles: active model name, activity (`idle` vs `working`), current turn counter, and context budget.
    - Automatically collapses or truncates cleanly on narrow terminal windows down to a minimum column width without wrapping or crashing.
 3. **Editor Buffer**:
    - Multi-line text entry with cursor navigation, word-wrapping, and slash-command completions.

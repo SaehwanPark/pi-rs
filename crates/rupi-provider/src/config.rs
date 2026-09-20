@@ -123,8 +123,8 @@ impl Default for ProviderConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MaxTokensField {
-  /// `max_tokens`. Accepted by OpenAI, vLLM, llama.cpp, and Ollama's OpenAI
-  /// surface, so it is the default for a harness that expects local servers.
+  /// `max_tokens`. Accepted by OpenAI, vLLM, and llama.cpp OpenAI-compatible
+  /// surfaces, so it is the default for a harness that expects local servers.
   #[default]
   MaxTokens,
   /// `max_completion_tokens`, the newer OpenAI name.

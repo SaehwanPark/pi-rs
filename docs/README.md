@@ -2,8 +2,8 @@
 
 Welcome to the `rupi` documentation. This directory and repository contain the
 specifications, architectural contracts, user guides, and historical development
-records for `rupi`—a minimal, Pi-inspired coding-agent runtime implemented in
-Rust. The current public release is **v0.2.0 (2026-09-19)**.
+records for `rupi`—a small, observable coding harness with selected Pi compatibility.
+The current public release is **v0.2.1 (2026-09-20)**.
 
 ---
 
@@ -18,7 +18,7 @@ For end users and system integrators, the primary documentation is published via
 - **Topics Covered:**
   - **Quickstart Guide:** Get running with local or remote models in under 60 seconds.
   - **Installation:** Cargo, source builds, prebuilt binaries.
-  - **CLI Reference:** Detailed usage of `run`, `interactive`, `trace`, `replay`, `skills`, `prompts`, `packages`, `trust`, `compat`, `import`, and `export`.
+  - **CLI Reference:** Detailed usage of `run`, `interactive`, `trace`, `replay`, `skills`, `prompts`, `packages`, `trust`, `compat`, `import-pi`, and `export`.
   - **Interactive TUI:** Keyboard shortcuts, editor buffer, syntax highlighting, status line.
   - **Provenance Model:** Understanding `[native reasoning]`, `[provider summary]`, `[declared]`, and `[reconstructed]`.
   - **Failover & Recovery:** Primary/backup model configuration and capability matching.
@@ -37,7 +37,7 @@ These documents serve as the authoritative sources of truth for the codebase:
 | [`docs/PROJECT_DESIGN_CANONICAL.md`](PROJECT_DESIGN_CANONICAL.md) | **Canonical design authority.** Explains system thesis, core contracts, lifecycle, and component invariants. |
 | [`ARCHITECTURE.md`](../ARCHITECTURE.md) | Runtime boundaries, subsystem contracts, crate breakdown, and concurrency invariants. |
 | [`COMPATIBILITY.md`](../COMPATIBILITY.md) | Upstream Pi behavioral compatibility targets, coverage status, and regression fixtures. |
-| [`docs/SCHEMA_REFERENCE.md`](SCHEMA_REFERENCE.md) | Current v0.2.0 reference for event payloads, session logs, and serialized structures; source remains authoritative. |
+| [`docs/SCHEMA_REFERENCE.md`](SCHEMA_REFERENCE.md) | Current v0.2.1 reference for event payloads, session logs, and serialized structures; source remains authoritative. |
 | [`docs/SESSION_COMPATIBILITY.md`](SESSION_COMPATIBILITY.md) | Bidirectional mapping between Pi session JSONL and rupi store schemas. |
 | [`docs/IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) | Implementation inventory, verified capabilities, and phase deliverables. |
 
@@ -69,3 +69,8 @@ are preserved for provenance and auditing:
   prior development sessions.
 - [`docs/archive/proposals/`](archive/proposals/): Initial project proposal,
   early MVP validation reports, and compaction event audit records.
+- [`audits/`](../audits/): Completed audit rounds, explicitly marked as historical and
+  retained for provenance; they are not current implementation instructions.
+
+The former root-level [`HANDOFF.md`](../HANDOFF.md) is now a short pointer. Its resolved
+historical record lives in [`docs/archive/handoffs/`](archive/handoffs/).

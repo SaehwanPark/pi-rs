@@ -15,17 +15,17 @@ use rupi_provider::{OpenAiCompat, ProviderConfig};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   let base_url = std::env::args()
     .nth(1)
-    .unwrap_or_else(|| "http://127.0.0.1:8080/v1".to_string());
+    .unwrap_or_else(|| "http://127.0.0.1:8000/v1".to_string());
   let model_id = std::env::args()
     .nth(2)
-    .unwrap_or_else(|| "qwen3.8-flash".to_string());
+    .unwrap_or_else(|| "qwen3.8-flash-next".to_string());
   let prompt = std::env::args()
     .nth(3)
     .unwrap_or_else(|| "Reply with exactly one short sentence.".to_string());
   let context_window: u64 = std::env::var("RUPI_CONTEXT_WINDOW")
     .ok()
     .and_then(|value| value.parse().ok())
-    .unwrap_or(131_072);
+    .unwrap_or(262_144);
 
   let config = ProviderConfig::local("local", &model_id, &base_url, context_window);
   let provider = OpenAiCompat::new(config)?;
@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     },
     vec![Message::user(&prompt)],
   );
-  request.thinking = ThinkingLevel::Medium;
+  request.thinking = ThinkingLevel::Xhigh;
   request.max_output_tokens = Some(128);
 
   println!("POST {}", provider.config().chat_completions_url());

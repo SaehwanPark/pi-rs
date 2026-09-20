@@ -127,7 +127,7 @@ rupi compat <path>
 
 ---
 
-### `import`
+### `import-pi` (legacy alias: `import`)
 Plan or write an upstream Pi session JSONL file (or a directory of files) into the
 native `rupi` store. Nothing is executed; use `--write` to persist the import.
 

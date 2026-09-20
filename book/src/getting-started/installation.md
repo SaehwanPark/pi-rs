@@ -1,63 +1,56 @@
-# Installation
+# Install rupi
 
-`rupi` is built in Rust using stable toolchains. Standard agent operations require no Node.js or Python runtime; those are optional integrations.
+This guide assumes you can open a terminal and edit a JSON file. You do not need Node.js,
+Python, or a previous coding-agent harness for the normal local-model workflow.
 
----
+## Option A: install from source
 
-## Prerequisites
-
-- **Rust 1.85+** (2024 edition):
-  ```bash
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-  ```
-
----
-
-## Building from Source
-
-Clone the repository and compile using Cargo:
+Install Rust 1.85 or newer from [rustup](https://rustup.rs/), then run:
 
 ```bash
 git clone https://github.com/SaehwanPark/rupi.git
 cd rupi
-cargo build --release
-```
-
-The optimized binary will be located at `target/release/rupi`.
-
-To install the binary into your Cargo binary directory (`~/.cargo/bin`):
-
-```bash
 cargo install --path .
-```
-
-Verify your installation:
-
-```bash
 rupi --help
 ```
 
----
+`cargo install --path .` puts the `rupi` executable in Cargo's binary directory. If your
+shell cannot find it, add `~/.cargo/bin` to `PATH` (on Windows, `%USERPROFILE%\\.cargo\\bin`).
 
-## Prebuilt Binaries (GitHub Releases)
+To build without installing:
 
-Release artifacts are target-specific. The v0.2.0 release includes an
-`x86_64-pc-windows-msvc` archive; build from source for other targets:
+```bash
+cargo build --release
+# target/release/rupi     (Linux/macOS)
+# target\\release\\rupi.exe (Windows)
+```
 
-👉 **[Download from GitHub Releases](https://github.com/SaehwanPark/rupi/releases)**
+## Option B: download a release binary
+
+Open the [rupi releases](https://github.com/SaehwanPark/rupi/releases) page and download
+the archive matching your operating system and CPU. The v0.2.1 release includes a Windows
+`x86_64-pc-windows-msvc` archive; use the source build when no matching archive is listed.
 
 On Windows PowerShell:
 
 ```powershell
-Expand-Archive .\rupi-v0.2.0-x86_64-pc-windows-msvc.zip -DestinationPath $env:USERPROFILE\.cargo\bin
+Expand-Archive .\rupi-v0.2.1-x86_64-pc-windows-msvc.zip `
+  -DestinationPath $env:USERPROFILE\.cargo\bin
+rupi --help
 ```
 
-On Linux or macOS, use the Cargo source build above unless a matching release asset is
-listed for your target.
+On Linux or macOS, unpack the archive and put `rupi` somewhere on your `PATH`.
 
----
+## Optional pieces
 
-## Optional Subsystems
+- **llama.cpp** is needed only when you want the local Qwen example in the next guide.
+- **Node.js 22.6+** is needed only for an explicitly activated Pi TypeScript extension.
+- **MCP servers** are optional and are activated one at a time.
 
-- **Node.js (v22.6+)**: Required only if you intend to execute JavaScript/TypeScript Pi extensions via the optional extension host. The host is not started for ordinary sessions.
-- **MCP Servers**: Any standard Model Context Protocol server communicating over stdio.
+## If installation fails
+
+- `cargo: command not found`: install Rust with rustup and restart the terminal.
+- `rupi: command not found`: add Cargo's binary directory to `PATH`, or run
+  `cargo run -- run ...` from the checkout.
+- Windows blocks the downloaded executable: use the file's Properties dialog to unblock
+  it, or build from source.

@@ -115,10 +115,10 @@ fn writing_files_one_session_the_store_can_read_back() {
   let AgentEvent::ToolCompleted(completed) = &tool.envelope.event else {
     unreachable!("filtered above");
   };
-  // 121 bytes is over this store's 64-byte threshold, so the trace keeps a blob.
+  // The fixture's 119-byte output is over this store's 64-byte threshold, so the trace keeps a blob.
   let blob = completed.blob.clone().expect("output filed as a blob");
   assert!(!completed.reduced, "rupi reduced nothing");
-  assert_eq!(blob.size, 121);
+  assert_eq!(blob.size, 119);
   let stored = fs::read(layout.blob_path(&session_id, &blob)).expect("blob resolves");
   assert_eq!(stored.len() as u64, blob.size);
   assert!(String::from_utf8(stored).unwrap().contains("src/lib.rs"));
@@ -149,7 +149,7 @@ fn imported_tool_output_follows_the_native_inline_rule() {
       unreachable!("filtered above");
     };
     assert!(!completed.reduced, "rupi reduced nothing at {threshold}");
-    assert_eq!(completed.visible_bytes, 121);
+    assert_eq!(completed.visible_bytes, 119);
     assert_eq!(
       completed.blob.is_some(),
       expect_blob,

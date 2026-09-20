@@ -16,7 +16,7 @@ body:
         The command you ran, what came back, and what you expected instead. Exact strings
         beat descriptions: paste the error line, not "it errored".
       placeholder: |
-        rupi run --model local-vulcan/qwen3.8-flash "fix the build"
+        rupi run --config config.json --cwd . --prompt "fix the build"
         expected: a turn with two tool calls
         actual: session aborted with `provider: stream ended before a finish reason`
     validations:

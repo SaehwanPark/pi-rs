@@ -4,8 +4,8 @@ Working status for the `rupi` runtime. Roadmap intent lives in [`ROADMAP.md`](..
 this document records **what exists, what is proven, and what is deliberately deferred or not
 yet exercised**.
 
-Verification for everything marked *done* below is rerun for the v0.2.0 release
-(`2026-09-19`); the release PR records the exact host output and any platform-specific
+Verification for everything marked *done* below is rerun for the v0.2.1 release
+(`2026-09-20`); the release PR records the exact host output and any platform-specific
 limitations:
 
 ```
@@ -23,7 +23,7 @@ mdbook build book
 | --- | --- | --- | --- |
 | Contracts | `rupi-core` | done | 86 |
 | Durability | `rupi-store` | done, incl. payload bounding, externalized fields, retention | 138 |
-| Model I/O | `rupi-provider` | done, verified against a real endpoint | 82 |
+| Model I/O | `rupi-provider` | done, verified against the supplied llama.cpp endpoint | 93 |
 | Native tools | `rupi-tools` | done, lifecycle + failure/unknown outcomes | 92 |
 | Turn loop + recovery | `rupi-runtime` | done (failover, cancel, handles, provider-overflow recovery) | 72 |
 | Surface | `rupi-tui` | done (raw terminal, editor, status, highlighting, wrap) | 179 |
@@ -205,9 +205,9 @@ The following items are not blockers for the canonical initial MVP, but remain e
 
 1. `rupi-tui` uses a terminal-native semantic renderer; a ratatui widget/backend
    integration is not currently used.
-2. The end-to-end agent loop against a real local endpoint has not been exercised: the
-   one-shot tool loop is covered against a fake OpenAI server, while single completions
-   and tool schema serialization have been verified live.
+2. The end-to-end agent loop against the supplied local endpoint is now smoke-tested with
+   a read-only one-shot turn. The deterministic tool loop remains covered against a fake
+   OpenAI server; the live smoke test does not enable mutating tools.
 3. Surface write errors are not yet routed through the runtime's fallible event channel;
    stdout/stderr failures remain an interactive-surface concern rather than being silently
    reclassified as model or storage failures.
@@ -242,15 +242,17 @@ The following items are not blockers for the canonical initial MVP, but remain e
 
 ## Real-endpoint verification
 
-Verified in the provider slice against `http://127.0.0.1:8080/v1` (llama.cpp,
-model `qwen3.8-flash`, `reasoning_content` exposed):
+Verified on 2026-09-20 against the supplied llama.cpp endpoint
+`http://127.0.0.1:8000/v1` (model `qwen3.8-flash-next`, `reasoning_content` exposed):
 
-* SSE parsing, `reasoning_content` → `Native` provenance, finish reason `stop`.
+* SSE parsing, `reasoning_content` → `Native` provenance, finish reason `stop`, and usage.
 * Tool schema serialization and request body shape.
+* A read-only one-shot `rupi run` that invoked `read`, separated stdout from the
+  provenance/tool transcript, and wrote a durable session.
+* `rupi trace` and `rupi replay` reading that session without another provider call.
 
-The runtime's tool loop is covered by scripted-provider unit tests and the one-shot
-command's fake OpenAI server integration test. It has not yet been exercised against a
-live model.
+Mutating tools were not enabled during the live smoke test. The deterministic tool loop
+remains covered by the scripted-provider and fake OpenAI integration fixtures.
 
 ## Interactive session
 

@@ -19,8 +19,8 @@ pub const TOP_HELP: &str = concat!(
   "  packages     List discovered Pi packages and their contained surfaces\n",
   "  trust        Record or inspect explicit project-trust decisions\n",
   "  compat       Inspect an artifact or package for Pi behavioral compatibility\n",
-  "  import       Import a Pi session file into the store, reporting what could not\n",
-  "               be carried\n",
+  "  import-pi    Import a Pi session file into the store, reporting what could not\n",
+  "               be carried (the legacy `import` alias is also accepted)\n",
   "  export       Write a session back out as a Pi session file\n",
   "\n",
   "Options:\n",
@@ -2078,12 +2078,13 @@ mod tests {
   #[test]
   fn the_new_commands_are_listed_where_commands_are_listed() {
     // A command that is not in the top-level help is a command nobody finds.
-    for command in ["prompts", "prompt", "compat", "replay"] {
+    for command in ["prompts", "prompt", "compat", "replay", "import-pi"] {
       assert!(
         TOP_HELP.contains(&format!("  {command} ")),
         "TOP_HELP should list `{command}`: {TOP_HELP}"
       );
     }
+    assert!(TOP_HELP.contains("legacy `import` alias"));
   }
 
   #[test]

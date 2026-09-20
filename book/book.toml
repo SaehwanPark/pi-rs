@@ -4,7 +4,7 @@ language = "en"
 multilingual = false
 src = "src"
 title = "rupi Documentation"
-description = "A minimal, Pi-inspired coding-agent runtime implemented in Rust."
+description = "A small, observable coding harness with selected Pi compatibility."
 
 [output.html]
 git-repository-url = "https://github.com/SaehwanPark/rupi"
