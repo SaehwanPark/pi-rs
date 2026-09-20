@@ -17,16 +17,12 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            archive: tar.gz
           - os: macos-13
             target: x86_64-apple-darwin
-            archive: tar.gz
           - os: macos-14
             target: aarch64-apple-darwin
-            archive: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            archive: zip
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -62,7 +58,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          $archive = "rupi-$env:GITHUB_REF_NAME-$env:TARGET.zip"
+          $archive = "rupi-$($env:GITHUB_REF_NAME)-$($env:TARGET).zip"
           Compress-Archive -LiteralPath "target/$env:TARGET/release/rupi.exe" -DestinationPath $archive
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
           "$hash  $archive" | Set-Content -Encoding ascii "$archive.sha256"

@@ -723,7 +723,7 @@ Do not begin until stable baselines exist.
 
 > Updated 2026-09-20 after the Round 9 audit archive and the `rupi` rebrand work. This
 > section remains the phase-by-phase record of verified implementation state; release
-> evidence belongs in the release notes and CI. The current release target is `v0.2.1`.
+> evidence belongs in the release notes and CI. The current release target is `v0.2.2`.
 
 ### P0 — Next
 

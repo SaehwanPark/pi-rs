@@ -3,7 +3,7 @@
 Welcome to the `rupi` documentation. This directory and repository contain the
 specifications, architectural contracts, user guides, and historical development
 records for `rupi`—a small, observable coding harness with selected Pi compatibility.
-The current public release is **v0.2.1 (2026-09-20)**.
+The current public release is **v0.2.2 (2026-09-20)**.
 
 ---
 
@@ -17,7 +17,10 @@ For end users and system integrators, the primary documentation is published via
 - **Source Files:** [`book/src/`](../book/src/)
 - **Topics Covered:**
   - **Quickstart Guide:** Get running with local or remote models in under 60 seconds.
-  - **Installation:** Cargo, source builds, prebuilt binaries.
+  - **Installation:** checksum-verified shell/PowerShell installers, Cargo source builds,
+    and prebuilt binaries.
+  - **Test Ledger:** a live first-project walkthrough with independent verification,
+    trace, and replay.
   - **CLI Reference:** Detailed usage of `run`, `interactive`, `trace`, `replay`, `skills`, `prompts`, `packages`, `trust`, `compat`, `import-pi`, and `export`.
   - **Interactive TUI:** Keyboard shortcuts, editor buffer, syntax highlighting, status line.
   - **Provenance Model:** Understanding `[native reasoning]`, `[provider summary]`, `[declared]`, and `[reconstructed]`.
@@ -37,7 +40,7 @@ These documents serve as the authoritative sources of truth for the codebase:
 | [`docs/PROJECT_DESIGN_CANONICAL.md`](PROJECT_DESIGN_CANONICAL.md) | **Canonical design authority.** Explains system thesis, core contracts, lifecycle, and component invariants. |
 | [`ARCHITECTURE.md`](../ARCHITECTURE.md) | Runtime boundaries, subsystem contracts, crate breakdown, and concurrency invariants. |
 | [`COMPATIBILITY.md`](../COMPATIBILITY.md) | Upstream Pi behavioral compatibility targets, coverage status, and regression fixtures. |
-| [`docs/SCHEMA_REFERENCE.md`](SCHEMA_REFERENCE.md) | Current v0.2.1 reference for event payloads, session logs, and serialized structures; source remains authoritative. |
+| [`docs/SCHEMA_REFERENCE.md`](SCHEMA_REFERENCE.md) | Current v0.2.2 reference for event payloads, session logs, and serialized structures; source remains authoritative. |
 | [`docs/SESSION_COMPATIBILITY.md`](SESSION_COMPATIBILITY.md) | Bidirectional mapping between Pi session JSONL and rupi store schemas. |
 | [`docs/IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) | Implementation inventory, verified capabilities, and phase deliverables. |
 

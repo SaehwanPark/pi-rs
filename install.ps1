@@ -85,8 +85,9 @@ try {
 
   $extracted = Join-Path $tempRoot 'extracted'
   Expand-Archive -LiteralPath $archivePath -DestinationPath $extracted -Force
-  $binary = Join-Path $extracted 'rupi.exe'
-  if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+  $binary = Get-ChildItem -LiteralPath $extracted -Filter 'rupi.exe' -File -Recurse |
+    Select-Object -First 1
+  if ($null -eq $binary) {
     Fail 'release archive does not contain rupi.exe'
   }
 
@@ -94,7 +95,7 @@ try {
   $destination = Join-Path $InstallDir 'rupi.exe'
   $staged = Join-Path $InstallDir ".rupi.exe.tmp-$PID"
   try {
-    Copy-Item -LiteralPath $binary -Destination $staged -Force
+    Copy-Item -LiteralPath $binary.FullName -Destination $staged -Force
     Move-Item -LiteralPath $staged -Destination $destination -Force
   } catch {
     Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue

@@ -5,6 +5,7 @@
 # Getting Started
 - [Installation](getting-started/installation.md)
 - [Quickstart Guide](getting-started/quickstart.md)
+- [Live example: Test Ledger](getting-started/test-ledger.md)
 
 # User Guide
 - [Interactive TUI](user-guide/interactive-tui.md)
@@ -26,6 +27,7 @@
 - [CLI Reference](reference/cli.md)
 
 # Releases
+- [Release v0.2.2](releases/v0.2.2.md)
 - [Release v0.2.1](releases/v0.2.1.md)
 - [Release v0.2.0](releases/v0.2.0.md)
 - [Release v0.1.0](releases/v0.1.0.md)

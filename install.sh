@@ -3,7 +3,13 @@ set -eu
 
 repository="SaehwanPark/rupi"
 version=${RUPI_VERSION:-latest}
-install_dir=${RUPI_INSTALL_DIR:-"${HOME:-}/.local/bin"}
+if [ -n "${RUPI_INSTALL_DIR:-}" ]; then
+  install_dir=$RUPI_INSTALL_DIR
+elif [ -n "${HOME:-}" ]; then
+  install_dir="$HOME/.local/bin"
+else
+  install_dir=
+fi
 
 usage() {
   cat <<'EOF'
@@ -127,6 +133,8 @@ download "$base_url/$archive_name.sha256" "$checksum_file"
 expected=$(awk 'NF {print $1; exit}' "$checksum_file" \
   | tr '[:upper:]' '[:lower:]')
 actual=$(checksum "$archive" | tr '[:upper:]' '[:lower:]')
+printf '%s\n' "$expected" | grep -Eq '^[0-9a-f]{64}$' \
+  || fail "checksum file for $archive_name is invalid"
 [ "$expected" = "$actual" ] \
   || fail "checksum mismatch for $archive_name"
 
@@ -134,7 +142,10 @@ extracted="$tmp_dir/extracted"
 mkdir -p "$extracted"
 tar -xzf "$archive" -C "$extracted"
 binary="$extracted/rupi"
-[ -f "$binary" ] || fail "release archive does not contain rupi"
+if [ ! -f "$binary" ]; then
+  binary=$(find "$extracted" -type f -name rupi -print -quit)
+fi
+[ -n "$binary" ] && [ -f "$binary" ] || fail "release archive does not contain rupi"
 
 mkdir -p "$install_dir"
 staged="$install_dir/.rupi-install.$$"
@@ -145,8 +156,10 @@ else
   cp "$binary" "$staged"
   chmod 0755 "$staged"
 fi
-mv -f "$staged" "$install_dir/rupi" \
-  || fail "could not write $install_dir/rupi; choose a writable directory with --install-dir"
+if ! mv -f "$staged" "$install_dir/rupi"; then
+  rm -f "$staged"
+  fail "could not write $install_dir/rupi; choose a writable directory with --install-dir"
+fi
 
 printf 'Installed rupi %s to %s/rupi\n' "$version" "$install_dir"
 case ":${PATH:-}:" in

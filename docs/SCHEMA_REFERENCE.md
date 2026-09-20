@@ -1,6 +1,6 @@
 # Schema reference: events, session records, provenance
 
-> **Current for v0.2.1 (2026-09-20).** This document describes the serialized schemas and
+> **Current for v0.2.2 (2026-09-20).** This document describes the serialized schemas and
 > verified production boundaries from the audited mainline. Source remains authoritative
 > when a line reference changes; release-specific history belongs in `CHANGELOG.md` and
 > `docs/archive/`.
