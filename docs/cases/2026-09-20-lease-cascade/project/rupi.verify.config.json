@@ -23,7 +23,7 @@
     }
   ],
   "tools": {
-    "auto_approve_mutating": false,
+    "auto_approve_mutating": true,
     "shell_timeout_ms": 120000,
     "max_output_bytes": 8192
   }
