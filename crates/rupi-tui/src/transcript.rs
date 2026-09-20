@@ -533,6 +533,11 @@ pub fn render_event(event: &AgentEvent, options: &TranscriptOptions) -> Vec<Rend
           line.push(SEPARATOR, Role::Muted);
           line.push(message, Role::Error);
         }
+        SessionEndReason::Interrupted { message } => {
+          line.push("interrupted", Role::Warning);
+          line.push(SEPARATOR, Role::Muted);
+          line.push(message, Role::Warning);
+        }
       };
       vec![line]
     }

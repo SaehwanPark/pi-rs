@@ -28,9 +28,20 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
     &args.cwd,
     &args.surface,
     args.resume.as_deref(),
-    |session| match session.turn(&args.prompt) {
-      Ok(()) => session.close().map_err(session_error),
-      Err(error) => Err(turn_error(&session.close_after_failure(error))),
+    |session| {
+      if args.finalize {
+        match session.finalize(&args.prompt) {
+          Ok(_) => Err(turn_error(
+            &session.close_after_failure(TurnError::Aborted(TurnStatus::BudgetExhausted)),
+          )),
+          Err(error) => Err(turn_error(&session.close_after_failure(error))),
+        }
+      } else {
+        match session.turn(&args.prompt) {
+          Ok(()) => session.close().map_err(session_error),
+          Err(error) => Err(turn_error(&session.close_after_failure(error))),
+        }
+      }
     },
   )
 }
@@ -215,6 +226,7 @@ pub(crate) fn open_session(
   )
   .with_working_dir(canonical_cwd)
   .with_thinking(config.thinking)
+  .with_max_requests(config.limits.max_model_requests_per_turn as usize)
   .with_compaction_strategy(rupi_runtime::CompactionStrategy::Summarize);
   if !skills_prompt.is_empty() {
     // The skill-control prompt is the whole system prompt rupi speaks today, and
@@ -285,6 +297,27 @@ impl SessionHandle<'_> {
       return Err(TurnError::Aborted(TurnStatus::BudgetExhausted));
     }
     Ok(())
+  }
+
+  /// Run one bounded no-tool finalization assessment for a resumed partial session.
+  ///
+  /// The assessment is printed like any other answer, but the caller deliberately
+  /// closes it as an interrupted session so a useful summary cannot be mistaken for
+  /// proof that the project was completed or verified.
+  pub fn finalize(&mut self, prompt: &str) -> Result<TurnReport, TurnError> {
+    let bounded_prompt = format!(
+      "This is a bounded finalization assessment of the current coding task. Do not attempt new tool calls; no tools are available. Summarize what is complete, identify unfinished files or verification, and give the safest next continuation step. The user requested: {prompt}"
+    );
+    let result =
+      self
+        .runtime
+        .run_finalization(&bounded_prompt, &CancelToken::new(), &mut self.progress);
+    if result.is_ok() {
+      // Finalization is intentionally returned as an incomplete failure, so the
+      // ordinary `close` path does not get a chance to flush the answer for us.
+      save(&mut self.progress.io_error, self.progress.surface.finish());
+    }
+    result
   }
 
   /// Run one user turn under a cancellation token the caller holds.
@@ -453,7 +486,7 @@ impl SessionHandle<'_> {
   /// summary line.
   pub fn close_after_failure(&mut self, error: TurnError) -> TurnError {
     if error.session_recoverable() {
-      if let Err(sink_error) = self.runtime.end_session(SessionEndReason::Fatal {
+      if let Err(sink_error) = self.runtime.end_session(SessionEndReason::Interrupted {
         message: turn_error(&error),
       }) {
         return sink_error;
@@ -691,6 +724,15 @@ impl TurnProgress for CliProgress<'_> {
 
   fn on_request_started(&mut self, model: &ModelRef) {
     save(&mut self.io_error, self.surface.request_started(model));
+  }
+
+  fn on_request_started_with_budget(&mut self, model: &ModelRef, request: usize, max: usize) {
+    save(
+      &mut self.io_error,
+      self
+        .surface
+        .request_started_with_budget(model, request, max),
+    );
   }
 
   fn on_reasoning(&mut self, text: &str, provenance: ReasoningProvenance) {

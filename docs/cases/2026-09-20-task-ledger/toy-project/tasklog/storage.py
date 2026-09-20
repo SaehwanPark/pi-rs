@@ -5,10 +5,10 @@ Two rules drive this module:
 * A failed command never touches the state file: validation happens on the
   decoded document, and the bytes are serialised completely before anything is
   written, so a serialisation error cannot truncate the ledger.
-* A write that succeeds is complete.  The document goes to a temporary file in
-  the same directory, is flushed to disk, then ``os.replace`` moves it into
-  place, which is atomic on Windows and POSIX.  A crash leaves either the old
-  file or the new one, never a partial JSON document.
+* A write is assembled completely before replacement.  The document goes to a
+  temporary file in the same directory, is flushed to disk, then ``os.replace``
+  moves it into place.  This prevents partial JSON from an ordinary interrupted
+  write; it is not a claim of full power-loss durability on every filesystem.
 """
 
 from __future__ import annotations
@@ -80,7 +80,9 @@ def load_ledger(path: str | os.PathLike[str]) -> Ledger:
             "or choose another location with ${ENV_PATH}"
         ) from None
     if not text.strip():
-        return Ledger.empty()
+        raise StorageError(
+            f"state file {path} is empty; repair it or delete it to start a new ledger"
+        )
 
     try:
         document = json.loads(text)

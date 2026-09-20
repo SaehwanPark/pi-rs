@@ -61,7 +61,8 @@ def parse_id(value: object) -> int:
         task_id = value
     elif isinstance(value, str):
         text = value.strip()
-        if not text.lstrip("+-").isdigit():
+        digits = text.lstrip("+-")
+        if not digits or any(character not in "0123456789" for character in digits):
             raise _bad_id(value)
         try:
             task_id = int(text)
@@ -140,6 +141,12 @@ class Ledger:
         object.__setattr__(self, "tasks", tuple(self.tasks))
         object.__setattr__(self, "next_id", parse_id(self.next_id))
         _check_unique_ids(self.tasks)
+        highest = max((task.id for task in self.tasks), default=0)
+        if self.next_id <= highest:
+            raise CorruptState(
+                f"next_id is {self.next_id} but it must be greater than every "
+                f"task id (highest is {highest})"
+            )
 
     @classmethod
     def empty(cls) -> "Ledger":

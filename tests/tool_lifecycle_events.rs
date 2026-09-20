@@ -189,15 +189,15 @@ fn a_failing_tool_action_records_a_failure() {
 /// between success and failure for a command that could already have written state.
 #[test]
 fn an_outcome_the_runtime_cannot_determine_is_not_coerced_into_success_or_failure() {
-  // `sleep 5` cannot finish inside `timeout_ms`, so the command is killed while it
-  // is still running and its completion is never observed.
+  // Use a platform-native long-running shell command so this lifecycle test
+  // exercises timeout semantics rather than assuming a Unix `sleep` binary.
+  #[cfg(windows)]
+  let timeout_command = r#"{"command":"ping -n 6 127.0.0.1 >nul","timeout_ms":250}"#;
+  #[cfg(not(windows))]
+  let timeout_command = r#"{"command":"sleep 5","timeout_ms":250}"#;
   let records = turn_records(
     &[
-      tool_call(
-        UNOBSERVED_CALL,
-        "exec",
-        r#"{"command":"sleep 5","timeout_ms":250}"#,
-      ),
+      tool_call(UNOBSERVED_CALL, "exec", timeout_command),
       text_response("completed"),
     ],
     2,

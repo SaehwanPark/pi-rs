@@ -30,6 +30,16 @@ use crate::{
 /// Configuration schema version.
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 
+/// Default number of model round-trips allowed for one user turn.
+pub const DEFAULT_MAX_MODEL_REQUESTS_PER_TURN: u32 = 32;
+
+/// Hard upper bound for the configurable per-turn request budget.
+///
+/// The budget is intentionally configurable for long-running local-model work,
+/// but an unbounded value would turn a provider/tool loop into an accidental
+/// runaway process. This is a policy ceiling, not the normal default.
+pub const MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN: u32 = 256;
+
 /// Default base URL for remote OpenAI-compatible cloud endpoints.
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -233,6 +243,26 @@ impl Default for UiConfig {
   }
 }
 
+/// Safety limits that apply to one runtime turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeLimits {
+  /// Maximum model round-trips for one user input, including retries and failover.
+  #[serde(default = "default_max_model_requests_per_turn")]
+  pub max_model_requests_per_turn: u32,
+}
+
+impl Default for RuntimeLimits {
+  fn default() -> Self {
+    Self {
+      max_model_requests_per_turn: DEFAULT_MAX_MODEL_REQUESTS_PER_TURN,
+    }
+  }
+}
+
+fn default_max_model_requests_per_turn() -> u32 {
+  DEFAULT_MAX_MODEL_REQUESTS_PER_TURN
+}
+
 /// Runtime configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeConfig {
@@ -255,6 +285,8 @@ pub struct RuntimeConfig {
   pub tools: ToolPolicy,
   #[serde(default)]
   pub ui: UiConfig,
+  #[serde(default)]
+  pub limits: RuntimeLimits,
   #[serde(default)]
   pub trace: TraceRetention,
   #[serde(default)]
@@ -369,6 +401,7 @@ impl RuntimeConfig {
       endpoints: Vec::new(),
       tools: ToolPolicy::default(),
       ui: UiConfig::default(),
+      limits: RuntimeLimits::default(),
       trace: TraceRetention::default(),
       redaction: RedactionPolicy::default(),
       mcp_servers: Vec::new(),
@@ -391,6 +424,16 @@ impl RuntimeConfig {
     }
     if self.state_dir.trim().is_empty() {
       return Err(ConfigError("state_dir is required".into()));
+    }
+    if self.limits.max_model_requests_per_turn == 0 {
+      return Err(ConfigError(
+        "limits.max_model_requests_per_turn must be greater than zero".into(),
+      ));
+    }
+    if self.limits.max_model_requests_per_turn > MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN {
+      return Err(ConfigError(format!(
+        "limits.max_model_requests_per_turn must not exceed {MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN}"
+      )));
     }
     if let Some(backup) = &self.backup {
       if backup == &self.primary {
@@ -676,6 +719,46 @@ mod tests {
     assert!(!parsed.tools.allow_read_outside);
     assert!(!parsed.tools.allow_search_outside);
     assert!(!parsed.tools.allow_write_outside);
+    assert_eq!(
+      parsed.limits.max_model_requests_per_turn,
+      DEFAULT_MAX_MODEL_REQUESTS_PER_TURN
+    );
+  }
+
+  #[test]
+  fn request_budget_is_configurable_with_a_hard_ceiling() {
+    let mut config = sample_config();
+    config.limits.max_model_requests_per_turn = 64;
+    let json = config.to_json_string().unwrap();
+    assert_eq!(
+      RuntimeConfig::parse(&json)
+        .unwrap()
+        .limits
+        .max_model_requests_per_turn,
+      64
+    );
+
+    config.limits.max_model_requests_per_turn = 0;
+    assert!(
+      config
+        .validate()
+        .unwrap_err()
+        .0
+        .contains("greater than zero")
+    );
+    config.limits.max_model_requests_per_turn = MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN + 1;
+    assert!(config.validate().unwrap_err().0.contains("must not exceed"));
+  }
+
+  #[test]
+  fn older_config_without_limits_uses_the_safe_default() {
+    let mut value = serde_json::to_value(sample_config()).unwrap();
+    value.as_object_mut().unwrap().remove("limits");
+    let parsed = RuntimeConfig::parse(&serde_json::to_string(&value).unwrap()).unwrap();
+    assert_eq!(
+      parsed.limits.max_model_requests_per_turn,
+      DEFAULT_MAX_MODEL_REQUESTS_PER_TURN
+    );
   }
 
   #[test]

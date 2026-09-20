@@ -60,11 +60,15 @@ class Context:
         print(text, file=self.out)
 
 
-def _add_state_option(parser: argparse.ArgumentParser) -> None:
+def _add_state_option(
+    parser: argparse.ArgumentParser,
+    *,
+    default: object = argparse.SUPPRESS,
+) -> None:
     parser.add_argument(
         "--state",
         metavar="PATH",
-        default=None,
+        default=default,
         help=(
             f"state file to use instead of ./{DEFAULT_FILENAME}; ${ENV_PATH} "
             "is also honoured"
@@ -110,6 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
         version=f"tasklog {__version__}",
         help="show the tasklog version and exit",
     )
+    _add_state_option(parser, default=None)
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
     add = subparsers.add_parser(
@@ -190,7 +195,7 @@ def _cmd_list(context: Context) -> int:
         context.line(f"No {scope}. Add one with: python -m tasklog add TEXT")
         return EXIT_OK
     _render_tasks(context, tasks)
-    context.line(ledger.summary())
+    context.line(ledger.summary() if context.args.all else f"{len(tasks)} open")
     return EXIT_OK
 
 

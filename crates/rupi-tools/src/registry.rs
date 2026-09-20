@@ -262,6 +262,7 @@ impl ToolRegistry {
     self.register(Box::new(crate::GrepTool::new(self.runtime.clone())));
     self.register(Box::new(crate::EditTool::new(self.runtime.clone())));
     self.register(Box::new(crate::ExecTool::new(self.runtime.clone())));
+    self.register(Box::new(crate::ProcessTool::new(self.runtime.clone())));
     self
   }
 
