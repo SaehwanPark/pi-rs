@@ -1,0 +1,11 @@
+.rupi-state/
+.rupi-state-recovery/
+.rupi-state-verify/
+.rupi-state-retry/
+__pycache__/
+*.py[cod]
+*.sqlite3
+*.sqlite3-*
+var/
+*.log
+*.tmp
