@@ -1,0 +1,8 @@
+{
+  "cold_ms": 11.058,
+  "warm_mean_ms": 10.987,
+  "warm_median_ms": 10.949,
+  "warm_min_ms": 10.474,
+  "warm_max_ms": 11.629,
+  "iterations": 10
+}
