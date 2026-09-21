@@ -158,7 +158,11 @@ function New-BenchmarkWorkspace([hashtable]$case, [string]$agentRoot) {
     if ($null -eq $config.limits) {
       $config | Add-Member -MemberType NoteProperty -Name limits -Value ([pscustomobject]@{})
     }
-    $config.limits.max_model_requests_per_turn = 8
+    if ($null -eq $config.limits.PSObject.Properties["max_model_requests_per_turn"]) {
+      $config.limits | Add-Member -MemberType NoteProperty -Name max_model_requests_per_turn -Value 8
+    } else {
+      $config.limits.max_model_requests_per_turn = 8
+    }
     if ($config.endpoints -and $config.endpoints[0].capabilities) {
       $config.endpoints[0].capabilities.max_output_tokens = 16384
     }
