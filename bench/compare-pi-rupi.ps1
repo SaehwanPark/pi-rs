@@ -101,6 +101,7 @@ function Invoke-External {
   $psi.WorkingDirectory = $WorkingDirectory
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow = $true
+  $psi.RedirectStandardInput = $true
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
   foreach ($argument in $Arguments) {
@@ -114,6 +115,7 @@ function Invoke-External {
   $process.StartInfo = $psi
   $started = [Diagnostics.Stopwatch]::StartNew()
   [void]$process.Start()
+  $process.StandardInput.Close()
   $stdoutTask = $process.StandardOutput.ReadToEndAsync()
   $stderrTask = $process.StandardError.ReadToEndAsync()
   $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
@@ -361,11 +363,17 @@ function Invoke-AgentCase([hashtable]$case, [string]$agent, [string]$root) {
       $args.Add("--"); $args.Add($prompt)
       $env["PI_CODING_AGENT_DIR"] = $piConfig; $env["PI_OFFLINE"] = "1"
       $piLauncher = (Get-Command pi -ErrorAction Stop).Source
-      $piFileName = $piLauncher
-      $piArguments = @($args)
-      if ([IO.Path]::GetExtension($piLauncher) -eq ".ps1") {
+      $nodeExe = (Get-Command node.exe -ErrorAction SilentlyContinue)
+      $piBundle = Join-Path (Split-Path $piLauncher -Parent) "node_modules\@earendil-works\pi-coding-agent\dist\bundle\cli.js"
+      if ($nodeExe -and (Test-Path $piBundle)) {
+        $piFileName = $nodeExe.Source
+        $piArguments = @($piBundle) + @($args)
+      } elseif ([IO.Path]::GetExtension($piLauncher) -eq ".ps1") {
         $piFileName = (Get-Command pwsh.exe -ErrorAction Stop).Source
         $piArguments = @("-NoProfile", "-File", $piLauncher) + @($args)
+      } else {
+        $piFileName = $piLauncher
+        $piArguments = @($args)
       }
       $call = Invoke-External -FileName $piFileName -Arguments $piArguments -WorkingDirectory $workspace.project -StdoutPath (Join-Path $turnRoot "stdout.jsonl") -StderrPath (Join-Path $turnRoot "stderr.txt") -TimeoutSeconds $TurnTimeoutSeconds -Environment $env
       $metrics = Read-PiMetrics (Join-Path $turnRoot "stdout.jsonl")
