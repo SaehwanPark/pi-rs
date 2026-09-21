@@ -1,0 +1,21 @@
+You are implementing a new small project from scratch in the current workspace.
+Read SPEC.md completely before acting. Build the complete dependency-free
+receiptledger package, a readable README.md, and focused unittest tests. Work
+only inside this project workspace; do not edit files outside it and do not edit
+the acceptance oracle. Use only Python standard-library modules.
+
+Use direct argv process calls for Python and tests on Windows; avoid Unix shell
+syntax and long exploratory commands. Start with a real write or edit after
+understanding the contract, then implement signed atomic admission, SQLite
+persistence, the bounded direct-argv worker, ordered dependency/barrier fan-in,
+leases/reclaim, private per-claim fencing, stable delivery-key receipt recovery
+after a lost sink acknowledgement, and the append-only SHA-256 audit ledger.
+Audit state transitions must be committed with the authoritative mutation,
+must omit secrets and private claim tokens, and must be checked by a read-only
+audit verifier. Do not use the audit log to drive work. Preserve unknown sink
+outcomes, at-least-once delivery, and the explicit not-exactly-once boundary.
+
+Run the project unittest suite, the help commands, audit verification, and a
+small smoke check before finishing. Do not edit the acceptance oracle. Do not
+treat your final summary as proof: report exact checks and any incomplete work
+only after the files and tests exist.
