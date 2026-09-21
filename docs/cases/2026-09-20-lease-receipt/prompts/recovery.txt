@@ -1,0 +1,11 @@
+Continue the incomplete Lease Receipt implementation in this workspace.
+Read SPEC.md and inspect the files already present. Work only in the project
+workspace and do not edit the acceptance oracle. Finish missing implementation,
+README, and focused tests. Prioritize exact HMAC admission and SQLite restart
+persistence, direct-argv delivery, ordered fan-out/barrier fan-in, leases and
+reclaim, conditional token-matched finalization, stale-worker non-overwrite,
+and lost-acknowledgement recovery: the same stable delivery key must let an
+idempotent sink replay one durable receipt without applying the logical side
+effect twice. Use direct argv on Windows. Run the complete project unittest
+suite before giving a final summary. If anything remains incomplete, say
+exactly what failed instead of claiming success.

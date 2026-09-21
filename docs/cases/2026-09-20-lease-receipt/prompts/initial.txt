@@ -1,0 +1,18 @@
+You are implementing a new small project from scratch in the current workspace.
+Read SPEC.md completely before acting. Build the complete dependency-free
+leasereceipt package, a readable README.md, and focused unittest tests. Work
+only inside this project workspace; do not edit files outside it and do not edit
+the acceptance oracle. Use only Python standard-library modules.
+
+Use direct argv process calls for Python and tests on Windows; avoid Unix shell
+syntax and long exploratory commands. Start with a real write or edit after
+understanding the contract, then implement signed atomic admission, SQLite
+persistence, the bounded direct-argv worker, ordered dependency/barrier fan-in,
+leases/reclaim, private per-claim fencing, and stable delivery-key receipt
+recovery after a lost sink acknowledgement. Every finalization must reject a
+stale token without changing newer state. A retry must reuse the same delivery
+key but never expose the private claim token. Run the project unittest suite,
+the help commands, and a small smoke check before finishing. Do not weaken the
+specification or claim exactly-once delivery for arbitrary sinks. Do not treat
+your final summary as proof: report exact checks and any incomplete work only
+after the files and tests exist.
