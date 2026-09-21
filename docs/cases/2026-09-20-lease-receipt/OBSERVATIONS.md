@@ -263,4 +263,3 @@ Commands run from the repository root:
 
 The startup JSON is committed under this case directory, not under repository
 benchmark state.
-

@@ -56,4 +56,3 @@ The receipt rule is an explicit idempotent-sink protocol, not a general exactly-
 once guarantee. A sink that ignores `delivery_key` can still observe duplicate
 requests. Schema migration, multi-database coordination, and arbitrary
 concurrent-worker guarantees remain outside this bounded case.
-

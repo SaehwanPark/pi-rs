@@ -85,4 +85,3 @@ inform a future generic runtime contract or compatibility fixture. Preserve the
 bounded distinction between retryable/lost acknowledgement, `Unknown` side
 effect state, and exactly-once claims; do not count this case as evidence that
 arbitrary external sinks are exactly once.
-
