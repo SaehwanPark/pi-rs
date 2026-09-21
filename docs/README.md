@@ -43,6 +43,9 @@ For end users and system integrators, the primary documentation is published via
   - **Lease Receipt:** a live authenticated HTTP/SQLite pipeline worker with
       stable delivery keys, durable sink receipts, lost-acknowledgement
       recovery, lease fencing, and an independent acceptance oracle.
+  - **Receipt Ledger:** a live authenticated HTTP/SQLite pipeline worker with
+      a same-transaction SHA-256 audit chain, read-only verification, tamper
+      detection, receipts, lease fencing, and an independent acceptance oracle.
   - **CLI Reference:** Detailed usage of `run`, `interactive`, `trace`, `replay`, `skills`, `prompts`, `packages`, `trust`, `compat`, `import-pi`, and `export`.
   - **Interactive TUI:** Keyboard shortcuts, editor buffer, syntax highlighting, status line.
   - **Provenance Model:** Understanding `[native reasoning]`, `[provider summary]`, `[declared]`, and `[reconstructed]`.

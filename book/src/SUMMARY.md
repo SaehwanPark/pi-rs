@@ -14,6 +14,7 @@
 - [Live example: Lease Cascade](getting-started/lease-cascade.md)
 - [Live example: Lease Fence](getting-started/lease-fence.md)
 - [Live example: Lease Receipt](getting-started/lease-receipt.md)
+- [Live example: Receipt Ledger](getting-started/receipt-ledger.md)
 
 # User Guide
 - [Interactive TUI](user-guide/interactive-tui.md)
