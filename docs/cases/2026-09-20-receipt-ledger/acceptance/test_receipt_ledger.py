@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from urllib import error, request
 
@@ -311,7 +312,7 @@ def stop_helper_process(pid: int) -> None:
 
 
 def read_audit_rows(db: Path) -> list[tuple[int, str, str, str]]:
-    with sqlite3.connect(db) as connection:
+    with closing(sqlite3.connect(db)) as connection:
         return list(
             connection.execute(
                 "SELECT seq, event_json, prev_hash, event_hash "
@@ -441,7 +442,7 @@ class ReceiptLedgerOracle(unittest.TestCase):
 
         stop_process(self.service)
         self.service = None
-        with sqlite3.connect(self.db) as connection:
+        with closing(sqlite3.connect(self.db)) as connection:
             connection.execute(
                 "UPDATE audit_events SET event_json = REPLACE(event_json, 'job_succeeded', 'edited') "
                 "WHERE seq = (SELECT MAX(seq) FROM audit_events)"
