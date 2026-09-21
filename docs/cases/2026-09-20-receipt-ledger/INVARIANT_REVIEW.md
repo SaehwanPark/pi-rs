@@ -1,8 +1,8 @@
 # Invariant review
 
-Change: `2026-09-20-receipt-ledger`  
-Owner: fresh-memory tester  
-Status: ready  
+Change: `2026-09-20-receipt-ledger`
+Owner: fresh-memory tester
+Status: ready
 Verdict: **pass**
 
 Inputs reviewed: `CASE_PLAN.md`, `project/SPEC.md`, the case implementation
@@ -42,4 +42,3 @@ repository tests, canonical design documents, or roadmap state.
   concurrent-worker or high-volume scheduling guarantee.
 
 These are stated contract boundaries, not findings against the Loop 9 slice.
-

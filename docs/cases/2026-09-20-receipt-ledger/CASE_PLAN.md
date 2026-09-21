@@ -157,4 +157,3 @@ Before final handoff, apply the repository invariant review to the case diff:
 - private claim identity is never exposed as a delivery identity;
 - optional integrations and backup models remain lazy;
 - no case artifact claims exactly-once delivery for arbitrary sinks.
-
