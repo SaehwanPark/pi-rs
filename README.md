@@ -298,6 +298,27 @@ ordered fan-in, and bounded trace/replay evidence. The checked-in fixture
 passes after tester repair; the case reports do not claim model-authored
 completion.
 
+## Live example: Lease Receipt
+
+[Lease Receipt](https://saehwanpark.github.io/rupi/getting-started/lease-receipt.html)
+is a ninth dependency-free Python example: an authenticated HTTP/SQLite
+pipeline worker with stable delivery keys, durable sink receipts, lost-
+acknowledgement recovery, private lease fencing, ordered barrier fan-in, and a
+direct-argv sink. Verify its project suite and independent fresh-process oracle:
+
+```bash
+cd docs/cases/2026-09-20-lease-receipt/project
+python -W error::ResourceWarning -m unittest discover -s tests -p "test_*.py" -v
+cd ..
+python -W error::ResourceWarning -m unittest discover -s acceptance -p "test_*.py" -v
+```
+
+The [Lease Receipt walkthrough](https://saehwanpark.github.io/rupi/getting-started/lease-receipt.html)
+covers stable logical delivery identity, receipt replay after a lost
+acknowledgement, at-least-once/idempotent-sink semantics, lease fencing, and
+bounded trace/replay evidence. The checked-in fixture passes after tester
+repair; the case reports do not claim model-authored completion.
+
 ## Commands
 
 | Command | Purpose |
