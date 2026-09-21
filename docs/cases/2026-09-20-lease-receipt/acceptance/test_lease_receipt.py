@@ -4,6 +4,7 @@ import ast
 import hashlib
 import hmac
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -208,6 +209,7 @@ def worker_command(
     block_after_apply_job: str | None = None,
     claimed_file: Path | None = None,
     applied_file: Path | None = None,
+    pid_file: Path | None = None,
     done_file: Path | None = None,
     release_file: Path | None = None,
     retry_job: str | None = None,
@@ -222,6 +224,8 @@ def worker_command(
         sink_args.extend(["--claimed-file", str(claimed_file)])
     if applied_file is not None:
         sink_args.extend(["--applied-file", str(applied_file)])
+    if pid_file is not None:
+        sink_args.extend(["--pid-file", str(pid_file)])
     if done_file is not None:
         sink_args.extend(["--done-file", str(done_file)])
     if release_file is not None:
@@ -275,6 +279,16 @@ def wait_for(predicate, timeout: float = 6) -> None:
             return
         time.sleep(0.05)
     raise AssertionError("condition did not become true before timeout")
+
+
+def stop_helper_process(pid: int) -> None:
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False)
+        return
+    try:
+        os.kill(pid, 15)
+    except OSError:
+        return
 
 
 class LeaseReceiptOracle(unittest.TestCase):
@@ -491,6 +505,7 @@ class LeaseReceiptOracle(unittest.TestCase):
         receipts = self.root / "receipt-store.json"
         first_log = self.root / "receipt-first.log"
         applied = self.root / "applied.flag"
+        pid_file = self.root / "sink.pid"
         release = self.root / "release.flag"
         done = self.root / "done.flag"
         first = subprocess.Popen(
@@ -502,6 +517,7 @@ class LeaseReceiptOracle(unittest.TestCase):
                 lease_seconds=1,
                 block_after_apply_job="source",
                 applied_file=applied,
+                pid_file=pid_file,
                 done_file=done,
                 release_file=release,
             ),
@@ -542,6 +558,10 @@ class LeaseReceiptOracle(unittest.TestCase):
             self.assertNotIn("claim_token", json.dumps(first_entries + second_entries))
         finally:
             release.write_text("release\n", encoding="utf-8")
+            if pid_file.exists():
+                sink_pid = int(pid_file.read_text(encoding="utf-8").strip())
+                time.sleep(0.1)
+                stop_helper_process(sink_pid)
             if first.poll() is None:
                 first.kill()
                 first.wait(timeout=5)

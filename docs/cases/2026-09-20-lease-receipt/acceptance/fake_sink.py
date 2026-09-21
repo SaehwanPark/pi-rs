@@ -17,6 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--block-after-apply-job")
     parser.add_argument("--claimed-file")
     parser.add_argument("--applied-file")
+    parser.add_argument("--pid-file")
     parser.add_argument("--done-file")
     parser.add_argument("--release-file")
     parser.add_argument("--retry-job", action="append", default=[])
@@ -72,6 +73,8 @@ def make_output(value: dict, label: str) -> dict:
 
 def main() -> int:
     args = parse_args()
+    if args.pid_file:
+        Path(args.pid_file).write_text(str(os.getpid()) + "\n", encoding="utf-8")
     line = sys.stdin.readline()
     if not line:
         return 2
