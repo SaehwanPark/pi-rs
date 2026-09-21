@@ -1,3 +1,6 @@
 /target
 /_workspace/
 /book/book/
+
+# Ignored local artifacts from the Pi vs rupi benchmark.
+/.benchmark/
