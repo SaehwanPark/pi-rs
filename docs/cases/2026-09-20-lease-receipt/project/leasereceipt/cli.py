@@ -43,4 +43,3 @@ def main(argv: list[str] | None = None) -> int:
     if not args.once:
         parser.error("worker requires --once")
     return run_worker(args.db, args.sink, args.sink_arg, args.lease_seconds)
-

@@ -119,4 +119,3 @@ the final report must distinguish model-created files from tester repair and
 must not call the project model-complete. If both independent gates pass after
 repair, T is accepted as a tester case while any model-authoring stopgate
 remains visible.
-

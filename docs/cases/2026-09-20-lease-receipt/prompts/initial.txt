@@ -16,4 +16,3 @@ the help commands, and a small smoke check before finishing. Do not weaken the
 specification or claim exactly-once delivery for arbitrary sinks. Do not treat
 your final summary as proof: report exact checks and any incomplete work only
 after the files and tests exist.
-

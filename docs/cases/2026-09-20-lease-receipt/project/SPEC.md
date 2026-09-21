@@ -316,4 +316,3 @@ The project is complete only when:
   barrier, exactly-once delivery, or a general concurrent-worker guarantee;
 - arbitrary sink protocols, shell pipelines, external network services, or
   changes to the `rupi` runtime/source/tests.
-

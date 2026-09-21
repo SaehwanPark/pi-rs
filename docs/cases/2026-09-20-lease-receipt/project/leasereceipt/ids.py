@@ -160,4 +160,3 @@ def delivery_key(pipeline_id: str, job_id: str) -> str:
     """Return the public logical-delivery identity, never the private claim token."""
 
     return f"{pipeline_id}:{job_id}"
-

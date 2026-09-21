@@ -9,4 +9,3 @@ idempotent sink replay one durable receipt without applying the logical side
 effect twice. Use direct argv on Windows. Run the complete project unittest
 suite before giving a final summary. If anything remains incomplete, say
 exactly what failed instead of claiming success.
-

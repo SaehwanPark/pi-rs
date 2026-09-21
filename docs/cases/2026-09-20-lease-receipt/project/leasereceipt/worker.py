@@ -118,4 +118,3 @@ def _invoke_sink(
     if not isinstance(receipt_id, str) or not receipt_id.strip():
         return "retryable", "successful sink response must contain a receipt_id"
     return "success", {"output": response["output"], "receipt_id": receipt_id.strip()}
-

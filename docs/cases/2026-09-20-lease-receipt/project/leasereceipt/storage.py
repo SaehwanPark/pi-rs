@@ -392,4 +392,3 @@ def _dump(value: Any) -> str:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
-

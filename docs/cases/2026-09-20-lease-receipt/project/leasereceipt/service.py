@@ -91,4 +91,3 @@ def serve(db: str, secret: str, host: str, port: int) -> None:
         server.serve_forever()
     finally:
         server.server_close()
-

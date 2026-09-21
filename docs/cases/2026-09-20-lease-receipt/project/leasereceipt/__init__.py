@@ -18,4 +18,3 @@ STATUS_LEASED = "leased"
 STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 STATUS_BLOCKED = "blocked"
-

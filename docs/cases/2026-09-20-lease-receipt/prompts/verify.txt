@@ -6,4 +6,3 @@ check if the project is complete. Use direct process argv on Windows and avoid
 Unix shell writes. Exclude .rupi-state*, __pycache__, and acceptance from broad
 listings and import review. Report exact commands, exit statuses, and whether
 the project appears ready for the independent fresh-process oracle.
-
