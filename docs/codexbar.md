@@ -34,6 +34,6 @@ uvx --from ../ai-usage-monitor usage <subscription>
 
 Replace `<subscription>` with the desired subscription name among `codex`, `cursor`, `antigravity`.
 
-- `codex`: OpenAI Codex subscription. Use this when you use OpenAI GPT models.
-- `cursor`: Cursor subscription. Use this when you use models via Cursor routing (both Cursor-provided models and 3rd-party models). Note this subscription does have only monthly usage limits. Also this option applies only when you are working from the Cursor agents.
-- `antigravity`: Google AI subscription. Use this when you use Gemini models via Antigravity. This option applies only when you are working from Antigravity app or Antigravity CLI.
+- `codex`: OpenAI Codex subscription. Use this when you use OpenAI GPT models. See `5-hour` or `Weekly` rows accordingly.
+- `cursor`: Cursor subscription. Use this when you use models via Cursor routing (both Cursor-provided models on `Cursor` row and 3rd-party models on `Third Party` row; Ignore `Total` or `Grok Bot` rows). Note this subscription does have only monthly usage limits. Also this option applies only when you are working from the Cursor agents.
+- `antigravity`: Google AI subscription. Use this when you use Gemini models via Antigravity. This option applies only when you are working from Antigravity app or Antigravity CLI. See `Gemini weekly` or `Gemini 5h` rows accordingly.
