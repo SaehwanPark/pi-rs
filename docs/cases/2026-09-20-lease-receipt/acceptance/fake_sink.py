@@ -98,12 +98,20 @@ def main() -> int:
             {
                 "applied": False,
                 "delivery_key": delivery_key,
+                "fan_in": value.get("fan_in"),
                 "job_id": job_id,
                 "label": args.label,
+                "inputs": value.get("inputs"),
                 "replayed": False,
             },
         )
-        print(json.dumps({"job_id": job_id, "ok": False, "retryable": True, "error": "retry requested"}))
+        print(json.dumps({
+            "delivery_key": delivery_key,
+            "job_id": job_id,
+            "ok": False,
+            "retryable": True,
+            "error": "retry requested",
+        }))
         return 0
     if job_id in args.fail_job:
         append_log(
@@ -111,12 +119,20 @@ def main() -> int:
             {
                 "applied": False,
                 "delivery_key": delivery_key,
+                "fan_in": value.get("fan_in"),
                 "job_id": job_id,
                 "label": args.label,
+                "inputs": value.get("inputs"),
                 "replayed": False,
             },
         )
-        print(json.dumps({"job_id": job_id, "ok": False, "retryable": False, "error": "terminal requested"}))
+        print(json.dumps({
+            "delivery_key": delivery_key,
+            "job_id": job_id,
+            "ok": False,
+            "retryable": False,
+            "error": "terminal requested",
+        }))
         return 0
 
     receipts_path = Path(args.receipts)
@@ -144,8 +160,10 @@ def main() -> int:
         {
             "applied": applied,
             "delivery_key": delivery_key,
+            "fan_in": value.get("fan_in"),
             "job_id": job_id,
             "label": args.label,
+            "inputs": value.get("inputs"),
             "replayed": replayed,
         },
     )
@@ -175,4 +193,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

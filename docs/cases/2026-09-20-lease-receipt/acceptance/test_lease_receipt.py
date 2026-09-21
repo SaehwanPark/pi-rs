@@ -397,7 +397,8 @@ class LeaseReceiptOracle(unittest.TestCase):
         )
         self.assertEqual(code, 0, stderr)
         retry_entries = read_log(retry_log)
-        self.assertEqual([entry["delivery_key"] for entry in retry_entries], [first_key, first_key])
+        self.assertEqual([entry["delivery_key"] for entry in retry_entries[:2]], [first_key, first_key])
+        self.assertEqual(retry_entries[2]["job_id"], "child")
         status, completed = http_call(base, "GET", "/pipelines/retry")
         self.assertEqual(status, 200)
         self.assertEqual(completed["status"], "succeeded")
@@ -582,4 +583,3 @@ class LeaseReceiptOracle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
