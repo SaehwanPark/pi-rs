@@ -23,16 +23,16 @@ $rupiBinary = Join-Path $repoRoot "target\debug\rupi.exe"
 
 function Get-CaseDefinitions {
   @(
-    @{ Id = "01-task-ledger"; Source = "cases\01-task-ledger\toy-project"; ProjectDir = "toy-project"; Package = "tasklog"; Focus = "a file-backed CLI ledger with stable IDs, atomic JSON writes, validation, and subprocess smoke behavior" },
-    @{ Id = "02-reading-queue"; Source = "cases\02-reading-queue\project"; ProjectDir = "project"; Package = "readqueue"; Focus = "a SQLite-backed HTTP CRUD service with deterministic errors and restart persistence" },
-    @{ Id = "03-event-outbox"; Source = "cases\03-event-outbox\project"; ProjectDir = "project"; Package = "outbox"; Focus = "an HTTP event outbox with idempotency, retry state, and a direct-argv NDJSON sink worker" },
-    @{ Id = "04-webhook-inbox"; Source = "cases\04-webhook-inbox\project"; ProjectDir = "project"; Package = "webhookinbox"; Focus = "an HMAC-authenticated HTTP inbox with leased delivery, crash reclaim, and a direct-argv sink" },
-    @{ Id = "05-batch-relay"; Source = "cases\05-batch-relay\project"; ProjectDir = "project"; Package = "batchrelay"; Focus = "a signed HTTP batch DAG with dependency ordering, retry/terminal failure, blocking, and leases" },
-    @{ Id = "06-artifact-pipeline"; Source = "cases\06-artifact-pipeline\project"; ProjectDir = "project"; Package = "artifactpipe"; Focus = "a signed data-flow DAG whose downstream jobs resolve declared scalar references from upstream JSON output" },
-    @{ Id = "07-lease-cascade"; Source = "cases\07-lease-cascade\project"; ProjectDir = "project"; Package = "leasecascade"; Focus = "a leased pipeline with ordered barrier fan-in, selected output collection, and blocked dependents" },
-    @{ Id = "08-lease-fence"; Source = "cases\08-lease-fence\project"; ProjectDir = "project"; Package = "leasefence"; Focus = "a pipeline with private claim-token fencing that rejects stale worker finalization" },
-    @{ Id = "09-lease-receipt"; Source = "cases\09-lease-receipt\project"; ProjectDir = "project"; Package = "leasereceipt"; Focus = "an idempotent sink pipeline with stable delivery keys and lost-ack receipt recovery" },
-    @{ Id = "10-receipt-ledger"; Source = "cases\10-receipt-ledger\project"; ProjectDir = "project"; Package = "receiptledger"; Focus = "the capstone pipeline with same-transaction append-only SHA-256 audit-chain verification" }
+    @{ Id = "01-task-ledger"; Source = "cases\01-task-ledger\toy-project"; ProjectDir = "toy-project"; Package = "tasklog"; Help = @(@("--help")); Focus = "a file-backed CLI ledger with stable IDs, atomic JSON writes, validation, and subprocess smoke behavior" },
+    @{ Id = "02-reading-queue"; Source = "cases\02-reading-queue\project"; ProjectDir = "project"; Package = "readqueue"; Help = @(@("--help"), @("serve", "--help")); Focus = "a SQLite-backed HTTP CRUD service with deterministic errors and restart persistence" },
+    @{ Id = "03-event-outbox"; Source = "cases\03-event-outbox\project"; ProjectDir = "project"; Package = "outbox"; Help = @(@("--help"), @("serve", "--help"), @("worker", "--help")); Focus = "an HTTP event outbox with idempotency, retry state, and a direct-argv NDJSON sink worker" },
+    @{ Id = "04-webhook-inbox"; Source = "cases\04-webhook-inbox\project"; ProjectDir = "project"; Package = "webhookinbox"; Help = @(@("--help"), @("serve", "--help"), @("worker", "--help")); Focus = "an HMAC-authenticated HTTP inbox with leased delivery, crash reclaim, and a direct-argv sink" },
+    @{ Id = "05-batch-relay"; Source = "cases\05-batch-relay\project"; ProjectDir = "project"; Package = "batchrelay"; Help = @(@("--help"), @("serve", "--help"), @("worker", "--help")); Focus = "a signed HTTP batch DAG with dependency ordering, retry/terminal failure, blocking, and leases" },
+    @{ Id = "06-artifact-pipeline"; Source = "cases\06-artifact-pipeline\project"; ProjectDir = "project"; Package = "artifactpipe"; Help = @(@("--help"), @("serve", "--help"), @("worker", "--help")); Focus = "a signed data-flow DAG whose downstream jobs resolve declared scalar references from upstream JSON output" },
+    @{ Id = "07-lease-cascade"; Source = "cases\07-lease-cascade\project"; ProjectDir = "project"; Package = "leasecascade"; Help = @(@("--help"), @("serve", "--help"), @("worker", "--help")); Focus = "a leased pipeline with ordered barrier fan-in, selected output collection, and blocked dependents" },
+    @{ Id = "08-lease-fence"; Source = "cases\08-lease-fence\project"; ProjectDir = "project"; Package = "leasefence"; Help = @(@("--help"), @("serve", "--help"), @("worker", "--help")); Focus = "a pipeline with private claim-token fencing that rejects stale worker finalization" },
+    @{ Id = "09-lease-receipt"; Source = "cases\09-lease-receipt\project"; ProjectDir = "project"; Package = "leasereceipt"; Help = @(@("--help"), @("serve", "--help"), @("worker", "--help")); Focus = "an idempotent sink pipeline with stable delivery keys and lost-ack receipt recovery" },
+    @{ Id = "10-receipt-ledger"; Source = "cases\10-receipt-ledger\project"; ProjectDir = "project"; Package = "receiptledger"; Help = @(@("--help"), @("serve", "--help"), @("worker", "--help"), @("audit", "--help")); Focus = "the capstone pipeline with same-transaction append-only SHA-256 audit-chain verification" }
   )
 }
 
@@ -50,8 +50,8 @@ oracle. Use only Python standard-library modules.
 On this Windows host, use the available file and process tools directly for
 known programs and avoid Unix-only shell assumptions or fragile inline quoting.
 Start with a real implementation write after understanding the contract. Run the
-project unittest suite, the relevant top-level/serve/worker help commands, and a
-small smoke check before finishing. Do not treat your final summary as proof:
+project unittest suite, the project-specific help commands described by SPEC.md,
+and a small smoke check before finishing. Do not treat your final summary as proof:
 report exact commands and statuses only after running them, and state any
 incomplete requirement explicitly.
 "@
@@ -67,7 +67,7 @@ focused test required by the spec. Prioritize the full reliability contract:
 $($case.Focus).
 
 Use only Python standard-library modules and direct process arguments on Windows.
-Run the complete project unittest suite and the relevant help commands. If
+Run the complete project unittest suite and the project-specific help commands. If
 anything remains incomplete or a check fails, say exactly what failed instead of
 claiming success.
 "@
@@ -223,14 +223,17 @@ function Get-RupiSessionId([string]$project) {
   $null
 }
 
-function Read-RupiMetrics([string]$project) {
+function Read-RupiMetrics([string]$project, [int]$SkipLines = 0) {
   $state = Join-Path $project ".rupi-state\sessions"
   $traceFiles = @(Get-ChildItem -LiteralPath $state -File -Filter "*.trace.jsonl" -ErrorAction SilentlyContinue)
   $started = 0; $completed = 0; $input = [int64]0; $output = [int64]0; $known = 0
   $toolRequested = 0; $toolCompleted = 0; $toolFailed = 0; $toolUnknown = 0
   $toolNames = [Collections.Generic.List[string]]::new(); $status = $null; $finish = [Collections.Generic.List[string]]::new()
+  $seenLines = 0
   foreach ($file in $traceFiles) {
     foreach ($line in (Get-Content -LiteralPath $file.FullName)) {
+      if ($seenLines -lt $SkipLines) { $seenLines++; continue }
+      $seenLines++
       try { $record = $line | ConvertFrom-Json } catch { continue }
       switch ($record.type) {
         "model_request_started" { $started++ }
@@ -255,7 +258,17 @@ function Read-RupiMetrics([string]$project) {
     usage_records = $known; tool_requests = $toolRequested; tool_completions = $toolCompleted
     tool_failures = $toolFailed; tool_unknown = $toolUnknown; tool_names = @($toolNames)
     turn_status = $status; finish_reasons = @($finish)
+    measurement_scope = "turn"
   }
+}
+
+function Get-RupiTraceLineCount([string]$project) {
+  $state = Join-Path $project ".rupi-state\sessions"
+  $count = 0
+  Get-ChildItem -LiteralPath $state -File -Filter "*.trace.jsonl" -ErrorAction SilentlyContinue | ForEach-Object {
+    $count += (Get-Content -LiteralPath $_.FullName | Measure-Object -Line).Lines
+  }
+  $count
 }
 
 function Read-PiMetrics([string]$stdoutPath) {
@@ -283,7 +296,7 @@ function Read-PiMetrics([string]$stdoutPath) {
     input_tokens = $input; output_tokens = $output; total_tokens = $input + $output
     usage_records = $known; tool_requests = $toolCalls; tool_completions = $toolResults
     tool_failures = $null; tool_unknown = $null; tool_names = @($toolNames)
-    turn_status = $stop; finish_reasons = @($stop); session_id = $session
+    turn_status = $stop; finish_reasons = @($stop); session_id = $session; measurement_scope = "turn"
   }
 }
 
@@ -300,7 +313,7 @@ function Invoke-Verification([hashtable]$case, [string]$agentRoot, [string]$proj
   $projectTest = Invoke-External -FileName $python -Arguments @("-W", "error::ResourceWarning", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py", "-v") -WorkingDirectory $project -StdoutPath (Join-Path $verifyRoot "project-tests.stdout.txt") -StderrPath (Join-Path $verifyRoot "project-tests.stderr.txt") -TimeoutSeconds 180
   $oracle = Invoke-External -FileName $python -Arguments @("-W", "error::ResourceWarning", "-m", "unittest", "discover", "-s", "acceptance", "-p", "test_*.py", "-v") -WorkingDirectory $agentRoot -StdoutPath (Join-Path $verifyRoot "oracle.stdout.txt") -StderrPath (Join-Path $verifyRoot "oracle.stderr.txt") -TimeoutSeconds 300
   $help = @()
-  foreach ($helpArgs in @(@("--help"), @("serve", "--help"), @("worker", "--help"), @("audit", "--help"))) {
+  foreach ($helpArgs in $case.Help) {
     $suffix = ($helpArgs -join "-")
     $help += Invoke-External -FileName $python -Arguments (@("-m", $case.Package) + $helpArgs) -WorkingDirectory $project -StdoutPath (Join-Path $verifyRoot ("help-{0}.stdout.txt" -f $suffix)) -StderrPath (Join-Path $verifyRoot ("help-{0}.stderr.txt" -f $suffix)) -TimeoutSeconds 30
   }
@@ -320,11 +333,12 @@ function Invoke-AgentCase([hashtable]$case, [string]$agent, [string]$root) {
     New-Item -ItemType Directory -Force -Path $turnRoot | Out-Null
     $args = [Collections.Generic.List[string]]::new(); $env = @{}
     if ($agent -eq "rupi") {
+      $traceLinesBefore = Get-RupiTraceLineCount $workspace.project
       $args.Add("run"); $args.Add("--config"); $args.Add($workspace.config); $args.Add("--cwd"); $args.Add(".")
       if ($sessionId) { $args.Add("--resume"); $args.Add($sessionId) }
       $args.Add("--prompt"); $args.Add($prompt); $args.Add("--no-color"); $args.Add("--no-reasoning"); $args.Add("--verbose")
       $call = Invoke-External -FileName $rupiBinary -Arguments @($args) -WorkingDirectory $workspace.project -StdoutPath (Join-Path $turnRoot "stdout.txt") -StderrPath (Join-Path $turnRoot "stderr.txt") -TimeoutSeconds $TurnTimeoutSeconds
-      $metrics = Read-RupiMetrics $workspace.project
+      $metrics = Read-RupiMetrics $workspace.project $traceLinesBefore
       $sessionId = Get-RupiSessionId $workspace.project
     } else {
       $sessionDir = Join-Path $agentRoot "pi-sessions"
@@ -336,7 +350,14 @@ function Invoke-AgentCase([hashtable]$case, [string]$agent, [string]$root) {
       if ($turn -gt 1) { $args.Add("--continue") }
       $args.Add("--"); $args.Add($prompt)
       $env["PI_CODING_AGENT_DIR"] = $piConfig; $env["PI_OFFLINE"] = "1"
-      $call = Invoke-External -FileName ((Get-Command pi -ErrorAction Stop).Source) -Arguments @($args) -WorkingDirectory $workspace.project -StdoutPath (Join-Path $turnRoot "stdout.jsonl") -StderrPath (Join-Path $turnRoot "stderr.txt") -TimeoutSeconds $TurnTimeoutSeconds -Environment $env
+      $piLauncher = (Get-Command pi -ErrorAction Stop).Source
+      $piFileName = $piLauncher
+      $piArguments = @($args)
+      if ([IO.Path]::GetExtension($piLauncher) -eq ".ps1") {
+        $piFileName = (Get-Command pwsh.exe -ErrorAction Stop).Source
+        $piArguments = @("-NoProfile", "-File", $piLauncher) + @($args)
+      }
+      $call = Invoke-External -FileName $piFileName -Arguments $piArguments -WorkingDirectory $workspace.project -StdoutPath (Join-Path $turnRoot "stdout.jsonl") -StderrPath (Join-Path $turnRoot "stderr.txt") -TimeoutSeconds $TurnTimeoutSeconds -Environment $env
       $metrics = Read-PiMetrics (Join-Path $turnRoot "stdout.jsonl")
       if ($metrics.session_id) { $sessionId = $metrics.session_id }
     }
