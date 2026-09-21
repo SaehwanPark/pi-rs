@@ -4,10 +4,12 @@ param(
   [string]$Agent = "all",
   [string[]]$CaseId = @(),
   [string]$RunId = "",
-  [ValidateRange(1, 3)]
-  [int]$MaxTurns = 2,
-  [ValidateRange(30, 1800)]
-  [int]$TurnTimeoutSeconds = 300,
+  [ValidateRange(1, 10)]
+  [int]$MaxTurns = 4,
+  [ValidateRange(30, 3600)]
+  [int]$TurnTimeoutSeconds = 900,
+  [ValidateRange(1, 100)]
+  [int]$MaxModelRequestsPerTurn = 24,
   [switch]$DryRun
 )
 
@@ -159,12 +161,20 @@ function New-BenchmarkWorkspace([hashtable]$case, [string]$agentRoot) {
       $config | Add-Member -MemberType NoteProperty -Name limits -Value ([pscustomobject]@{})
     }
     if ($null -eq $config.limits.PSObject.Properties["max_model_requests_per_turn"]) {
-      $config.limits | Add-Member -MemberType NoteProperty -Name max_model_requests_per_turn -Value 8
+      $config.limits | Add-Member -MemberType NoteProperty -Name max_model_requests_per_turn -Value $MaxModelRequestsPerTurn
     } else {
-      $config.limits.max_model_requests_per_turn = 8
+      $config.limits.max_model_requests_per_turn = $MaxModelRequestsPerTurn
     }
-    if ($config.endpoints -and $config.endpoints[0].capabilities) {
-      $config.endpoints[0].capabilities.max_output_tokens = 16384
+    if ($config.endpoints -and $config.endpoints.Count -gt 0) {
+      if ($config.endpoints[0].capabilities) {
+        $config.endpoints[0].capabilities.max_output_tokens = 16384
+      }
+      $reqTimeout = [math]::Max(600000, ($TurnTimeoutSeconds * 1000))
+      if ($null -eq $config.endpoints[0].PSObject.Properties["request_timeout_ms"]) {
+        $config.endpoints[0] | Add-Member -MemberType NoteProperty -Name request_timeout_ms -Value $reqTimeout
+      } else {
+        $config.endpoints[0].request_timeout_ms = $reqTimeout
+      }
     }
     Write-Json $configPath $config
   }
