@@ -79,8 +79,8 @@ argv, lazy startup, native provenance, and case-only scope all hold.
 
 - `9e704fa` — `test: define Loop 9 Receipt Ledger case`
 - `d5fa3c1` — `test: repair Loop 9 Receipt Ledger project`
-- The final evidence commit contains `OBSERVATIONS.md`,
-  `INVARIANT_REVIEW.md`, and this `FINAL_REPORT.md`.
+- `73b546b` — `test: record Loop 9 Receipt Ledger evidence`
+- `7d7b125` — `test: clean Loop 9 case documentation`
 
 Recommended parent integration:
 

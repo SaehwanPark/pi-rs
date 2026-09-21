@@ -236,5 +236,5 @@ runtime startup path.
 
 - `9e704fa` — `test: define Loop 9 Receipt Ledger case`
 - `d5fa3c1` — `test: repair Loop 9 Receipt Ledger project`
-- The final evidence commit adds this file, `INVARIANT_REVIEW.md`, and
-  `FINAL_REPORT.md` and is pushed with the branch before handoff.
+- `73b546b` — `test: record Loop 9 Receipt Ledger evidence`
+- `7d7b125` — `test: clean Loop 9 case documentation`
