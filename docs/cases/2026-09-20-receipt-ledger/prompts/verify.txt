@@ -1,0 +1,9 @@
+Perform a read-only verification of the Receipt Ledger project in the current
+workspace. Do not edit or write any file and do not use the acceptance oracle as
+an implementation import. Run the project unittest suite, top-level/serve/
+worker/audit help commands, the audit verifier against a temporary valid state
+if available, a standard-library import review, and a concise smoke check if the
+project is complete. Use direct process argv on Windows and avoid Unix shell
+writes. Exclude .rupi-state*, __pycache__, and acceptance from broad listings
+and import review. Report exact commands, exit statuses, and whether the
+project appears ready for the independent fresh-process oracle.

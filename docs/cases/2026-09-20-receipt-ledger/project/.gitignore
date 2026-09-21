@@ -1,0 +1,8 @@
+.rupi-state*/
+__pycache__/
+*.pyc
+*.sqlite3
+*.sqlite3-*
+*.log
+*.jsonl
+*.tmp

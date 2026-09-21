@@ -833,6 +833,16 @@ Do not begin until stable baselines exist.
       both model turns timed out before writing implementation files. The
       model-authoring stopgate remains active; see PR #116 and
       `docs/cases/2026-09-20-lease-receipt/FINAL_REPORT.md` (2026-09-20).
+- [!] Validate the next live project, Receipt Ledger: a dependency-free Python
+      HMAC-authenticated HTTP/SQLite pipeline worker with a same-transaction
+      SHA-256 audit chain, read-only verification, tamper detection, stable
+      delivery keys, durable sink receipts, private lease fencing, ordered
+      barrier fan-in, retryable and terminal failures, blocked dependents, and
+      a direct-argv sink. The checked-in project suite and independent
+      fresh-process oracle pass after bounded tester repair, but both model
+      turns stopped before functional completion. The model-authoring stopgate
+      remains active; see PR #117 and
+      `docs/cases/2026-09-20-receipt-ledger/FINAL_REPORT.md` (2026-09-20).
 
 ### P2 — Later / deliberately deferred
 

@@ -319,6 +319,28 @@ acknowledgement, at-least-once/idempotent-sink semantics, lease fencing, and
 bounded trace/replay evidence. The checked-in fixture passes after tester
 repair; the case reports do not claim model-authored completion.
 
+## Live example: Receipt Ledger
+
+[Receipt Ledger](https://saehwanpark.github.io/rupi/getting-started/receipt-ledger.html)
+is the tenth dependency-free Python example: an authenticated HTTP/SQLite
+pipeline worker with a same-transaction SHA-256 audit chain, read-only audit
+verification, tamper detection, stable delivery keys, sink receipts, private
+lease fencing, ordered barrier fan-in, and a direct-argv sink. Verify its
+project suite and independent fresh-process oracle:
+
+```bash
+cd docs/cases/2026-09-20-receipt-ledger/project
+python -W error::ResourceWarning -m unittest discover -s tests -p "test_*.py" -v
+cd ..
+python -W error::ResourceWarning -m unittest discover -s acceptance -p "test_*.py" -v
+```
+
+The [Receipt Ledger walkthrough](https://saehwanpark.github.io/rupi/getting-started/receipt-ledger.html)
+covers safe operational audit evidence, SHA-256 chain verification, tamper
+detection, receipt recovery, lease fencing, and bounded trace/replay evidence.
+The checked-in fixture passes after tester repair; the case reports do not
+claim model-authored completion.
+
 ## Commands
 
 | Command | Purpose |
