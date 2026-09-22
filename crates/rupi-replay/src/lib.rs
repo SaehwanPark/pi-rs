@@ -1514,6 +1514,7 @@ mod tests {
           model: model(),
           finish_reason: Some("stop".into()),
           input_tokens: None,
+          uncached_input_tokens: None,
           logical_prompt_tokens: None,
           cache_read_tokens: None,
           cache_write_tokens: None,

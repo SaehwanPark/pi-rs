@@ -1773,6 +1773,7 @@ impl<'a> TurnLoop<'a> {
                     })
                   }),
                   input_tokens: usage.input_tokens,
+                  uncached_input_tokens: usage.uncached_input_tokens,
                   logical_prompt_tokens: usage.logical_prompt_tokens,
                   cache_read_tokens: usage.cache_read_tokens,
                   cache_write_tokens: usage.cache_write_tokens,
@@ -1817,6 +1818,9 @@ impl<'a> TurnLoop<'a> {
               .as_ref()
               .and_then(|usage| usage.finish_reason.clone()),
             input_tokens: failed_usage.as_ref().and_then(|usage| usage.input_tokens),
+            uncached_input_tokens: failed_usage
+              .as_ref()
+              .and_then(|usage| usage.uncached_input_tokens),
             logical_prompt_tokens: failed_usage
               .as_ref()
               .and_then(|usage| usage.logical_prompt_tokens),
@@ -4108,6 +4112,8 @@ mod tests {
     unfinished: bool,
     /// Override the scripted response's provider finish reason.
     finish_reason: Option<String>,
+    /// Supply provider usage independently of the scripted response content.
+    completion_usage: Option<CompletionUsage>,
     /// Fail *every* request. `fail` is per-request-index and can run out, which
     /// cannot express a provider that is simply down.
     always: Option<ModelFailureKind>,
@@ -4132,6 +4138,7 @@ mod tests {
         calls: Arc::new(Mutex::new(Vec::new())),
         unfinished: false,
         finish_reason: None,
+        completion_usage: None,
         always: None,
         fail_after_stream: None,
       }
@@ -4155,6 +4162,11 @@ mod tests {
 
     fn finishes_with(mut self, reason: &str) -> Self {
       self.finish_reason = Some(reason.into());
+      self
+    }
+
+    fn with_usage(mut self, usage: CompletionUsage) -> Self {
+      self.completion_usage = Some(usage);
       self
     }
 
@@ -4262,6 +4274,9 @@ mod tests {
             ProviderEvent::ReasoningDelta { .. } => {}
           }
           sink.emit(event);
+        }
+        if let Some(usage) = &self.completion_usage {
+          return Ok(usage.clone());
         }
         if let Some(reason) = &self.finish_reason {
           usage.finish_reason = Some(reason.clone());
@@ -5575,6 +5590,49 @@ mod tests {
     // reader can tell native output from a reconstructed rationale.
     let completed = trace.find("model_request_completed").expect("completed");
     assert_eq!(completed["reasoning_provenance"], "native");
+  }
+
+  #[test]
+  fn cache_aware_token_usage_is_preserved_in_completed_request_event() {
+    let usage = CompletionUsage {
+      input_tokens: Some(100),
+      uncached_input_tokens: Some(20),
+      logical_prompt_tokens: Some(100),
+      cache_read_tokens: Some(70),
+      cache_write_tokens: Some(10),
+      output_tokens: Some(8),
+      provider_total_tokens: Some(108),
+      finish_reason: Some("stop".into()),
+      certainty: rupi_core::CompletionCertainty::Certain,
+    };
+    let provider = Scripted::new("usage", vec![text("answer")]).with_usage(usage);
+    let tools = registry_with(Vec::new());
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+
+    TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn("answer", &CancelToken::new(), &mut SilentProgress)
+    .unwrap();
+
+    let completed = trace
+      .find("model_request_completed")
+      .expect("completed request");
+    assert_eq!(completed["input_tokens"], 100);
+    assert_eq!(completed["uncached_input_tokens"], 20);
+    assert_eq!(completed["logical_prompt_tokens"], 100);
+    assert_eq!(completed["cache_read_tokens"], 70);
+    assert_eq!(completed["cache_write_tokens"], 10);
+    assert_eq!(completed["provider_total_tokens"], 108);
   }
 
   #[derive(Default)]

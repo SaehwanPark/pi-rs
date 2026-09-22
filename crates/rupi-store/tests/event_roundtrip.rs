@@ -403,9 +403,10 @@ fn model_request_completed_round_trips() {
     model: model(),
     finish_reason: Some("tool_calls".into()),
     input_tokens: Some(8_123),
+    uncached_input_tokens: Some(6_123),
     logical_prompt_tokens: Some(8_123),
-    cache_read_tokens: None,
-    cache_write_tokens: None,
+    cache_read_tokens: Some(1_800),
+    cache_write_tokens: Some(200),
     output_tokens: Some(4_567),
     provider_total_tokens: Some(12_690),
     duration_ms: 9_012,
@@ -424,6 +425,9 @@ fn model_request_completed_round_trips() {
   assert_eq!(body.model, model());
   assert_eq!(body.finish_reason.as_deref(), Some("tool_calls"));
   assert_eq!(body.input_tokens, Some(8_123));
+  assert_eq!(body.uncached_input_tokens, Some(6_123));
+  assert_eq!(body.cache_read_tokens, Some(1_800));
+  assert_eq!(body.cache_write_tokens, Some(200));
   assert_eq!(body.output_tokens, Some(4_567));
   assert_eq!(body.duration_ms, 9_012);
   assert_eq!(body.tool_calls, 2);
@@ -1013,6 +1017,7 @@ fn all_variants() -> Vec<AgentEvent> {
       model: model(),
       finish_reason: Some("stop".into()),
       input_tokens: Some(10),
+      uncached_input_tokens: None,
       logical_prompt_tokens: Some(10),
       cache_read_tokens: None,
       cache_write_tokens: None,

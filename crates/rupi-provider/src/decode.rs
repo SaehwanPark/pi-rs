@@ -786,7 +786,7 @@ mod tests {
     decoder
       .chunk(
         &json!({
-          "choices": [],
+          "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
           "usage": {
             "prompt_tokens": 100,
             "prompt_tokens_details": {

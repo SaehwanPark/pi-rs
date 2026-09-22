@@ -52,12 +52,22 @@ fn the_report_says_what_was_imported_and_what_was_left_out() {
   }
   // e-branch is a sibling of the path Pi's cursor ended on: counted by type, not hidden.
   assert_eq!(plan.report.off_path.get("message"), Some(&1));
-  // Pi recorded cache usage and an image; rupi's events have no field for either.
   // Kinds an import cannot carry are counted, not quietly dropped. An image is not one of
   // them: rupi holds images inline in a session's messages, so an import does the same.
   assert_eq!(plan.report.content.get("image"), None);
   assert_eq!(plan.report.messages, 6);
-  assert_eq!(plan.report.content.get("usage:cacheRead"), Some(&1));
+  assert_eq!(plan.report.content.get("usage:cacheRead"), None);
+  let completion = plan
+    .events
+    .iter()
+    .find_map(|mapped| match &mapped.event {
+      AgentEvent::ModelRequestCompleted(completed) => Some(completed),
+      _ => None,
+    })
+    .expect("assistant request usage is imported");
+  assert_eq!(completion.input_tokens, Some(1_410));
+  assert_eq!(completion.uncached_input_tokens, Some(210));
+  assert_eq!(completion.cache_read_tokens, Some(1_200));
 }
 
 #[test]

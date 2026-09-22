@@ -964,7 +964,7 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
               .zip(count("output"))
               .map(|(input, output)| input.saturating_add(output))
           });
-          for recorded in ["cacheRead", "cacheWrite", "cost"] {
+          for recorded in ["cost"] {
             if usage
               .as_ref()
               .and_then(|usage| usage.get(recorded))
@@ -978,7 +978,8 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
               epoch: 0,
               model: model_ref,
               finish_reason: entry.message_field("stopReason").map(String::from),
-              input_tokens: count("input"),
+              input_tokens: logical_prompt_tokens,
+              uncached_input_tokens: count("input"),
               logical_prompt_tokens,
               cache_read_tokens,
               cache_write_tokens,
@@ -1531,7 +1532,10 @@ mod tests {
     let AgentEvent::ModelRequestCompleted(completed) = events[5] else {
       panic!("expected the request to close");
     };
-    assert_eq!(completed.input_tokens, Some(120));
+    assert_eq!(completed.input_tokens, Some(1_020));
+    assert_eq!(completed.logical_prompt_tokens, Some(1_020));
+    assert_eq!(completed.uncached_input_tokens, Some(120));
+    assert_eq!(completed.cache_read_tokens, Some(900));
     assert_eq!(completed.finish_reason.as_deref(), Some("toolUse"));
     assert_eq!(completed.tool_calls, 1);
     assert_eq!(
@@ -1542,8 +1546,7 @@ mod tests {
     assert_eq!(plan.header.imported_from.as_deref(), Some("pi"));
     assert_eq!(plan.header.working_dir, "/work/project");
     assert_eq!(plan.header.started_at_ms, 1_733_234_401_000);
-    // Pi recorded cache tokens that rupi's event has no field for, so the report says so.
-    assert_eq!(plan.report.content.get("usage:cacheRead"), Some(&1));
+    assert!(!plan.report.content.contains_key("usage:cacheRead"));
   }
 
   #[test]

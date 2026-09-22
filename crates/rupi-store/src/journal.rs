@@ -608,6 +608,7 @@ mod tests {
         model: rupi_core::capability::ModelRef::new("local", "m"),
         finish_reason: Some("stop".into()),
         input_tokens: Some(10),
+        uncached_input_tokens: None,
         logical_prompt_tokens: Some(10),
         cache_read_tokens: None,
         cache_write_tokens: None,
