@@ -346,7 +346,7 @@ impl ContextPolicy for ProfilePolicy {
   /// worst outcome for predictability.
   fn evaluate(&self, state: &ContextState) -> ContextDecision {
     let tokens = state.effective_tokens();
-    let thresholds = self.thresholds;
+    let thresholds = ContextThresholds::for_profile(self.profile, state.window);
 
     if state.overflow_observed {
       if tokens > thresholds.compact_tokens && state.at_safe_boundary {
@@ -772,6 +772,31 @@ mod tests {
     let policy = ProfilePolicy::new(ContextProfile::Balanced, 128_000);
     let decision = policy.evaluate(&state(1_000));
     assert_eq!(decision.action, ContextAction::Keep);
+  }
+
+  #[test]
+  fn profile_thresholds_follow_the_active_model_window_after_failover() {
+    let policy = ProfilePolicy::new(ContextProfile::Balanced, 262_144);
+    let backup_window = 32_768;
+    let backup_thresholds = ContextThresholds::for_profile(ContextProfile::Balanced, backup_window);
+    let backup_state = ContextState {
+      estimated_tokens: backup_thresholds.compact_tokens + 1,
+      recent_tokens: 0,
+      since_last_compaction_ms: 600_000,
+      ..ContextState::zero(backup_window)
+    };
+
+    let decision = policy.evaluate(&backup_state);
+    assert!(
+      matches!(
+        decision.action,
+        ContextAction::Compact {
+          level: ContextLevel::L1Ordinary,
+          ..
+        }
+      ),
+      "the primary's 262k window must not leave the 32k backup context below threshold: {decision:?}"
+    );
   }
 
   #[test]
