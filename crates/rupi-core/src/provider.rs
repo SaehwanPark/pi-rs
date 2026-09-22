@@ -176,7 +176,7 @@ pub struct CompletionUsage {
   /// that predate cache-aware accounting.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub input_tokens: Option<u64>,
-  /// Prompt tokens that the provider had to evaluate rather than serve from cache.
+  /// Prompt tokens excluding cache reads and cache writes; cache writes are tracked separately.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub uncached_input_tokens: Option<u64>,
   /// Logical prompt footprint, including cached and write-through prompt tokens.

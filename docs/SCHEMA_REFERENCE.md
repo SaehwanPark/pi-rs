@@ -137,12 +137,14 @@ Producers: yes (`crates/rupi-runtime/src/turn.rs:1342`)
 
 Purpose: a model request finished and is attributable.
 Fields: `epoch: u32`, `model: ModelRef`, `finish_reason: Option<String>`,
-`input_tokens: Option<u64>` (logical prompt count, including cached tokens),
+`input_tokens: Option<u64>` (logical prompt count, including cached tokens, on current producers),
 `uncached_input_tokens: Option<u64>`, `logical_prompt_tokens: Option<u64>`,
 `cache_read_tokens: Option<u64>`, `cache_write_tokens: Option<u64>`,
 `output_tokens: Option<u64>`, `provider_total_tokens: Option<u64>`, `duration_ms: u64`,
 `tool_calls: u32`, `reasoning_provenance: Option<ReasoningProvenance>` (all `Option`
 fields `#[serde(default, skip_serializing_if = "Option::is_none")]`).
+Older Pi-import traces may have recorded uncached input in `input_tokens`; their original values
+remain unchanged when read.
 Producers: yes (`crates/rupi-runtime/src/turn.rs:695`)
 
 #### `model_retry` — `AgentEvent::ModelRetry` (`event.rs:200`), payload `event.rs:346`
