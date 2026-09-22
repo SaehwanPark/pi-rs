@@ -366,6 +366,7 @@ impl Decoder {
     let provider_id = provider_tool_id(call);
     let index_slot = provider_index.and_then(|index| self.tool_indices.get(&index).copied());
     let id_slot = provider_id.and_then(|id| self.tool_ids.get(id).copied());
+    let uncorrelated_slots = self.uncorrelated_tool_slots();
 
     let slot = match (index_slot, id_slot) {
       (Some(index_slot), Some(id_slot)) if index_slot != id_slot => {
@@ -389,26 +390,50 @@ impl Decoder {
         slot
       }
       (None, Some(id_slot)) => id_slot,
-      (None, None) if provider_index.is_some() || provider_id.is_some() => self.new_tool_slot()?,
+      (None, None) if provider_index.is_some() || provider_id.is_some() => {
+        if self.tools.len() == 1 && uncorrelated_slots.len() == 1 {
+          let slot = uncorrelated_slots[0];
+          self.mark_correlation_error(
+            slot,
+            "provider index or id arrived after uncorrelated fragments",
+          );
+          slot
+        } else {
+          let existing_slots = uncorrelated_slots;
+          let slot = self.new_tool_slot()?;
+          if !existing_slots.is_empty() {
+            let reason = "tool-call fragments could not be safely correlated by index or id";
+            for existing in existing_slots {
+              self.mark_correlation_error(existing, reason);
+            }
+            self.mark_correlation_error(slot, reason);
+          }
+          slot
+        }
+      }
       (None, None) if uncorrelated_batch => {
         let slot = self.new_tool_slot()?;
-        self.mark_correlation_error(
-          slot,
-          "multiple tool fragments in one chunk had neither an index nor an id",
-        );
+        let reason = "multiple tool fragments in one chunk had neither an index nor an id";
+        let existing_slots: Vec<_> = self
+          .tools
+          .keys()
+          .copied()
+          .filter(|existing| *existing != slot)
+          .collect();
+        for existing in existing_slots {
+          self.mark_correlation_error(existing, reason);
+        }
+        self.mark_correlation_error(slot, reason);
         slot
       }
-      (None, None) if self.tools.len() == 1 => *self.tools.keys().next().unwrap(),
+      (None, None) if self.tools.len() == 1 && uncorrelated_slots.len() == 1 => {
+        uncorrelated_slots[0]
+      }
       (None, None) => {
+        let existing_slots: Vec<_> = self.tools.keys().copied().collect();
         let slot = self.new_tool_slot()?;
-        if !self.tools.is_empty() {
+        if !existing_slots.is_empty() {
           let reason = "tool-call fragments could not be safely correlated by index or id";
-          let existing_slots: Vec<_> = self
-            .tools
-            .keys()
-            .copied()
-            .filter(|existing| *existing != slot)
-            .collect();
           for existing in existing_slots {
             self.mark_correlation_error(existing, reason);
           }
@@ -459,6 +484,17 @@ impl Decoder {
         None => builder.correlation_error = Some(reason.to_string()),
       }
     }
+  }
+
+  fn uncorrelated_tool_slots(&self) -> Vec<u64> {
+    let indexed_slots: std::collections::BTreeSet<_> =
+      self.tool_indices.values().copied().collect();
+    self
+      .tools
+      .iter()
+      .filter(|(slot, builder)| builder.id.is_none() && !indexed_slots.contains(slot))
+      .map(|(slot, _)| *slot)
+      .collect()
   }
 }
 
@@ -932,6 +968,29 @@ mod tests {
   }
 
   #[test]
+  fn a_single_call_without_index_or_id_gets_one_internal_correlation_id() {
+    let mut collector = Collector::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
+    for fragment in [
+      chunk(json!({
+        "tool_calls": [{"function": {"name": "read", "arguments": "{\"path\":"}}]
+      })),
+      chunk(json!({"tool_calls": [{"function": {"arguments": "\"a.rs\"}"}}]})),
+    ] {
+      decoder.chunk(&fragment, &mut collector).unwrap();
+    }
+    decoder
+      .finish(StreamEnd::DoneSentinel, &mut collector)
+      .unwrap();
+    let ProviderEvent::ToolCall(call) = &collector.events()[0] else {
+      panic!("the single unambiguous call should decode");
+    };
+    assert!(!call.id.as_str().trim().is_empty());
+    assert_eq!(call.name, "read");
+    assert_eq!(call.arguments, json!({"path": "a.rs"}));
+  }
+
+  #[test]
   fn missing_indices_and_ids_in_a_multi_call_chunk_are_rejected_as_ambiguous() {
     let mut collector = Collector::default();
     let mut decoder = Decoder::new(ReasoningExposure::None);
@@ -962,6 +1021,35 @@ mod tests {
       })
       .collect();
     assert_ne!(ids[0], ids[1]);
+  }
+
+  #[test]
+  fn an_uncorrelated_fragment_cannot_extend_an_indexed_tool_call() {
+    let mut collector = Collector::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
+    for fragment in [
+      chunk(json!({
+        "tool_calls": [{
+          "index": 0,
+          "id": "read-id",
+          "function": {"name": "read", "arguments": "{\"path\":\"a.rs\""}
+        }]
+      })),
+      chunk(json!({
+        "tool_calls": [{"function": {"arguments": "}"}}]
+      })),
+    ] {
+      decoder.chunk(&fragment, &mut collector).unwrap();
+    }
+    decoder
+      .finish(StreamEnd::DoneSentinel, &mut collector)
+      .unwrap();
+    assert_eq!(collector.events().len(), 2);
+    assert!(collector.events().iter().all(|event| matches!(
+      event,
+      ProviderEvent::ToolCallRejected { reason, .. }
+        if reason.contains("could not be safely correlated")
+    )));
   }
 
   #[test]
