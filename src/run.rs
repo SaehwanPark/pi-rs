@@ -817,16 +817,19 @@ impl TurnProgress for CliProgress<'_> {
 
     let rendered = serde_json::to_string_pretty(arguments)
       .unwrap_or_else(|_| "[arguments could not be rendered]".into());
+    let rendered = escape_terminal_controls(&rendered, true);
     let mut preview: String = rendered.chars().take(4_000).collect();
     if rendered.chars().count() > 4_000 {
       preview.push_str("\n… [preview truncated]");
     }
+    let name = escape_terminal_controls(&metadata.name, false);
+    let description = escape_terminal_controls(&metadata.description, false);
     let answer = (|| -> io::Result<String> {
       let mut stderr = io::stderr().lock();
       writeln!(
         stderr,
         "\n[approval] Mutating tool: {} — {}",
-        metadata.name, metadata.description
+        name, description
       )?;
       writeln!(stderr, "Arguments:\n{preview}")?;
       write!(stderr, "Allow this action? [y/N] ")?;
@@ -878,6 +881,29 @@ fn save(slot: &mut Option<io::Error>, result: io::Result<()>) {
   {
     *slot = Some(error);
   }
+}
+
+/// Escape control characters in untrusted text before writing an approval prompt.
+///
+/// Pretty-printed JSON may keep its own line layout; tool metadata is always a
+/// single-line field. C0 and C1 controls are escaped so an MCP description cannot
+/// inject terminal commands or forge additional prompt lines.
+fn escape_terminal_controls(value: &str, preserve_layout: bool) -> String {
+  let mut escaped = String::with_capacity(value.len());
+  for character in value.chars() {
+    match character {
+      '\n' if preserve_layout => escaped.push('\n'),
+      '\t' if preserve_layout => escaped.push('\t'),
+      '\n' => escaped.push_str("\\n"),
+      '\r' => escaped.push_str("\\r"),
+      '\t' => escaped.push_str("\\t"),
+      control if control.is_control() => {
+        escaped.push_str(&format!("\\u{{{:x}}}", control as u32));
+      }
+      printable => escaped.push(printable),
+    }
+  }
+  escaped
 }
 
 /// The durable sink, plus transcript rendering of the events a live turn does not
