@@ -216,6 +216,22 @@ pub(crate) fn open_session(
   let options = surface_options(surface);
   let mut trace = ReportingTrace::new(StoreTrace::new(session), options);
   let progress = CliProgress::new(&tools, options);
+  let mut system_prompt = format!(
+    "You are Rupi, a coding assistant working in the supplied workspace.\n\
+     Working directory: {canonical_cwd}.\n\
+     Inspect relevant files and project instructions before editing. Make the requested\
+     changes instead of stopping at a plan when implementation is requested.\n\
+     Use `read` and `grep` to inspect files; use `edit`, `write`, and `append` to change\
+     them. Prefer `process` with an explicit program and argument list when a shell is not\
+     needed; use `exec` only when shell syntax is required.\n\
+     After changes, run the most relevant available checks. Investigate failures and\
+     continue fixing them while the request budget remains. Report what changed and which\
+     checks actually ran; never claim an unrun check passed."
+  );
+  if !skills_prompt.trim().is_empty() {
+    system_prompt.push_str("\n\n");
+    system_prompt.push_str(&skills_prompt);
+  }
   let mut runtime = TurnLoop::new(
     &provider,
     &tools,
@@ -235,11 +251,7 @@ pub(crate) fn open_session(
     config.limits.progress_tool_names.clone(),
   )
   .with_compaction_strategy(rupi_runtime::CompactionStrategy::Summarize);
-  if !skills_prompt.is_empty() {
-    // The skill-control prompt is the whole system prompt rupi speaks today, and
-    // with_system stays unset when there is nothing to offer.
-    runtime = runtime.with_system(skills_prompt);
-  }
+  runtime = runtime.with_system(system_prompt);
   if let Some(backup) = &backup {
     // Failover is off until a backup exists. Attaching one is the whole
     // configuration surface: the policy comes from the primary's own capabilities.
@@ -298,11 +310,11 @@ impl SessionHandle<'_> {
   }
 
   /// Run one user turn that nothing outside this call can cancel.
+  ///
+  /// A flushed request-budget boundary is a successful resumable outcome. Use
+  /// [`Self::turn_with`] when the caller needs the structured report directly.
   pub fn turn(&mut self, prompt: &str) -> Result<(), TurnError> {
-    let report = self.turn_with(prompt, &CancelToken::new())?;
-    if report.budget_exhausted {
-      return Err(TurnError::Aborted(TurnStatus::BudgetExhausted));
-    }
+    self.turn_with(prompt, &CancelToken::new())?;
     Ok(())
   }
 

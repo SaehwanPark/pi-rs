@@ -1304,6 +1304,10 @@ mod tests {
 
   use crossterm::event::KeyEvent;
 
+  #[cfg(unix)]
+  // The interrupt guard changes process-global SIGINT state, so these tests must not overlap.
+  static INTERRUPT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
   fn key(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> Event {
     Event::Key(KeyEvent::new_with_kind(code, modifiers, kind))
   }
@@ -1651,6 +1655,9 @@ mod tests {
   #[cfg(unix)]
   #[test]
   fn turn_interrupt_guard_cancels_token_on_sigint() {
+    let _signal_lock = INTERRUPT_TEST_LOCK
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cancel = CancelToken::new();
     assert!(!cancel.is_cancelled());
     {
@@ -1666,6 +1673,9 @@ mod tests {
   #[cfg(unix)]
   #[test]
   fn turn_interrupt_guard_restores_previous_sigaction_on_drop() {
+    let _signal_lock = INTERRUPT_TEST_LOCK
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cancel1 = CancelToken::new();
     let cancel2 = CancelToken::new();
     {

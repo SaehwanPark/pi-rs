@@ -36,7 +36,11 @@ pub struct Decoder {
   exposure: ReasoningExposure,
   tools: std::collections::BTreeMap<u64, ToolBuilder>,
   finish_reason: Option<String>,
-  input_tokens: Option<u64>,
+  /// Logical prompt tokens reported by the provider before cache accounting.
+  logical_prompt_tokens: Option<u64>,
+  cache_read_tokens: Option<u64>,
+  cache_write_tokens: Option<u64>,
+  provider_total_tokens: Option<u64>,
   output_tokens: Option<u64>,
   /// Whether anything the user would call an answer has been emitted.
   emitted_output: bool,
@@ -60,7 +64,10 @@ impl Decoder {
       exposure,
       tools: std::collections::BTreeMap::new(),
       finish_reason: None,
-      input_tokens: None,
+      logical_prompt_tokens: None,
+      cache_read_tokens: None,
+      cache_write_tokens: None,
+      provider_total_tokens: None,
       output_tokens: None,
       emitted_output: false,
     }
@@ -101,11 +108,32 @@ impl Decoder {
     sink: &mut dyn ProviderEventSink,
   ) -> Result<(), rupi_core::ModelFailure> {
     if let Some(usage) = chunk.get("usage").filter(|u| !u.is_null()) {
-      self.input_tokens = usage
+      self.logical_prompt_tokens = usage
         .get("prompt_tokens")
         .or_else(|| usage.get("input_tokens"))
         .and_then(Value::as_u64)
-        .or(self.input_tokens);
+        .or(self.logical_prompt_tokens);
+      let details = usage
+        .get("prompt_tokens_details")
+        .or_else(|| usage.get("input_tokens_details"));
+      self.cache_read_tokens = details
+        .and_then(|details| {
+          details
+            .get("cached_tokens")
+            .or_else(|| details.get("cache_read_tokens"))
+        })
+        .or_else(|| usage.get("cache_read_tokens"))
+        .and_then(Value::as_u64)
+        .or(self.cache_read_tokens);
+      self.cache_write_tokens = details
+        .and_then(|details| details.get("cache_write_tokens"))
+        .or_else(|| usage.get("cache_write_tokens"))
+        .and_then(Value::as_u64)
+        .or(self.cache_write_tokens);
+      self.provider_total_tokens = usage
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .or(self.provider_total_tokens);
       self.output_tokens = usage
         .get("completion_tokens")
         .or_else(|| usage.get("output_tokens"))
@@ -244,9 +272,27 @@ impl Decoder {
         }
       }
     };
+    let logical_prompt_tokens = self.logical_prompt_tokens;
+    let cache_read_tokens = self.cache_read_tokens.unwrap_or(0);
+    let cache_write_tokens = self.cache_write_tokens.unwrap_or(0);
+    let uncached_input_tokens = logical_prompt_tokens.map(|logical| {
+      logical
+        .saturating_sub(cache_read_tokens)
+        .saturating_sub(cache_write_tokens)
+    });
+    let provider_total_tokens = self.provider_total_tokens.or_else(|| {
+      logical_prompt_tokens
+        .zip(self.output_tokens)
+        .map(|(logical, output)| logical.saturating_add(output))
+    });
     Ok(CompletionUsage {
-      input_tokens: self.input_tokens,
+      input_tokens: logical_prompt_tokens,
+      uncached_input_tokens,
+      logical_prompt_tokens,
+      cache_read_tokens: self.cache_read_tokens,
+      cache_write_tokens: self.cache_write_tokens,
       output_tokens: self.output_tokens,
+      provider_total_tokens,
       finish_reason: self.finish_reason,
       certainty,
     })
@@ -726,8 +772,43 @@ mod tests {
       .finish(StreamEnd::DoneSentinel, &mut collector)
       .unwrap();
     assert_eq!(usage.input_tokens, Some(11));
+    assert_eq!(usage.uncached_input_tokens, Some(11));
+    assert_eq!(usage.logical_prompt_tokens, Some(11));
     assert_eq!(usage.output_tokens, Some(4));
+    assert_eq!(usage.provider_total_tokens, Some(15));
     assert_eq!(usage.finish_reason.as_deref(), Some("tool_calls"));
+  }
+
+  #[test]
+  fn cache_details_split_logical_prompt_from_inference_input() {
+    let mut collector = Collector::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
+    decoder
+      .chunk(
+        &json!({
+          "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+          "usage": {
+            "prompt_tokens": 100,
+            "prompt_tokens_details": {
+              "cached_tokens": 70,
+              "cache_write_tokens": 10
+            },
+            "completion_tokens": 8,
+            "total_tokens": 108
+          }
+        }),
+        &mut collector,
+      )
+      .unwrap();
+    let usage = decoder
+      .finish(StreamEnd::DoneSentinel, &mut collector)
+      .unwrap();
+    assert_eq!(usage.logical_prompt_tokens, Some(100));
+    assert_eq!(usage.cache_read_tokens, Some(70));
+    assert_eq!(usage.cache_write_tokens, Some(10));
+    assert_eq!(usage.uncached_input_tokens, Some(20));
+    assert_eq!(usage.input_tokens, Some(100));
+    assert_eq!(usage.provider_total_tokens, Some(108));
   }
 
   #[test]

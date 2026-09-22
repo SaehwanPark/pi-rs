@@ -59,7 +59,7 @@ store.
 | **Cross-file Lineage (`parent_session`)** | Each file becomes an independent session. Parent lineage across files is not linked. | Stderr report notes parent session id without building cross-file DAG. |
 | **`compaction` Entries** | Boundary marked as a diagnostic. Compaction summary text is discarded to prevent duplicate conversation replay. | Stderr report names compaction event count. |
 | **Extension Entries (`label`, `custom`, `custom_message`)** | Skipped; `rupi` core models coding agent lifecycle events, not UI or third-party extension states. | Stderr report names each unhandled entry type and count. |
-| **Provider Cost & Cache Usage** (`usage.cacheRead`, `usage.cacheWrite`, `cost`) | Dropped. `rupi` tracks exact input/output tokens in `ModelRequestCompleted`, but excludes billing metadata. | Omitted from stored event envelope without error. |
+| **Provider Cost** (`cost`) | Dropped. Token and cache counts are preserved in `ModelRequestCompleted`; billing metadata is not part of the event contract. | Omitted from stored event envelope without error. |
 | **Unattached Image Entries** | Images lacking inline bytes are counted as attachments on `UserMessage` rather than empty blocks. | Stderr report notes attachment count. |
 | **Unlabelled Thinking Blocks** | Imported without assigning `ReasoningProvenance::Native` (avoids false claims of native model thought). | Imported with conservative / unlabelled provenance. |
 | **Truncated Tool Output** | Pi `truncated: true` and dropped byte count are folded into text representation. | Preserved in text content. |

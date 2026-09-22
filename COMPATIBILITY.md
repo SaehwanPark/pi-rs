@@ -37,6 +37,7 @@ Use the following status vocabulary:
 | Surface | Initial target |
 |---|---|
 | `SKILL.md` skills | Supported |
+| Coding-agent system prompt | Partial (native baseline; not byte-compatible) |
 | Prompt templates | Supported |
 | Package discovery | Supported |
 | Package installation | Partial |
@@ -96,6 +97,12 @@ accept `--trust-store <dir>` to consult durable canonical project scopes; an exp
 `--project` is a one-shot grant for an unknown scope, but a recorded denial still wins.
 
 Package-local skills from discovered packages and `--skill <path>` CLI options are supported. The `skills` array in settings is deferred.
+
+`rupi run` and `rupi interactive` always include a concise native coding-agent prompt with
+the current workspace, tool-use guidance, and verification expectations. Discovered skill
+instructions are appended to that baseline. This provides the expected coding-agent
+behavior when no skills are installed; it does not claim byte-for-byte parity with Pi's
+versioned default prompt.
 
 ## 6. Prompt templates
 
@@ -298,7 +305,9 @@ Deliberately not carried, each reported by kind with its reason:
   put the conversation in twice;
 * `label`, `custom`, `custom_message` — UI- or extension-owned content with no `rupi`
   event, which importing as prose would misattribute to the user or the model;
-* `usage.cacheRead` / `cacheWrite` / `cost` — `rupi` events have no field for them;
+* `cost` — `rupi` has no billing-cost field. Pi's input, cache-read, and cache-write
+  counts are preserved in `model_request_completed`; new imports normalize
+  `input_tokens` to the logical prompt count and retain uncached input separately;
 * an image whose Pi entry carried no bytes — counted as an attachment and reported. An image
   that did carry bytes is kept inline in the session's messages, where `rupi` keeps one;
 * reasoning on a request that stored none receives **no** provenance rather than a plausible one.
@@ -353,8 +362,8 @@ Summary of metadata that cannot round-trip between Pi and `rupi`:
    preventing duplicate turn replay.
 9. **UI / Extension entries**: Pi `label`, `custom`, and `custom_message` records are dropped on
    import with explicit stderr warnings.
-10. **Provider billing & cache usage**: Pi's `usage.cacheRead`, `usage.cacheWrite`, and `cost` are
-    omitted since `rupi` tracks only token quantities.
+10. **Provider billing metadata**: Pi's `cost` is omitted because `rupi` records token quantities,
+    not billing amounts. Its input, cache-read, and cache-write counts are preserved on import.
 
 ## 11. Themes and UI
 

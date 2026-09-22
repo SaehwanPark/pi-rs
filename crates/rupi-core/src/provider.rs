@@ -172,10 +172,27 @@ impl ModelRequest {
 /// Usage and finish information for one completed request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletionUsage {
+  /// Logical prompt tokens, retained under the original field name for callers
+  /// that predate cache-aware accounting.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub input_tokens: Option<u64>,
+  /// Prompt tokens excluding cache reads and cache writes; cache writes are tracked separately.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub uncached_input_tokens: Option<u64>,
+  /// Logical prompt footprint, including cached and write-through prompt tokens.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub logical_prompt_tokens: Option<u64>,
+  /// Prompt tokens served from the provider's cache.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cache_read_tokens: Option<u64>,
+  /// Prompt tokens written to the provider's cache during this request.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cache_write_tokens: Option<u64>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub output_tokens: Option<u64>,
+  /// Provider-reported total, when present, including cache accounting.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub provider_total_tokens: Option<u64>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub finish_reason: Option<String>,
   /// Whether the adapter actually observed the end of the response.
@@ -198,7 +215,12 @@ impl CompletionUsage {
   pub fn unknown() -> Self {
     Self {
       input_tokens: None,
+      uncached_input_tokens: None,
+      logical_prompt_tokens: None,
+      cache_read_tokens: None,
+      cache_write_tokens: None,
       output_tokens: None,
+      provider_total_tokens: None,
       finish_reason: None,
       certainty: CompletionCertainty::Certain,
     }
@@ -212,7 +234,12 @@ impl CompletionUsage {
   pub fn unfinished() -> Self {
     Self {
       input_tokens: None,
+      uncached_input_tokens: None,
+      logical_prompt_tokens: None,
+      cache_read_tokens: None,
+      cache_write_tokens: None,
       output_tokens: None,
+      provider_total_tokens: None,
       finish_reason: None,
       certainty: CompletionCertainty::Unknown,
     }
@@ -409,7 +436,12 @@ mod tests {
       sink.emit(&ProviderEvent::TextDelta(text));
       Ok(CompletionUsage {
         input_tokens: Some(request.estimate_tokens()),
+        uncached_input_tokens: Some(request.estimate_tokens()),
+        logical_prompt_tokens: Some(request.estimate_tokens()),
+        cache_read_tokens: None,
+        cache_write_tokens: None,
         output_tokens: Some(4),
+        provider_total_tokens: Some(request.estimate_tokens() + 4),
         finish_reason: Some("stop".into()),
         certainty: CompletionCertainty::Certain,
       })
@@ -459,7 +491,12 @@ mod tests {
     for reason in ["length", "max_tokens"] {
       let usage = CompletionUsage {
         input_tokens: None,
+        uncached_input_tokens: None,
+        logical_prompt_tokens: None,
+        cache_read_tokens: None,
+        cache_write_tokens: None,
         output_tokens: Some(8_192),
+        provider_total_tokens: None,
         finish_reason: Some(reason.into()),
         certainty: CompletionCertainty::Certain,
       };
@@ -467,7 +504,12 @@ mod tests {
     }
     let normal = CompletionUsage {
       input_tokens: None,
+      uncached_input_tokens: None,
+      logical_prompt_tokens: None,
+      cache_read_tokens: None,
+      cache_write_tokens: None,
       output_tokens: Some(4),
+      provider_total_tokens: None,
       finish_reason: Some("stop".into()),
       certainty: CompletionCertainty::Certain,
     };

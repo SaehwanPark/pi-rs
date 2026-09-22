@@ -238,7 +238,9 @@ function Get-RupiSessionId([string]$project) {
 function Read-RupiMetrics([string]$project, [int]$SkipLines = 0) {
   $state = Join-Path $project ".rupi-state\sessions"
   $traceFiles = @(Get-ChildItem -LiteralPath $state -File -Filter "*.trace.jsonl" -ErrorAction SilentlyContinue)
-  $started = 0; $completed = 0; $input = [int64]0; $output = [int64]0; $known = 0
+  $started = 0; $completed = 0
+  $logical = [int64]0; $uncached = [int64]0; $cacheRead = [int64]0; $cacheWrite = [int64]0
+  $output = [int64]0; $providerTotal = [int64]0; $known = 0
   $toolRequested = 0; $toolCompleted = 0; $toolFailed = 0; $toolUnknown = 0
   $toolNames = [Collections.Generic.List[string]]::new(); $status = $null; $finish = [Collections.Generic.List[string]]::new()
   $seenLines = 0
@@ -251,9 +253,23 @@ function Read-RupiMetrics([string]$project, [int]$SkipLines = 0) {
         "model_request_started" { $started++ }
         "model_request_completed" {
           $completed++
-          if ($null -ne $record.input_tokens -and $null -ne $record.output_tokens) {
-            $input += [int64]$record.input_tokens; $output += [int64]$record.output_tokens; $known++
+          $hasInput = $null -ne $record.input_tokens
+          $hasOutput = $null -ne $record.output_tokens
+          $requestLogical = if ($null -ne $record.logical_prompt_tokens) { [int64]$record.logical_prompt_tokens } elseif ($hasInput) { [int64]$record.input_tokens } else { [int64]0 }
+          $requestCacheRead = if ($null -ne $record.cache_read_tokens) { [int64]$record.cache_read_tokens } else { [int64]0 }
+          $requestCacheWrite = if ($null -ne $record.cache_write_tokens) { [int64]$record.cache_write_tokens } else { [int64]0 }
+          $requestUncached = if ($null -ne $record.uncached_input_tokens) { [int64]$record.uncached_input_tokens } else { [math]::Max(0, $requestLogical - $requestCacheRead - $requestCacheWrite) }
+          if ($hasInput -or $null -ne $record.logical_prompt_tokens) { $logical += $requestLogical }
+          $uncached += $requestUncached
+          $cacheRead += $requestCacheRead
+          $cacheWrite += $requestCacheWrite
+          if ($hasOutput) { $output += [int64]$record.output_tokens }
+          if ($null -ne $record.provider_total_tokens) { $providerTotal += [int64]$record.provider_total_tokens }
+          elseif ($hasInput -or $hasOutput) {
+            $requestOutput = if ($hasOutput) { [int64]$record.output_tokens } else { [int64]0 }
+            $providerTotal += $requestLogical + $requestOutput
           }
+          if ($hasInput -and $hasOutput) { $known++ }
           if ($record.finish_reason) { [void]$finish.Add([string]$record.finish_reason) }
         }
         "tool_requested" { $toolRequested++; if ($record.name) { [void]$toolNames.Add([string]$record.name) } }
@@ -266,7 +282,12 @@ function Read-RupiMetrics([string]$project, [int]$SkipLines = 0) {
   }
   [pscustomobject]@{
     model_requests_started = $started; model_requests_completed = $completed
-    input_tokens = $input; output_tokens = $output; total_tokens = $input + $output
+    logical_prompt_tokens = $logical; uncached_input_tokens = $uncached
+    cache_read_tokens = $cacheRead; cache_write_tokens = $cacheWrite
+    output_tokens = $output; provider_total_tokens = $providerTotal
+    inference_input_tokens = $uncached + $cacheWrite
+    inference_work_tokens = $uncached + $cacheWrite + $output
+    input_tokens = $uncached; total_tokens = $providerTotal
     usage_records = $known; tool_requests = $toolRequested; tool_completions = $toolCompleted
     tool_failures = $toolFailed; tool_unknown = $toolUnknown; tool_names = @($toolNames)
     turn_status = $status; finish_reasons = @($finish)
@@ -284,7 +305,8 @@ function Get-RupiTraceLineCount([string]$project) {
 }
 
 function Read-PiMetrics([string]$stdoutPath) {
-  $requests = 0; $input = [int64]0; $output = [int64]0; $known = 0; $toolCalls = 0; $toolResults = 0
+  $requests = 0; $logical = [int64]0; $input = [int64]0; $cacheRead = [int64]0; $cacheWrite = [int64]0
+  $output = [int64]0; $providerTotal = [int64]0; $known = 0; $toolCalls = 0; $toolResults = 0
   $toolNames = [Collections.Generic.List[string]]::new(); $stop = $null; $session = $null
   foreach ($line in (Get-Content -LiteralPath $stdoutPath -ErrorAction SilentlyContinue)) {
     try { $record = $line | ConvertFrom-Json } catch { continue }
@@ -292,8 +314,13 @@ function Read-PiMetrics([string]$stdoutPath) {
     if ($record.type -eq "message_end" -and $record.message.role -eq "assistant") {
       $requests++
       $usage = $record.message.usage
-      if ($usage -and $null -ne $usage.input -and $null -ne $usage.output) {
-        $input += [int64]$usage.input; $output += [int64]$usage.output; $known++
+      if ($usage) {
+        if ($null -ne $usage.input) { $input += [int64]$usage.input }
+        if ($null -ne $usage.cacheRead) { $cacheRead += [int64]$usage.cacheRead }
+        if ($null -ne $usage.cacheWrite) { $cacheWrite += [int64]$usage.cacheWrite }
+        if ($null -ne $usage.output) { $output += [int64]$usage.output }
+        if ($null -ne $usage.totalTokens) { $providerTotal += [int64]$usage.totalTokens }
+        if ($null -ne $usage.input -and $null -ne $usage.output) { $known++ }
       }
       if ($record.message.stopReason) { $stop = $record.message.stopReason }
       foreach ($content in @($record.message.content)) {
@@ -303,9 +330,16 @@ function Read-PiMetrics([string]$stdoutPath) {
     if ($record.type -eq "tool_execution_end") { $toolResults++ }
     if ($record.type -eq "turn_end" -and $record.message.stopReason) { $stop = $record.message.stopReason }
   }
+  $logical = $input + $cacheRead + $cacheWrite
+  if ($providerTotal -eq 0) { $providerTotal = $logical + $output }
   [pscustomobject]@{
     model_requests_started = $requests; model_requests_completed = $requests
-    input_tokens = $input; output_tokens = $output; total_tokens = $input + $output
+    logical_prompt_tokens = $logical; uncached_input_tokens = $input
+    cache_read_tokens = $cacheRead; cache_write_tokens = $cacheWrite
+    output_tokens = $output; provider_total_tokens = $providerTotal
+    inference_input_tokens = $input + $cacheWrite
+    inference_work_tokens = $input + $cacheWrite + $output
+    input_tokens = $input; total_tokens = $providerTotal
     usage_records = $known; tool_requests = $toolCalls; tool_completions = $toolResults
     tool_failures = $null; tool_unknown = $null; tool_names = @($toolNames)
     turn_status = $stop; finish_reasons = @($stop); session_id = $session; measurement_scope = "turn"
