@@ -437,6 +437,7 @@ impl Decoder {
     Ok(())
   }
 
+  #[allow(clippy::result_large_err)]
   fn new_tool_slot(&mut self) -> Result<u64, rupi_core::ModelFailure> {
     let slot = self.next_tool_slot;
     self.next_tool_slot = self

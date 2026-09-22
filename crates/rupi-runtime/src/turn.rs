@@ -396,6 +396,12 @@ struct Response {
   completion: EventEnvelope,
 }
 
+struct RecordedResponse {
+  assistant_event_id: rupi_core::EventId,
+  calls: Vec<ToolCallBlock>,
+  rejected_calls: BTreeMap<String, String>,
+}
+
 /// Drives turns against one primary model, with an optional backup.
 ///
 /// Long-lived on purpose: it owns the epoch list, so a failover in turn 7 knows
@@ -1161,8 +1167,11 @@ impl<'a> TurnLoop<'a> {
         }
         Err(TurnFailure::Sink(error)) => return Err(TurnError::from(error)),
       };
-      let (assistant_event_id, calls, rejected_calls) =
-        self.record_response(response, &mut report)?;
+      let RecordedResponse {
+        assistant_event_id,
+        calls,
+        rejected_calls,
+      } = self.record_response(response, &mut report)?;
 
       if calls.is_empty() {
         // The model answered instead of asking: the turn is over.
@@ -1234,7 +1243,11 @@ impl<'a> TurnLoop<'a> {
         }
         Err(TurnFailure::Sink(error)) => return Err(TurnError::from(error)),
       };
-      let (assistant_event_id, calls, _) = self.record_response(response, &mut report)?;
+      let RecordedResponse {
+        assistant_event_id,
+        calls,
+        ..
+      } = self.record_response(response, &mut report)?;
       report.budget_exhausted = true;
       if calls.is_empty() {
         self.diagnostic(
@@ -3006,14 +3019,7 @@ impl<'a> TurnLoop<'a> {
     &mut self,
     response: Response,
     report: &mut TurnReport,
-  ) -> Result<
-    (
-      rupi_core::EventId,
-      Vec<ToolCallBlock>,
-      BTreeMap<String, String>,
-    ),
-    TurnError,
-  > {
+  ) -> Result<RecordedResponse, TurnError> {
     let Response {
       epoch,
       text,
@@ -3046,7 +3052,11 @@ impl<'a> TurnLoop<'a> {
       self.trace.emit_without_message(&mut completion)?;
       self.envelopes.push(completion);
     }
-    Ok((assistant_event_id, calls, rejected_calls))
+    Ok(RecordedResponse {
+      assistant_event_id,
+      calls,
+      rejected_calls,
+    })
   }
 
   /// Add the runtime-owned instruction that explains why the final request has no tools.
