@@ -258,7 +258,7 @@ fn one_turn_streams_and_persists_tools_messages_and_trace() {
 }
 
 #[test]
-fn one_shot_budget_exhaustion_exits_unsuccessfully() {
+fn one_shot_budget_exhaustion_exits_successfully_with_a_resumable_status() {
   let temp = TempDir::new().unwrap();
   let workspace = temp.path().join("workspace");
   fs::create_dir(&workspace).unwrap();
@@ -276,12 +276,17 @@ fn one_shot_budget_exhaustion_exits_unsuccessfully() {
   let requests = server.requests();
   assert_eq!(requests.len(), 3, "the configured request budget is finite");
   assert!(
-    !output.status.success(),
-    "no final answer must not look successful"
+    output.status.success(),
+    "a durably recorded budget boundary is resumable: {}",
+    String::from_utf8_lossy(&output.stderr)
   );
-  let stderr = String::from_utf8_lossy(&output.stderr);
-  assert!(stderr.contains("budget exhausted"), "{stderr}");
-  assert!(stderr.contains("request 2/3"), "{stderr}");
+  let terminal = format!(
+    "{}{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert!(terminal.contains("budget exhausted"), "{terminal}");
+  assert!(terminal.contains("request 2/3"), "{terminal}");
 
   let layout = StateLayout::new(temp.path().join("state"));
   let session_id = layout.list_session_ids().unwrap().pop().expect("session");
@@ -856,7 +861,14 @@ fn a_skill_listing_reaches_the_model_as_the_system_message() {
   // Pi's mechanism, exactly: the model is told what skills exist and where the files
   // are, and decides to read one. The block travels as the system message, first.
   assert!(body.contains("\"role\":\"system\""), "{body}");
+  assert!(body.contains("You are Rupi, a coding assistant"), "{body}");
+  assert!(body.contains("Working directory:"), "{body}");
+  assert!(body.contains("never claim an unrun check passed"), "{body}");
   assert!(body.contains("<available_skills>"), "{body}");
+  assert!(
+    body.find("You are Rupi, a coding assistant") < body.find("<available_skills>"),
+    "the permanent prompt precedes appended skills: {body}"
+  );
   assert!(body.contains("pdf-tools"), "{body}");
   assert!(
     !body.contains("loose"),
@@ -865,7 +877,7 @@ fn a_skill_listing_reaches_the_model_as_the_system_message() {
 }
 
 #[test]
-fn a_run_with_no_skills_nearby_sends_no_system_message() {
+fn a_run_with_no_skills_nearby_still_sends_the_core_system_prompt() {
   let temp = TempDir::new().unwrap();
   let workspace = temp.path().join("workspace");
   fs::create_dir(&workspace).unwrap();
@@ -887,13 +899,20 @@ fn a_run_with_no_skills_nearby_sends_no_system_message() {
     "{}",
     String::from_utf8_lossy(&output.stderr)
   );
-  // Nothing to offer is nothing to say: no system message, no empty block, and the
-  // blank-system rule in the provider keeps the request byte-identical to before.
   assert!(
-    !requests[0].body.contains("\"role\":\"system\""),
+    requests[0].body.contains("\"role\":\"system\""),
     "{}",
     requests[0].body
   );
+  assert!(
+    requests[0]
+      .body
+      .contains("You are Rupi, a coding assistant"),
+    "{}",
+    requests[0].body
+  );
+  assert!(requests[0].body.contains("Working directory:"));
+  assert!(requests[0].body.contains("Prefer `process`"));
   assert!(
     !requests[0].body.contains("available_skills"),
     "{}",

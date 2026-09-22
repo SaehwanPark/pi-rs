@@ -37,6 +37,7 @@ Use the following status vocabulary:
 | Surface | Initial target |
 |---|---|
 | `SKILL.md` skills | Supported |
+| Coding-agent system prompt | Partial (native baseline; not byte-compatible) |
 | Prompt templates | Supported |
 | Package discovery | Supported |
 | Package installation | Partial |
@@ -96,6 +97,12 @@ accept `--trust-store <dir>` to consult durable canonical project scopes; an exp
 `--project` is a one-shot grant for an unknown scope, but a recorded denial still wins.
 
 Package-local skills from discovered packages and `--skill <path>` CLI options are supported. The `skills` array in settings is deferred.
+
+`rupi run` and `rupi interactive` always include a concise native coding-agent prompt with
+the current workspace, tool-use guidance, and verification expectations. Discovered skill
+instructions are appended to that baseline. This provides the expected coding-agent
+behavior when no skills are installed; it does not claim byte-for-byte parity with Pi's
+versioned default prompt.
 
 ## 6. Prompt templates
 

@@ -1215,7 +1215,7 @@ impl<'a> TurnLoop<'a> {
         self.diagnostic(
           Some(turn_id.clone()),
           DiagnosticLevel::Warn,
-          "turn reached the request budget; finalization answer is incomplete",
+          "request budget exhausted; finalization answer is incomplete and the session can be resumed",
         )?;
       } else {
         let tool_calls = u32::try_from(calls.len()).map_err(|_| {
@@ -1235,7 +1235,7 @@ impl<'a> TurnLoop<'a> {
         self.diagnostic(
           Some(turn_id.clone()),
           DiagnosticLevel::Warn,
-          "turn reached the request budget; finalization requested tools and none were executed",
+          "request budget exhausted; finalization requested tools and none were executed, so the session can be resumed",
         )?;
       }
       return self.finish(
@@ -1252,7 +1252,7 @@ impl<'a> TurnLoop<'a> {
       Some(turn_id.clone()),
       DiagnosticLevel::Warn,
       format!(
-        "turn stopped after {} model requests without a final answer",
+        "request budget exhausted after {} model requests without a final answer; the session can be resumed",
         self.max_requests
       ),
     )?;

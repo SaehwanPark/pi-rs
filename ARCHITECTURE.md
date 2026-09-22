@@ -95,6 +95,13 @@ The agent loop must not own:
 - rendering policy;
 - storage formatting.
 
+The CLI supplies a short native coding-agent system prompt on every session and appends
+the discovered skill-control prompt when skills are available. A headless turn that ends
+at its model-request budget is durably completed with `TurnStatus::BudgetExhausted` and a
+flushed trace. `rupi run` exits successfully for that resumable partial outcome; the exit
+status does not claim the requested task is complete. Provider and persistence failures
+remain errors.
+
 ## 5. Provider abstraction
 
 Provider adapters normalize:
