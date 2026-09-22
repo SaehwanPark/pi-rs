@@ -912,7 +912,11 @@ fn a_run_with_no_skills_nearby_still_sends_the_core_system_prompt() {
     requests[0].body
   );
   assert!(requests[0].body.contains("Working directory:"));
-  assert!(requests[0].body.contains("Prefer `process`"));
+  assert!(
+    requests[0].body.contains(
+      "Tools available for this request: append, edit, exec, grep, process, read, write."
+    )
+  );
   assert!(
     !requests[0].body.contains("available_skills"),
     "{}",

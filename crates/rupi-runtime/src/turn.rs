@@ -38,7 +38,7 @@ use rupi_core::{
   ToolFailed, ToolProgress, ToolRequested, ToolResultBlock, ToolStarted, ToolUnknown, TraceId,
   TurnCompleted, TurnId, TurnStatus, UserMessage,
 };
-use rupi_tools::{Executed, ToolRegistry};
+use rupi_tools::{Approval, ApprovalGate, Executed, ToolRegistry};
 
 use crate::failover::{FailoverPolicy, Recovery};
 
@@ -115,6 +115,17 @@ pub trait TurnProgress: Send {
   fn on_reasoning(&mut self, _text: &str, _provenance: ReasoningProvenance) {}
   fn on_text_delta(&mut self, _text: &str) {}
   fn on_tool_requested(&mut self, _call: &ToolCallBlock) {}
+  /// Answer a mutating-tool approval request on a surface that can ask a person.
+  ///
+  /// The safe default refuses. Interactive approvals must be explicitly enabled
+  /// on the turn loop and implemented by the attached surface.
+  fn approve_mutating_tool(
+    &mut self,
+    _metadata: &rupi_core::ToolMetadata,
+    _arguments: &serde_json::Value,
+  ) -> Approval {
+    Approval::Deny("this surface cannot approve mutating tools; nothing was changed".into())
+  }
   fn on_tool_progress(&mut self, _call: &ToolCallBlock, _text: &str) {}
   fn on_tool_finished(&mut self, _call: &ToolCallBlock, _executed: &Executed) {}
 }
@@ -424,6 +435,7 @@ pub struct TurnLoop<'a> {
   /// remains tool-capable, while the bounded recovery assessment can never
   /// repeat a mutating side effect.
   tools_enabled: bool,
+  interactive_tool_approval: bool,
   session_started: bool,
   /// Whether the first lifecycle event belongs to a continuation of an existing
   /// durable journal rather than a newly created session.
@@ -501,6 +513,7 @@ impl<'a> TurnLoop<'a> {
       progress_boundary_used: false,
       requests: AtomicUsize::new(0),
       tools_enabled: true,
+      interactive_tool_approval: false,
       session_started: false,
       resumed: false,
       interrupted_tools: Vec::new(),
@@ -577,6 +590,15 @@ impl<'a> TurnLoop<'a> {
   /// Set the system prompt.
   pub fn with_system(mut self, system: impl Into<String>) -> Self {
     self.system = Some(system.into());
+    self
+  }
+
+  /// Allow the progress surface to answer per-call mutation approval prompts.
+  ///
+  /// Disabled by default. The tool registry still controls configured automatic
+  /// approval and allow/deny policy.
+  pub fn with_interactive_tool_approval(mut self, enabled: bool) -> Self {
+    self.interactive_tool_approval = enabled;
     self
   }
 
@@ -2696,12 +2718,21 @@ impl<'a> TurnLoop<'a> {
   /// context policy. Emergency overflow recovery uses this same constructor.
   fn assemble_request(&self, messages: Vec<Message>) -> ModelRequest {
     let capabilities = self.provider().capabilities();
+    let may_approve_mutations =
+      self.interactive_tool_approval || self.tools.auto_approves_mutating();
     let tools = if self.tools_enabled && capabilities.tools {
       self
         .tools
         .specs()
         .into_iter()
-        .filter(|spec| self.progress_tool_is_exposed(&spec.name))
+        .filter(|spec| {
+          self.progress_tool_is_exposed(&spec.name)
+            && (may_approve_mutations
+              || self
+                .tools
+                .metadata_for(&spec.name)
+                .is_some_and(|metadata| metadata.read_only))
+        })
         .collect()
     } else {
       Vec::new()
@@ -2709,9 +2740,12 @@ impl<'a> TurnLoop<'a> {
     let mut request = ModelRequest::new(self.active_model(), capabilities, messages)
       .with_tools(tools)
       .with_thinking(self.thinking);
-    if let Some(system) = self.system.clone() {
-      request = request.with_system(system);
+    let mut system = self.system.clone().unwrap_or_default();
+    if !system.is_empty() {
+      system.push_str("\n\n");
     }
+    system.push_str(&tool_availability_prompt(&request.tools));
+    request = request.with_system(system);
     request
   }
 
@@ -3127,7 +3161,19 @@ impl<'a> TurnLoop<'a> {
         epoch: self.epoch_index(),
         model: self.active_model(),
       };
+      let approval = match metadata.as_ref().filter(|metadata| !metadata.read_only) {
+        None => Approval::Allow,
+        Some(_) if self.tools.auto_approves_mutating() => Approval::Allow,
+        Some(metadata) if self.interactive_tool_approval => {
+          progress.approve_mutating_tool(metadata, &call.arguments)
+        }
+        Some(_) => Approval::Deny(
+          "approval is required for this mutating tool, but this surface cannot ask; nothing was changed"
+            .into(),
+        ),
+      };
       let executed = {
+        let mut gate = FixedApprovalGate(approval);
         let mut sink = LiveToolSink { progress, call };
         let trace = &mut *self.trace;
         let mut started_event_id = None;
@@ -3152,9 +3198,13 @@ impl<'a> TurnLoop<'a> {
           result
         };
         let clock = Instant::now();
-        let executed = self
-          .tools
-          .execute_observed(&request, &mut sink, cancel, &mut on_started)?;
+        let executed = self.tools.execute_observed_with_gate(
+          &request,
+          &mut sink,
+          cancel,
+          &mut gate,
+          &mut on_started,
+        )?;
         (executed, elapsed_ms(clock), started_event_id)
       };
       let (block, seq) = self.record_tool_outcome(
@@ -3497,6 +3547,32 @@ fn estimate_tokens(request: &ModelRequest) -> u64 {
     bytes += spec.name.len() + spec.description.len() + spec.parameters.to_string().len();
   }
   (bytes / 4).max(1) as u64
+}
+
+struct FixedApprovalGate(Approval);
+
+impl ApprovalGate for FixedApprovalGate {
+  fn decide(
+    &mut self,
+    _metadata: &rupi_core::ToolMetadata,
+    _arguments: &serde_json::Value,
+  ) -> Approval {
+    self.0.clone()
+  }
+}
+
+fn tool_availability_prompt(tools: &[rupi_core::ToolSpec]) -> String {
+  if tools.is_empty() {
+    return "No tools are available for this request. Do not claim to inspect or change workspace state.".into();
+  }
+  let names = tools
+    .iter()
+    .map(|tool| tool.name.as_str())
+    .collect::<Vec<_>>()
+    .join(", ");
+  format!(
+    "Tools available for this request: {names}. Use only these tools; the listed schemas define the permitted arguments."
+  )
 }
 
 /// Leave explicit headroom after a provider has proved the advertised window
@@ -4730,6 +4806,174 @@ mod tests {
     registry
   }
 
+  fn registry_with_default_deny(tools: Vec<Box<dyn Tool>>) -> ToolRegistry {
+    let mut registry = ToolRegistry::new(Workspace::new(std::env::temp_dir()).expect("temp dir"));
+    for tool in tools {
+      registry.register(tool);
+    }
+    registry
+  }
+
+  struct ApprovalProgress {
+    decision: Approval,
+    prompts: usize,
+  }
+
+  impl TurnProgress for ApprovalProgress {
+    fn approve_mutating_tool(
+      &mut self,
+      _metadata: &rupi_core::ToolMetadata,
+      _arguments: &serde_json::Value,
+    ) -> Approval {
+      self.prompts += 1;
+      self.decision.clone()
+    }
+  }
+
+  #[test]
+  fn model_tools_and_guidance_match_headless_and_interactive_approval() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with_default_deny(vec![
+      Box::new(Spy(Arc::new(Mutex::new(Vec::new())))),
+      Box::new(MutatingSpy {
+        seen,
+        outcome: ToolOutcome::succeeded("ok"),
+      }),
+    ]);
+    let provider = Scripted::new("tool-affordances", Vec::new());
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let mut trace = Recorder::default();
+    let mut headless = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user("inspect the workspace")]);
+    let mut turn_history_start = 0;
+    let headless_request = headless
+      .build_request(&TurnId::new(), &mut turn_history_start)
+      .expect("headless request builds");
+    let headless_names: Vec<_> = headless_request
+      .tools
+      .iter()
+      .map(|spec| spec.name.as_str())
+      .collect();
+    assert_eq!(headless_names, ["spy"]);
+    let headless_system = headless_request.system.as_deref().unwrap();
+    assert!(headless_system.contains("Tools available for this request: spy"));
+    assert!(!headless_system.contains("write_probe"));
+
+    let mut trace = Recorder::default();
+    let mut interactive = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_interactive_tool_approval(true)
+    .with_messages(vec![Message::user("inspect the workspace")]);
+    let mut turn_history_start = 0;
+    let interactive_request = interactive
+      .build_request(&TurnId::new(), &mut turn_history_start)
+      .expect("interactive request builds");
+    let interactive_system = interactive_request.system.as_deref().unwrap();
+    assert!(interactive_system.contains("spy, write_probe"));
+
+    let mut without_tool_support = Scripted::new("no-tools", Vec::new());
+    without_tool_support.capabilities.tools = false;
+    let mut trace = Recorder::default();
+    let mut degraded = TurnLoop::new(
+      &without_tool_support,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_interactive_tool_approval(true);
+    let mut turn_history_start = 0;
+    let degraded_request = degraded
+      .build_request(&TurnId::new(), &mut turn_history_start)
+      .expect("tool-less model request builds");
+    assert!(degraded_request.tools.is_empty());
+    assert!(
+      degraded_request
+        .system
+        .as_deref()
+        .unwrap()
+        .contains("No tools are available for this request.")
+    );
+  }
+
+  #[test]
+  fn default_headless_refuses_mutation_and_interactive_approval_executes_it() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with_default_deny(vec![Box::new(MutatingSpy {
+      seen: Arc::clone(&seen),
+      outcome: ToolOutcome::succeeded("mutated"),
+    })]);
+    let policy = rupi_core::ProfilePolicy::new(rupi_core::ContextProfile::Balanced, 128_000);
+
+    let provider = Scripted::new(
+      "headless-denial",
+      vec![
+        tool_call("write_probe", serde_json::json!({})),
+        text("done"),
+      ],
+    );
+    let mut trace = Recorder::default();
+    TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn(
+      "change the workspace",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .expect("a refused tool call still has a model-visible result");
+    assert!(seen.lock().unwrap().is_empty());
+
+    let provider = Scripted::new(
+      "interactive-approval",
+      vec![
+        tool_call("write_probe", serde_json::json!({})),
+        text("done"),
+      ],
+    );
+    let mut trace = Recorder::default();
+    let mut progress = ApprovalProgress {
+      decision: Approval::Allow,
+      prompts: 0,
+    };
+    TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_interactive_tool_approval(true)
+    .run_turn("change the workspace", &CancelToken::new(), &mut progress)
+    .expect("approved tool call completes");
+    assert_eq!(progress.prompts, 1);
+    assert_eq!(seen.lock().unwrap().len(), 1);
+  }
+
   struct AlwaysReduce;
 
   impl ContextPolicy for AlwaysReduce {
@@ -5099,7 +5343,9 @@ mod tests {
     // The system prompt reached the provider, and only once.
     let requests = provider.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].system.as_deref(), Some("be brief"));
+    assert!(requests[0].system.as_deref().is_some_and(|system| {
+      system.starts_with("be brief\n\nNo tools are available for this request.")
+    }));
     assert_eq!(
       requests[0].messages.len(),
       1,
@@ -5688,7 +5934,9 @@ mod tests {
       .unwrap();
     let request = &provider.requests()[0];
 
-    assert_eq!(request.system.as_deref(), Some("system instructions"));
+    assert!(request.system.as_deref().is_some_and(|system| {
+      system.starts_with("system instructions\n\nTools available for this request: spy.")
+    }));
     assert_eq!(request.thinking, ThinkingLevel::High);
     assert_eq!(request.tools.len(), 1);
     assert_eq!(request.tools[0].name, "spy");
@@ -5983,10 +6231,24 @@ mod tests {
         .collect::<Vec<_>>(),
       vec!["write_probe"]
     );
+    assert!(
+      requests[1]
+        .system
+        .as_deref()
+        .unwrap()
+        .contains("Tools available for this request: write_probe.")
+    );
     assert_eq!(
       requests[2].tools.len(),
       2,
       "a successful progress tool ends the one-shot boundary"
+    );
+    assert!(
+      requests[2]
+        .system
+        .as_deref()
+        .unwrap()
+        .contains("Tools available for this request: spy, write_probe.")
     );
     assert!(
       requests[1]
