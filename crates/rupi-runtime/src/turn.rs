@@ -1749,7 +1749,11 @@ impl<'a> TurnLoop<'a> {
               failure
             }
             None => {
-              self.measured_input_tokens = usage.input_tokens;
+              // Context pressure follows the logical prompt footprint, not only
+              // newly evaluated tokens. Cache hits are cheap but still occupy the
+              // provider's context window and must remain visible to the policy.
+              self.measured_input_tokens =
+                usage.logical_prompt_tokens.or(usage.input_tokens);
               let tool_calls = u32::try_from(calls.len()).map_err(|_| {
                 TurnFailure::Sink(SinkError("tool-call count exceeds durable limit".into()))
               })?;
@@ -1769,7 +1773,11 @@ impl<'a> TurnLoop<'a> {
                     })
                   }),
                   input_tokens: usage.input_tokens,
+                  logical_prompt_tokens: usage.logical_prompt_tokens,
+                  cache_read_tokens: usage.cache_read_tokens,
+                  cache_write_tokens: usage.cache_write_tokens,
                   output_tokens: usage.output_tokens,
+                  provider_total_tokens: usage.provider_total_tokens,
                   duration_ms,
                   tool_calls,
                   reasoning_provenance: provenance,
@@ -1808,8 +1816,22 @@ impl<'a> TurnLoop<'a> {
             finish_reason: failed_usage
               .as_ref()
               .and_then(|usage| usage.finish_reason.clone()),
-            input_tokens: failed_usage.as_ref().and_then(|usage| usage.input_tokens),
+            input_tokens: failed_usage
+              .as_ref()
+              .and_then(|usage| usage.input_tokens),
+            logical_prompt_tokens: failed_usage
+              .as_ref()
+              .and_then(|usage| usage.logical_prompt_tokens),
+            cache_read_tokens: failed_usage
+              .as_ref()
+              .and_then(|usage| usage.cache_read_tokens),
+            cache_write_tokens: failed_usage
+              .as_ref()
+              .and_then(|usage| usage.cache_write_tokens),
             output_tokens: failed_usage.as_ref().and_then(|usage| usage.output_tokens),
+            provider_total_tokens: failed_usage
+              .as_ref()
+              .and_then(|usage| usage.provider_total_tokens),
             duration_ms,
             tool_calls: u32::try_from(calls.len()).map_err(|_| {
               TurnFailure::Sink(SinkError("tool-call count exceeds durable limit".into()))
@@ -2814,6 +2836,8 @@ impl<'a> TurnLoop<'a> {
       state.context_epoch = self.context_epoch;
       state.measured_tokens = self.measured_input_tokens;
       state.estimated_tokens = estimate_messages(&self.messages);
+      state.recent_tokens =
+        estimate_messages(&self.messages[(*turn_history_start).min(self.messages.len())..]);
       state.working_messages = self.messages.len() as u32;
       // A loop that has never compacted has waited longer than any cooldown:
       // u64::MAX states that without inventing a timestamp.

@@ -371,10 +371,22 @@ pub struct ModelRequestCompleted {
   pub model: ModelRef,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub finish_reason: Option<String>,
+  /// Uncached prompt tokens, retained under the original field name for
+  /// compatibility with existing trace consumers.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub input_tokens: Option<u64>,
+  /// Logical prompt footprint, including cache hits and cache writes.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub logical_prompt_tokens: Option<u64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cache_read_tokens: Option<u64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cache_write_tokens: Option<u64>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub output_tokens: Option<u64>,
+  /// Provider-reported total token count, when available.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub provider_total_tokens: Option<u64>,
   pub duration_ms: u64,
   pub tool_calls: u32,
   /// Provenance of reasoning seen during this request, `None` when none was

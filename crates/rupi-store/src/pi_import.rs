@@ -952,6 +952,18 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
               .and_then(|u| u.get(key))
               .and_then(Value::as_u64)
           };
+          let cache_read_tokens = count("cacheRead");
+          let cache_write_tokens = count("cacheWrite");
+          let logical_prompt_tokens = count("input").map(|input| {
+            input
+              .saturating_add(cache_read_tokens.unwrap_or(0))
+              .saturating_add(cache_write_tokens.unwrap_or(0))
+          });
+          let provider_total_tokens = count("totalTokens").or_else(|| {
+            logical_prompt_tokens
+              .zip(count("output"))
+              .map(|(input, output)| input.saturating_add(output))
+          });
           for recorded in ["cacheRead", "cacheWrite", "cost"] {
             if usage
               .as_ref()
@@ -967,7 +979,11 @@ pub fn plan(source: &PiSession) -> Result<ImportPlan, PiImportError> {
               model: model_ref,
               finish_reason: entry.message_field("stopReason").map(String::from),
               input_tokens: count("input"),
+              logical_prompt_tokens,
+              cache_read_tokens,
+              cache_write_tokens,
               output_tokens: count("output"),
+              provider_total_tokens,
               // Pi stores no per-request wall time; zero states "not recorded" better than
               // the difference between two entry timestamps would.
               duration_ms: 0,

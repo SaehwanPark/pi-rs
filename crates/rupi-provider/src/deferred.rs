@@ -159,7 +159,12 @@ mod tests {
     ) -> Result<CompletionUsage, ModelFailure> {
       Ok(CompletionUsage {
         input_tokens: None,
+        uncached_input_tokens: None,
+        logical_prompt_tokens: None,
+        cache_read_tokens: None,
+        cache_write_tokens: None,
         output_tokens: None,
+        provider_total_tokens: None,
         finish_reason: Some("stop".into()),
         certainty: rupi_core::CompletionCertainty::Certain,
       })
