@@ -3552,7 +3552,7 @@ fn safe_eviction_boundary(messages: &[Message], start: usize, boundary: usize, e
 ///
 /// Unlike ordinary turn eviction, the retained suffix may begin with an assistant
 /// tool call. The preserved summary user message immediately before it supplies the
-/// protocol anchor; walking backwards proves every call in the last interaction has
+/// protocol anchor; walking backwards proves every call in the candidate prefix has
 /// a matching terminal result before allowing the cut. Unknown results are kept in
 /// the visible window so a later request cannot mistake an uncertain mutation for a
 /// completed cycle.
@@ -3593,14 +3593,11 @@ fn safe_completed_cycle_boundary(messages: &[Message], start: usize, boundary: u
         if calls.iter().any(|call| !results.remove(&call.id)) {
           return false;
         }
-        return results.is_empty();
       }
-      Role::User if saw_tool => return results.is_empty(),
-      Role::System => {}
-      Role::User => {}
+      Role::System | Role::User => {}
     }
   }
-  false
+  results.is_empty()
 }
 
 fn estimate_message_bytes(message: &Message) -> usize {
@@ -4520,6 +4517,36 @@ mod tests {
       tool_message_result(second, ToolExecutionState::Unknown, "uncertain"),
     ];
     assert!(!safe_completed_cycle_boundary(&uncertain, 0, 2));
+  }
+
+  #[test]
+  fn completed_cycle_boundary_does_not_cross_an_earlier_unknown_result() {
+    let completed = rupi_core::ToolCallId::new();
+    let uncertain = rupi_core::ToolCallId::new();
+    let later = rupi_core::ToolCallId::new();
+    let call = |id: &rupi_core::ToolCallId| {
+      Message::new(
+        Role::Assistant,
+        vec![ContentBlock::ToolCall(ToolCallBlock {
+          id: id.clone(),
+          name: "read".into(),
+          arguments: serde_json::json!({}),
+        })],
+      )
+    };
+    let messages = vec![
+      call(&completed),
+      tool_message_result(completed, ToolExecutionState::Succeeded, "completed"),
+      call(&uncertain),
+      tool_message_result(uncertain, ToolExecutionState::Unknown, "outcome unknown"),
+      call(&later),
+      tool_message_result(later, ToolExecutionState::Succeeded, "later completed"),
+    ];
+
+    assert!(safe_completed_cycle_boundary(&messages, 0, 2));
+    assert!(!safe_completed_cycle_boundary(&messages, 0, 4));
+    assert!(safe_completed_cycle_boundary(&messages, 4, 6));
+    assert!(!safe_completed_cycle_boundary(&messages, 0, 6));
   }
 
   #[test]
