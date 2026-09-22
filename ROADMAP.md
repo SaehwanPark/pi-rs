@@ -861,6 +861,28 @@ benchmarks passed on the non-Windows runners, as configured.
 - [x] Return a successful headless status for durably recorded budget exhaustion;
       keep the structured turn status resumable and persistence errors fatal.
 
+### Completed audit follow-up — Round 2 (PR #121)
+
+The 2026-09-22 Round 2 audit identified seven runtime/provider consistency gaps. All seven
+fixes have regression coverage and passed workspace verification on 2026-09-22:
+
+- [x] Keep same-turn compaction from crossing an earlier `Unknown` or unresolved tool result.
+- [x] Make model-visible tools and guidance match what the active surface can execute.
+- [x] Recalculate context thresholds for the active model window and scope adaptive knees by model.
+- [x] Return malformed or ambiguously correlated tool calls as failed results for model correction;
+      never execute rejected calls and synthesize missing call IDs.
+- [x] Size the full assembled request, including system prompt and exposed tool schemas, before
+      evaluating context pressure.
+- [x] Close one-shot budget exhaustion as `Interrupted` while retaining successful resumable exit.
+- [x] Recognize `prompt_cache_hit_tokens` and top-level `cached_tokens` usage aliases.
+
+Evidence: `cargo fmt --all --check`, `cargo check -p rupi-core --all-features`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and
+`cargo doc --workspace --no-deps` passed. Startup and context-prefill benchmarks also passed
+on this Windows host; recorded startup cold/warm means were 122.40/6.34 ms. The audit's
+recommended model comparison cases 01, 02, 04, and 06 were not rerun because the configured
+local OpenAI-compatible server at `127.0.0.1:8000` was not running.
+
 ### P2 — Later / deliberately deferred
 
 - [x] Windows CI matrix (hosted CI covers Ubuntu, macOS, and Windows; benchmark execution remains non-Windows only).

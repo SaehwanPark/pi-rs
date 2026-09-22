@@ -100,7 +100,8 @@ the discovered skill-control prompt when skills are available. A headless turn t
 at its model-request budget is durably completed with `TurnStatus::BudgetExhausted` and a
 flushed trace. `rupi run` exits successfully for that resumable partial outcome; the exit
 status does not claim the requested task is complete. Provider and persistence failures
-remain errors.
+remain errors. Budget exhaustion ends the one-shot session as `Interrupted`; a completed
+one-shot run and an explicit interactive exit remain `UserExit`.
 
 ## 5. Provider abstraction
 
@@ -309,6 +310,14 @@ pub enum ToolExecutionState {
 
 Every tool call should have a stable ID.
 
+An adapter that receives a model-authored call with malformed JSON arguments or ambiguous
+fragment correlation emits `ProviderEvent::ToolCallRejected` with a stable call ID. The
+runtime records the request and a terminal failed result, returns that result to the same
+model for correction, and never dispatches the rejected call. Missing provider IDs are
+replaced with internal IDs when a provider index still identifies the call. A fragment
+without either a provider index or ID is rejected and receives an internal ID only for
+failed-lifecycle reporting. No argument repair is executed as a tool request.
+
 Mutating tool operations must not be blindly replayed after an uncertain failure boundary.
 
 Read-only tools may use more permissive retry semantics.
@@ -341,6 +350,12 @@ The default is disabled so read-only questions and inspection workflows remain u
 The context engine owns model-visible working memory.
 
 It consumes canonical session/trace state and produces a bounded working set.
+
+Before policy evaluation, request sizing includes the assembled system prompt, messages, and
+currently exposed tool schemas. The active provider's context window controls threshold
+evaluation after failover; adaptive latency observations are scoped to model identity.
+Same-turn compaction validates every tool lifecycle in the proposed prefix and stops before
+any unresolved or `Unknown` result.
 
 Conceptual action enum:
 
