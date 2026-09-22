@@ -2824,12 +2824,14 @@ impl<'a> TurnLoop<'a> {
     turn_history_start: &mut usize,
   ) -> Result<ModelRequest, TurnError> {
     let capabilities = self.provider().capabilities();
+    let estimated_request = self.assemble_request(self.messages.clone());
+    let estimated_tokens = estimate_tokens(&estimated_request);
     let state = {
       let mut state = ContextState::zero(capabilities.context_window);
       state.model = Some(self.active_model());
       state.context_epoch = self.context_epoch;
       state.measured_tokens = self.measured_input_tokens;
-      state.estimated_tokens = estimate_messages(&self.messages);
+      state.estimated_tokens = estimated_tokens;
       state.recent_tokens =
         estimate_messages(&self.messages[(*turn_history_start).min(self.messages.len())..]);
       state.working_messages = self.messages.len() as u32;
@@ -4744,6 +4746,70 @@ mod tests {
     fn name(&self) -> &'static str {
       "test_reduce"
     }
+  }
+
+  struct CaptureContextState(Arc<Mutex<Option<ContextState>>>);
+
+  impl ContextPolicy for CaptureContextState {
+    fn evaluate(&self, state: &ContextState) -> rupi_core::ContextDecision {
+      *self.0.lock().unwrap() = Some(state.clone());
+      rupi_core::ContextDecision {
+        action: ContextAction::Keep,
+        tokens: state.effective_tokens(),
+        level: None,
+      }
+    }
+
+    fn name(&self) -> &'static str {
+      "capture_context_state"
+    }
+  }
+
+  #[test]
+  fn pre_policy_estimate_includes_system_prompt_and_tool_schemas() {
+    let mut provider = Scripted::new("request-sizing", Vec::new());
+    provider.capabilities.context_window = 16_000;
+    let tools = registry_with(vec![Box::new(SizedTool {
+      description: "description ".repeat(4_000),
+      schema: serde_json::json!({"type":"object","description":"schema ".repeat(4_000)}),
+    })]);
+    let observed = Arc::new(Mutex::new(None));
+    let policy = CaptureContextState(Arc::clone(&observed));
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_system("system ".repeat(4_000))
+    .with_messages(vec![Message::user("short request")]);
+    let mut turn_history_start = 0;
+
+    let request = runtime
+      .build_request(&TurnId::new(), &mut turn_history_start)
+      .expect("request is assembled");
+    let state = observed
+      .lock()
+      .unwrap()
+      .clone()
+      .expect("policy receives context state");
+
+    assert_eq!(state.estimated_tokens, estimate_tokens(&request));
+    assert!(state.estimated_tokens > estimate_messages(&request.messages));
+    assert!(
+      state.estimated_tokens
+        > rupi_core::ContextThresholds::for_profile(
+          rupi_core::ContextProfile::Balanced,
+          provider.capabilities.context_window,
+        )
+        .compact_tokens,
+      "system text and tool schema alone should push this small window past its working threshold"
+    );
+    assert!(!request.tools.is_empty());
+    assert!(request.system.is_some());
   }
 
   #[test]
