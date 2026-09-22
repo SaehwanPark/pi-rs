@@ -3748,6 +3748,9 @@ fn coding_capsule(
           let path = ["path", "file", "file_path"]
             .iter()
             .find_map(|key| call.arguments.get(key).and_then(serde_json::Value::as_str));
+          let location = path
+            .map(|path| format!(" for `{path}`"))
+            .unwrap_or_default();
           let command = coding_command(&call);
           let is_verification = command.as_deref().is_some_and(is_verification_command);
           let outcome = match result.state {
@@ -3787,7 +3790,7 @@ fn coding_capsule(
                 "Tool failed"
               };
               format!(
-                "{status}: `{}`{}",
+                "{status}: `{}`{location}{}",
                 command.as_deref().unwrap_or(&call.name),
                 if detail.is_empty() {
                   String::new()
@@ -3799,10 +3802,16 @@ fn coding_capsule(
             ToolExecutionState::Unknown
             | ToolExecutionState::Started
             | ToolExecutionState::Requested => {
+              let detail = bounded_text(result.text.trim(), 160);
               format!(
-                "Tool `{}` ended in state `{}`; inspect its effects before retrying.",
+                "Tool `{}`{location} ended in state `{}`; inspect its effects before retrying{}.",
                 call.name,
-                result.state.as_str()
+                result.state.as_str(),
+                if detail.is_empty() {
+                  String::new()
+                } else {
+                  format!("; visible result: {detail}")
+                }
               )
             }
           };
@@ -3827,9 +3836,17 @@ fn coding_capsule(
   }
 
   for call in pending_calls.values() {
+    let location = ["path", "file", "file_path"]
+      .iter()
+      .find_map(|key| call.arguments.get(key).and_then(serde_json::Value::as_str))
+      .map(|path| format!(" for `{path}`"))
+      .unwrap_or_default();
     push_unique(
       &mut unresolved,
-      format!("Tool call `{}` has no visible terminal result.", call.name),
+      format!(
+        "Tool call `{}`{location} has no visible terminal result.",
+        call.name
+      ),
     );
   }
   if let Some(system) = system.filter(|system| !system.trim().is_empty()) {
@@ -4347,6 +4364,8 @@ mod tests {
     let edit_id = rupi_core::ToolCallId::new();
     let passed_id = rupi_core::ToolCallId::new();
     let failed_id = rupi_core::ToolCallId::new();
+    let unknown_id = rupi_core::ToolCallId::new();
+    let pending_id = rupi_core::ToolCallId::new();
     let messages = vec![
       Message::user("Build the parser.\nMust retain the existing input format."),
       Message::new(
@@ -4380,6 +4399,27 @@ mod tests {
         ToolExecutionState::Failed,
         "warning denied by lint",
       ),
+      Message::new(
+        Role::Assistant,
+        vec![ContentBlock::ToolCall(ToolCallBlock {
+          id: unknown_id.clone(),
+          name: "write".into(),
+          arguments: serde_json::json!({"path":"src/possibly-written.rs"}),
+        })],
+      ),
+      tool_message_result(
+        unknown_id,
+        ToolExecutionState::Unknown,
+        "connection ended while writing",
+      ),
+      Message::new(
+        Role::Assistant,
+        vec![ContentBlock::ToolCall(ToolCallBlock {
+          id: pending_id,
+          name: "edit".into(),
+          arguments: serde_json::json!({"path":"src/interrupted.rs"}),
+        })],
+      ),
     ];
 
     let summary = structured_summary(&messages);
@@ -4403,6 +4443,19 @@ mod tests {
       summary.contains("Verification failed: `cargo clippy -p parser`"),
       "{summary}"
     );
+    assert!(
+      summary.contains("Tool `write` for `src/possibly-written.rs` ended in state `unknown`"),
+      "{summary}"
+    );
+    assert!(
+      summary.contains("visible result: connection ended while writing"),
+      "{summary}"
+    );
+    assert!(
+      summary.contains("Tool call `edit` for `src/interrupted.rs` has no visible terminal result"),
+      "{summary}"
+    );
+    assert!(!summary.contains("Tool `write` completed"), "{summary}");
   }
 
   #[test]
