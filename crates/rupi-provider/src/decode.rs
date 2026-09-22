@@ -447,8 +447,22 @@ impl Decoder {
       self.tool_indices.entry(index).or_insert(slot);
     }
     if let Some(id) = provider_id {
+      if self
+        .tools
+        .get(&slot)
+        .and_then(|builder| builder.id.as_deref())
+        .is_some_and(|existing| existing != id)
+      {
+        self.mark_correlation_error(slot, "one provider index carried multiple tool-call ids");
+      }
       self.tool_ids.entry(id.to_string()).or_insert(slot);
       self.tools.get_mut(&slot).expect("allocated tool slot").id = Some(id.to_string());
+    }
+    if provider_index.is_none() && provider_id.is_none() {
+      self.mark_correlation_error(
+        slot,
+        "tool-call fragment had neither a provider index nor a provider id",
+      );
     }
     let builder = self.tools.get_mut(&slot).expect("allocated tool slot");
     if let Some(function) = call.get("function") {
@@ -968,7 +982,7 @@ mod tests {
   }
 
   #[test]
-  fn a_single_call_without_index_or_id_gets_one_internal_correlation_id() {
+  fn a_call_without_index_or_id_gets_an_internal_id_but_is_rejected() {
     let mut collector = Collector::default();
     let mut decoder = Decoder::new(ReasoningExposure::None);
     for fragment in [
@@ -982,12 +996,11 @@ mod tests {
     decoder
       .finish(StreamEnd::DoneSentinel, &mut collector)
       .unwrap();
-    let ProviderEvent::ToolCall(call) = &collector.events()[0] else {
-      panic!("the single unambiguous call should decode");
+    let ProviderEvent::ToolCallRejected { id, reason, .. } = &collector.events()[0] else {
+      panic!("a call without index or id must not be executed");
     };
-    assert!(!call.id.as_str().trim().is_empty());
-    assert_eq!(call.name, "read");
-    assert_eq!(call.arguments, json!({"path": "a.rs"}));
+    assert!(!id.as_str().trim().is_empty());
+    assert!(reason.contains("neither a provider index nor a provider id"));
   }
 
   #[test]
@@ -1050,6 +1063,30 @@ mod tests {
       ProviderEvent::ToolCallRejected { reason, .. }
         if reason.contains("could not be safely correlated")
     )));
+  }
+
+  #[test]
+  fn one_provider_index_cannot_change_call_ids_mid_stream() {
+    let mut collector = Collector::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
+    for fragment in [
+      chunk(json!({
+        "tool_calls": [{"index": 0, "id": "first-id", "function": {"name": "read", "arguments": "{}"}}]
+      })),
+      chunk(json!({
+        "tool_calls": [{"index": 0, "id": "second-id", "function": {}}]
+      })),
+    ] {
+      decoder.chunk(&fragment, &mut collector).unwrap();
+    }
+    decoder
+      .finish(StreamEnd::DoneSentinel, &mut collector)
+      .unwrap();
+    assert!(matches!(
+      &collector.events()[0],
+      ProviderEvent::ToolCallRejected { reason, .. }
+        if reason.contains("one provider index carried multiple tool-call ids")
+    ));
   }
 
   #[test]
