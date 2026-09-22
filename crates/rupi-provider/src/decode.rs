@@ -34,7 +34,13 @@ pub struct Decoder {
   /// What the endpoint declared about its reasoning output, which is what decides
   /// the provenance claim of any thinking text decoded from it.
   exposure: ReasoningExposure,
+  /// Internal slots are separate from provider indexes and IDs. The provider
+  /// may omit either correlation field, and their numeric/string namespaces can
+  /// overlap.
   tools: std::collections::BTreeMap<u64, ToolBuilder>,
+  tool_indices: std::collections::HashMap<u64, u64>,
+  tool_ids: std::collections::HashMap<String, u64>,
+  next_tool_slot: u64,
   finish_reason: Option<String>,
   /// Logical prompt tokens reported by the provider before cache accounting.
   logical_prompt_tokens: Option<u64>,
@@ -46,11 +52,24 @@ pub struct Decoder {
   emitted_output: bool,
 }
 
-#[derive(Default)]
 struct ToolBuilder {
   id: Option<String>,
+  internal_id: ToolCallId,
   name: String,
   arguments: String,
+  correlation_error: Option<String>,
+}
+
+impl ToolBuilder {
+  fn new() -> Self {
+    Self {
+      id: None,
+      internal_id: ToolCallId::new(),
+      name: String::new(),
+      arguments: String::new(),
+      correlation_error: None,
+    }
+  }
 }
 
 impl Decoder {
@@ -63,6 +82,9 @@ impl Decoder {
     Self {
       exposure,
       tools: std::collections::BTreeMap::new(),
+      tool_indices: std::collections::HashMap::new(),
+      tool_ids: std::collections::HashMap::new(),
+      next_tool_slot: 0,
       finish_reason: None,
       logical_prompt_tokens: None,
       cache_read_tokens: None,
@@ -172,8 +194,14 @@ impl Decoder {
         }
       }
       if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
+        let uncorrelated_count = calls
+          .iter()
+          .filter(|call| {
+            call.get("index").and_then(Value::as_u64).is_none() && provider_tool_id(call).is_none()
+          })
+          .count();
         for call in calls {
-          self.accumulate_tool(call)?;
+          self.accumulate_tool(call, uncorrelated_count > 1)?;
         }
       }
     }
@@ -200,35 +228,55 @@ impl Decoder {
     let produced_a_call = !tools.is_empty();
     let mut decoded = Vec::with_capacity(tools.len());
     let mut ids = std::collections::BTreeSet::new();
-    for (index, builder) in tools {
-      let Some(id) = builder.id.filter(|id| !id.trim().is_empty()) else {
-        return Err(decode_failure(format!(
-          "tool call fragment {index} never carried an id"
-        )));
-      };
-      let arguments = if builder.arguments.trim().is_empty() {
-        Value::Object(serde_json::Map::new())
-      } else {
-        serde_json::from_str(&builder.arguments).map_err(|error| {
-          decode_failure(format!(
-            "tool call {id} arguments are not valid JSON: {error}"
-          ))
-          .with_detail(summarize(&builder.arguments))
-        })?
-      };
+    for (_, builder) in tools {
+      let id = builder
+        .id
+        .filter(|id| !id.trim().is_empty())
+        .map(ToolCallId::from_string)
+        .unwrap_or(builder.internal_id);
       if !ids.insert(id.clone()) {
         return Err(decode_failure(format!(
-          "duplicate tool call id {id} in one provider response"
+          "duplicate tool call id {} in one provider response",
+          id.as_str()
         )));
       }
-      decoded.push(ToolCallBlock {
-        id: ToolCallId::from_string(id),
+      let (arguments, argument_error) = if builder.arguments.trim().is_empty() {
+        (Value::Object(serde_json::Map::new()), None)
+      } else {
+        match serde_json::from_str::<Value>(&builder.arguments) {
+          Ok(arguments) if arguments.is_object() => (arguments, None),
+          Ok(_) => (
+            Value::Object(serde_json::Map::new()),
+            Some("tool arguments must be a JSON object".to_string()),
+          ),
+          Err(error) => (
+            Value::Object(serde_json::Map::new()),
+            Some(format!("tool arguments are not valid JSON: {error}")),
+          ),
+        }
+      };
+      let reason = match (builder.correlation_error, argument_error) {
+        (Some(correlation), Some(arguments)) => Some(format!("{correlation}; {arguments}")),
+        (Some(reason), None) | (None, Some(reason)) => Some(reason),
+        (None, None) => None,
+      };
+      let call = ToolCallBlock {
+        id: id.clone(),
         name: builder.name,
         arguments,
-      });
+      };
+      if let Some(reason) = reason {
+        decoded.push(ProviderEvent::ToolCallRejected {
+          id,
+          name: call.name,
+          reason,
+        });
+      } else {
+        decoded.push(ProviderEvent::ToolCall(call));
+      }
     }
-    for call in decoded {
-      sink.emit(&ProviderEvent::ToolCall(call));
+    for event in decoded {
+      sink.emit(&event);
     }
     // A turn is complete only when the provider said so. A socket that simply
     // closed, or a stream that reached `[DONE]` without ever naming a finish
@@ -301,17 +349,75 @@ impl Decoder {
   /// Cold path only: the typed failure carries phase and partial-output state, and
   /// boxing it would add indirection to every match without protecting a hot path.
   #[allow(clippy::result_large_err)]
-  fn accumulate_tool(&mut self, call: &Value) -> Result<(), rupi_core::ModelFailure> {
-    let index = call
-      .get("index")
-      .and_then(Value::as_u64)
-      // Servers that omit the index emit one tool call per chunk; treating a
-      // missing index as 0 keeps single-call streams decoding.
-      .unwrap_or(0);
-    let builder = self.tools.entry(index).or_default();
-    if let Some(id) = call.get("id").and_then(Value::as_str) {
-      builder.id = Some(id.to_string());
+  fn accumulate_tool(
+    &mut self,
+    call: &Value,
+    uncorrelated_batch: bool,
+  ) -> Result<(), rupi_core::ModelFailure> {
+    let provider_index = call.get("index").and_then(Value::as_u64);
+    let provider_id = provider_tool_id(call);
+    let index_slot = provider_index.and_then(|index| self.tool_indices.get(&index).copied());
+    let id_slot = provider_id.and_then(|id| self.tool_ids.get(id).copied());
+
+    let slot = match (index_slot, id_slot) {
+      (Some(index_slot), Some(id_slot)) if index_slot != id_slot => {
+        let reason = "tool-call index and id point to different fragments".to_string();
+        self.mark_correlation_error(index_slot, &reason);
+        self.mark_correlation_error(id_slot, &reason);
+        index_slot
+      }
+      (Some(index_slot), _) => index_slot,
+      (None, Some(id_slot))
+        if provider_index.is_some()
+          && self
+            .tool_indices
+            .iter()
+            .any(|(index, slot)| *slot == id_slot && Some(*index) != provider_index) =>
+      {
+        let slot = self.new_tool_slot()?;
+        let reason = "one provider tool-call id was associated with multiple indexes";
+        self.mark_correlation_error(id_slot, reason);
+        self.mark_correlation_error(slot, reason);
+        slot
+      }
+      (None, Some(id_slot)) => id_slot,
+      (None, None) if provider_index.is_some() || provider_id.is_some() => self.new_tool_slot()?,
+      (None, None) if uncorrelated_batch => {
+        let slot = self.new_tool_slot()?;
+        self.mark_correlation_error(
+          slot,
+          "multiple tool fragments in one chunk had neither an index nor an id",
+        );
+        slot
+      }
+      (None, None) if self.tools.len() == 1 => *self.tools.keys().next().unwrap(),
+      (None, None) => {
+        let slot = self.new_tool_slot()?;
+        if !self.tools.is_empty() {
+          let reason = "tool-call fragments could not be safely correlated by index or id";
+          let existing_slots: Vec<_> = self
+            .tools
+            .keys()
+            .copied()
+            .filter(|existing| *existing != slot)
+            .collect();
+          for existing in existing_slots {
+            self.mark_correlation_error(existing, reason);
+          }
+          self.mark_correlation_error(slot, reason);
+        }
+        slot
+      }
+    };
+
+    if let Some(index) = provider_index {
+      self.tool_indices.entry(index).or_insert(slot);
     }
+    if let Some(id) = provider_id {
+      self.tool_ids.entry(id.to_string()).or_insert(slot);
+      self.tools.get_mut(&slot).expect("allocated tool slot").id = Some(id.to_string());
+    }
+    let builder = self.tools.get_mut(&slot).expect("allocated tool slot");
     if let Some(function) = call.get("function") {
       if let Some(name) = function.get("name").and_then(Value::as_str) {
         builder.name.push_str(name);
@@ -322,6 +428,36 @@ impl Decoder {
     }
     Ok(())
   }
+
+  fn new_tool_slot(&mut self) -> Result<u64, rupi_core::ModelFailure> {
+    let slot = self.next_tool_slot;
+    self.next_tool_slot = self
+      .next_tool_slot
+      .checked_add(1)
+      .ok_or_else(|| decode_failure("tool-call slot count is exhausted".to_string()))?;
+    self.tools.insert(slot, ToolBuilder::new());
+    Ok(slot)
+  }
+
+  fn mark_correlation_error(&mut self, slot: u64, reason: &str) {
+    if let Some(builder) = self.tools.get_mut(&slot) {
+      match builder.correlation_error.as_mut() {
+        Some(existing) if !existing.contains(reason) => {
+          existing.push_str("; ");
+          existing.push_str(reason);
+        }
+        Some(_) => {}
+        None => builder.correlation_error = Some(reason.to_string()),
+      }
+    }
+  }
+}
+
+fn provider_tool_id(call: &Value) -> Option<&str> {
+  call
+    .get("id")
+    .and_then(Value::as_str)
+    .filter(|id| !id.trim().is_empty())
 }
 
 /// A failure while turning a valid response body into harness events.
@@ -706,7 +842,7 @@ mod tests {
   }
 
   #[test]
-  fn malformed_tool_arguments_are_a_protocol_failure_not_a_tool_call() {
+  fn malformed_tool_arguments_become_rejected_calls_for_model_recovery() {
     let mut collector = Collector::default();
     let mut decoder = Decoder::new(ReasoningExposure::None);
     decoder
@@ -715,23 +851,18 @@ mod tests {
         &mut collector,
       )
       .unwrap();
-    let failure = decoder
+    decoder
       .finish(StreamEnd::DoneSentinel, &mut collector)
-      .unwrap_err();
-    assert_eq!(failure.kind, ModelFailureKind::Protocol);
-    assert!(
-      failure.message.contains("not valid JSON"),
-      "{}",
-      failure.message
-    );
-    assert!(
-      collector.events().is_empty(),
-      "nothing half-decoded escaped"
-    );
+      .unwrap();
+    assert!(matches!(
+      &collector.events()[0],
+      ProviderEvent::ToolCallRejected { name, reason, .. }
+        if name == "read" && reason.contains("not valid JSON")
+    ));
   }
 
   #[test]
-  fn a_tool_call_fragment_without_id_is_refused() {
+  fn a_tool_call_without_provider_id_gets_a_stable_internal_id() {
     let mut collector = Collector::default();
     let mut decoder = Decoder::new(ReasoningExposure::None);
     decoder
@@ -742,14 +873,86 @@ mod tests {
         &mut collector,
       )
       .unwrap();
-    let failure = decoder
+    decoder
       .finish(StreamEnd::DoneSentinel, &mut collector)
-      .unwrap_err();
-    assert!(
-      failure.message.contains("never carried an id"),
-      "{}",
-      failure.message
-    );
+      .unwrap();
+    let ProviderEvent::ToolCall(call) = &collector.events()[0] else {
+      panic!("a valid single call can be correlated by its index");
+    };
+    assert!(!call.id.as_str().trim().is_empty());
+    assert_eq!(call.name, "read");
+    assert_eq!(call.arguments, json!({}));
+  }
+
+  #[test]
+  fn missing_indices_use_ids_to_keep_streamed_calls_apart() {
+    let mut collector = Collector::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
+    for fragment in [
+      chunk(json!({
+        "tool_calls": [
+          {"id": "read-id", "function": {"name": "read", "arguments": "{\"path\":"}},
+          {"id": "grep-id", "function": {"name": "grep", "arguments": "{\"query\":"}},
+        ]
+      })),
+      chunk(json!({
+        "tool_calls": [
+          {"id": "read-id", "function": {"arguments": "\"a.rs\"}"}},
+          {"id": "grep-id", "function": {"arguments": "\"TODO\"}"}},
+        ]
+      })),
+    ] {
+      decoder.chunk(&fragment, &mut collector).unwrap();
+    }
+    decoder
+      .finish(StreamEnd::DoneSentinel, &mut collector)
+      .unwrap();
+    let calls: Vec<_> = collector
+      .events()
+      .iter()
+      .filter_map(|event| match event {
+        ProviderEvent::ToolCall(call) => Some(call),
+        _ => None,
+      })
+      .collect();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].name, "read");
+    assert_eq!(calls[0].arguments, json!({"path": "a.rs"}));
+    assert_eq!(calls[1].name, "grep");
+    assert_eq!(calls[1].arguments, json!({"query": "TODO"}));
+  }
+
+  #[test]
+  fn missing_indices_and_ids_in_a_multi_call_chunk_are_rejected_as_ambiguous() {
+    let mut collector = Collector::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
+    decoder
+      .chunk(
+        &chunk(json!({
+          "tool_calls": [
+            {"function": {"name": "read", "arguments": "{}"}},
+            {"function": {"name": "grep", "arguments": "{}"}},
+          ]
+        })),
+        &mut collector,
+      )
+      .unwrap();
+    decoder
+      .finish(StreamEnd::DoneSentinel, &mut collector)
+      .unwrap();
+    assert_eq!(collector.events().len(), 2);
+    let ids: Vec<_> = collector
+      .events()
+      .iter()
+      .map(|event| match event {
+        ProviderEvent::ToolCallRejected { id, reason, .. } => {
+          assert!(reason.contains("neither an index nor an id"));
+          id.as_str().to_string()
+        }
+        other => panic!("expected rejected call, got {other:?}"),
+      })
+      .collect();
+    assert_ne!(ids[0], ids[1]);
   }
 
   #[test]

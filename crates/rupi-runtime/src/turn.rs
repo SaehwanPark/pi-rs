@@ -35,8 +35,8 @@ use rupi_core::{
   ModelRequest, ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta,
   ReasoningProvenance, ReductionReason, Role, SessionEndReason, SessionEnded, SessionId,
   SessionStarted, SinkError, ThinkingLevel, ToolCallBlock, ToolCompleted, ToolExecutionState,
-  ToolFailed, ToolProgress, ToolRequested, ToolResultBlock, ToolStarted, ToolUnknown, TraceId,
-  TurnCompleted, TurnId, TurnStatus, UserMessage,
+  ToolFailed, ToolOutcome, ToolProgress, ToolRequested, ToolResultBlock, ToolStarted, ToolUnknown,
+  TraceId, TurnCompleted, TurnId, TurnStatus, UserMessage,
 };
 use rupi_tools::{Approval, ApprovalGate, Executed, ToolRegistry};
 
@@ -390,6 +390,7 @@ struct Response {
   epoch: u32,
   text: Option<String>,
   calls: Vec<ToolCallBlock>,
+  rejected_calls: BTreeMap<String, String>,
   /// The completion is held until the exact assistant message is assembled, so
   /// the canonical completion and its projection share one transaction.
   completion: EventEnvelope,
@@ -1160,7 +1161,8 @@ impl<'a> TurnLoop<'a> {
         }
         Err(TurnFailure::Sink(error)) => return Err(TurnError::from(error)),
       };
-      let (assistant_event_id, calls) = self.record_response(response, &mut report)?;
+      let (assistant_event_id, calls, rejected_calls) =
+        self.record_response(response, &mut report)?;
 
       if calls.is_empty() {
         // The model answered instead of asking: the turn is over.
@@ -1199,6 +1201,7 @@ impl<'a> TurnLoop<'a> {
         turn_id.clone(),
         assistant_event_id,
         &calls,
+        &rejected_calls,
         cancel,
         progress,
       )?;
@@ -1231,7 +1234,7 @@ impl<'a> TurnLoop<'a> {
         }
         Err(TurnFailure::Sink(error)) => return Err(TurnError::from(error)),
       };
-      let (assistant_event_id, calls) = self.record_response(response, &mut report)?;
+      let (assistant_event_id, calls, _) = self.record_response(response, &mut report)?;
       report.budget_exhausted = true;
       if calls.is_empty() {
         self.diagnostic(
@@ -1742,6 +1745,7 @@ impl<'a> TurnLoop<'a> {
       let Collector {
         text,
         calls,
+        rejected_calls,
         committed,
         reasoning_provenance: provenance,
         sink_error,
@@ -1811,6 +1815,7 @@ impl<'a> TurnLoop<'a> {
                 epoch,
                 text: (!text.is_empty()).then_some(text),
                 calls,
+                rejected_calls,
                 completion,
               });
             }
@@ -3001,11 +3006,19 @@ impl<'a> TurnLoop<'a> {
     &mut self,
     response: Response,
     report: &mut TurnReport,
-  ) -> Result<(rupi_core::EventId, Vec<ToolCallBlock>), TurnError> {
+  ) -> Result<
+    (
+      rupi_core::EventId,
+      Vec<ToolCallBlock>,
+      BTreeMap<String, String>,
+    ),
+    TurnError,
+  > {
     let Response {
       epoch,
       text,
       calls,
+      rejected_calls,
       mut completion,
     } = response;
     report.epoch = epoch;
@@ -3033,7 +3046,7 @@ impl<'a> TurnLoop<'a> {
       self.trace.emit_without_message(&mut completion)?;
       self.envelopes.push(completion);
     }
-    Ok((assistant_event_id, calls))
+    Ok((assistant_event_id, calls, rejected_calls))
   }
 
   /// Add the runtime-owned instruction that explains why the final request has no tools.
@@ -3099,6 +3112,7 @@ impl<'a> TurnLoop<'a> {
     turn_id: TurnId,
     assistant_event_id: rupi_core::EventId,
     calls: &[ToolCallBlock],
+    rejected_calls: &BTreeMap<String, String>,
     cancel: &CancelToken,
     progress: &mut dyn TurnProgress,
   ) -> Result<bool, TurnError> {
@@ -3147,6 +3161,39 @@ impl<'a> TurnLoop<'a> {
         )?;
         self.push_message(message, envelope.meta.seq);
         break;
+      }
+
+      if let Some(parse_reason) = rejected_calls.get(call.id.as_str()) {
+        let reason = format!(
+          "The tool call was not run because its model-generated request was invalid: {parse_reason}. Send a corrected tool call with complete JSON object arguments."
+        );
+        let executed = Executed {
+          request: rupi_core::ToolRequest {
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+          },
+          outcome: ToolOutcome::failed(reason.clone()),
+          state: ToolExecutionState::Failed,
+          started: false,
+          refusal: Some(reason),
+          full_output: None,
+          cancelled: false,
+        };
+        let (block, seq) = self.record_tool_outcome(
+          turn_id.clone(),
+          call,
+          &executed,
+          0,
+          read_only,
+          Some(requested.meta.event_id),
+        )?;
+        progress.on_tool_finished(call, &executed);
+        self.push_message(
+          Message::new(Role::Tool, vec![ContentBlock::ToolResult(block)]),
+          seq,
+        );
+        continue;
       }
 
       let request = rupi_core::ToolRequest {
@@ -3382,6 +3429,7 @@ struct Collector<'a> {
   first_delta_ms: Option<u64>,
   text: String,
   calls: Vec<ToolCallBlock>,
+  rejected_calls: BTreeMap<String, String>,
   committed: bool,
   reasoning_index: u32,
   text_index: u32,
@@ -3406,6 +3454,7 @@ impl<'a> Collector<'a> {
       first_delta_ms: None,
       text: String::new(),
       calls: Vec::new(),
+      rejected_calls: BTreeMap::new(),
       committed: false,
       reasoning_index: 0,
       text_index: 0,
@@ -3474,6 +3523,19 @@ impl rupi_core::ProviderEventSink for Collector<'_> {
         if self.sink_error.is_none() {
           self.committed = true;
           self.calls.push(call.clone());
+        }
+      }
+      rupi_core::ProviderEvent::ToolCallRejected { id, name, reason } => {
+        if self.sink_error.is_none() {
+          self.committed = true;
+          self.calls.push(ToolCallBlock {
+            id: id.clone(),
+            name: name.clone(),
+            arguments: serde_json::json!({}),
+          });
+          self
+            .rejected_calls
+            .insert(id.as_str().to_string(), reason.clone());
         }
       }
     }
@@ -4363,7 +4425,9 @@ mod tests {
         for event in events {
           match event {
             ProviderEvent::TextDelta(_) => usage.output_tokens = Some(4),
-            ProviderEvent::ToolCall(_) => usage.finish_reason = Some("tool_calls".into()),
+            ProviderEvent::ToolCall(_) | ProviderEvent::ToolCallRejected { .. } => {
+              usage.finish_reason = Some("tool_calls".into())
+            }
             ProviderEvent::ReasoningDelta { .. } => {}
           }
           sink.emit(event);
@@ -6173,6 +6237,60 @@ mod tests {
       at("tool_requested") < at("tool_started") && at("tool_started") < at("tool_completed"),
       "{kinds:?}"
     );
+  }
+
+  #[test]
+  fn rejected_tool_calls_are_returned_to_the_model_without_execution() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![Box::new(Spy(Arc::clone(&seen)))]);
+    let call_id = rupi_core::ToolCallId::new();
+    let provider = Scripted::new(
+      "malformed-call",
+      vec![
+        vec![ProviderEvent::ToolCallRejected {
+          id: call_id,
+          name: "spy".into(),
+          reason: "tool arguments are not valid JSON: unexpected end".into(),
+        }],
+        text("I corrected the request."),
+      ],
+    );
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn("inspect", &CancelToken::new(), &mut SilentProgress)
+    .unwrap();
+
+    assert_eq!(report.status, TurnStatus::Completed);
+    assert_eq!(report.requests, 2);
+    assert_eq!(report.text, "I corrected the request.");
+    assert!(seen.lock().unwrap().is_empty(), "the tool must never run");
+    assert_eq!(trace.count("tool_started"), 0);
+    assert_eq!(trace.count("tool_failed"), 1);
+    let requests = provider.requests();
+    let fed = requests[1]
+      .messages
+      .iter()
+      .find(|message| message.role == Role::Tool)
+      .expect("the failed result is returned to the same model");
+    let ContentBlock::ToolResult(result) = &fed.content[0] else {
+      panic!("expected a tool result block");
+    };
+    assert_eq!(result.state, ToolExecutionState::Failed);
+    assert!(result.is_error);
+    assert!(result.text.contains("not run"));
+    assert!(result.text.contains("corrected tool call"));
   }
 
   #[test]
