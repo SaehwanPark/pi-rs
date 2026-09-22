@@ -38,7 +38,18 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
         }
       } else {
         match session.turn(&args.prompt) {
-          Ok(()) => session.close().map_err(session_error),
+          Ok(report) => match report.status {
+            TurnStatus::Completed => session.close().map_err(session_error),
+            TurnStatus::BudgetExhausted => session
+              .close_interrupted("model request budget exhausted")
+              .map_err(session_error),
+            TurnStatus::Cancelled => session
+              .close_interrupted("turn cancelled")
+              .map_err(session_error),
+            TurnStatus::Failed { kind } => session
+              .close_interrupted(format!("turn failed ({kind})"))
+              .map_err(session_error),
+          },
           Err(error) => Err(turn_error(&session.close_after_failure(error))),
         }
       }
@@ -320,11 +331,10 @@ impl SessionHandle<'_> {
 
   /// Run one user turn that nothing outside this call can cancel.
   ///
-  /// A flushed request-budget boundary is a successful resumable outcome. Use
-  /// [`Self::turn_with`] when the caller needs the structured report directly.
-  pub fn turn(&mut self, prompt: &str) -> Result<(), TurnError> {
-    self.turn_with(prompt, &CancelToken::new())?;
-    Ok(())
+  /// A request-budget boundary is a successful resumable outcome, reported through
+  /// [`TurnReport::status`] so one-shot callers can close it as interrupted work.
+  pub fn turn(&mut self, prompt: &str) -> Result<TurnReport, TurnError> {
+    self.turn_with(prompt, &CancelToken::new())
   }
 
   /// Run one bounded no-tool finalization assessment for a resumed partial session.
@@ -495,10 +505,21 @@ impl SessionHandle<'_> {
   /// write failure is reported only once the session is durably closed, and a sink
   /// failure outranks it, because a lost line is not worth losing the record.
   pub fn close(&mut self) -> Result<(), SessionError> {
+    self.close_with_reason(SessionEndReason::UserExit)
+  }
+
+  /// Flush the transcript and close an incomplete but durably recorded session.
+  pub fn close_interrupted(&mut self, message: impl Into<String>) -> Result<(), SessionError> {
+    self.close_with_reason(SessionEndReason::Interrupted {
+      message: message.into(),
+    })
+  }
+
+  fn close_with_reason(&mut self, reason: SessionEndReason) -> Result<(), SessionError> {
     self.transcript_error = self.progress.finish().err();
     self
       .runtime
-      .end_session(SessionEndReason::UserExit)
+      .end_session(reason)
       .map_err(SessionError::Turn)?;
     match self.transcript_error.take() {
       Some(error) => Err(SessionError::Transcript(error)),
