@@ -844,6 +844,22 @@ Do not begin until stable baselines exist.
       remains active; see PR #117 and
       `docs/cases/2026-09-20-receipt-ledger/FINAL_REPORT.md` (2026-09-20).
 
+### Active audit follow-up — Round 1 (PR #120)
+
+The 2026-09-22 audit in `audits/2026-09-22/round01.md` identified five
+measurement and runtime gaps. Keep this slice active until each behavior has
+focused evidence and the full PR checks pass.
+
+- [ ] Separate logical prompt tokens from uncached input, cache reads/writes,
+      output, and provider totals; verify the Pi comparison metrics.
+- [ ] Reduce completed known tool cycles within an active user turn while
+      retaining safe call/result boundaries and canonical journal records.
+- [ ] Preserve coding objectives, artifacts, constraints, verification outcomes,
+      unresolved work, and next actions in compaction/checkpoint summaries.
+- [ ] Always supply the native coding-agent prompt and append available skills.
+- [ ] Return a successful headless status for durably recorded budget exhaustion;
+      keep the structured turn status resumable and persistence errors fatal.
+
 ### P2 — Later / deliberately deferred
 
 - [x] Windows CI matrix (hosted CI covers Ubuntu, macOS, and Windows; benchmark execution remains non-Windows only).

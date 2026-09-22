@@ -18,17 +18,18 @@
 //! - **Context is never silently truncated.** An oversized request is refused, and
 //!   the refusal is recorded.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rupi_core::{
-  AgentEvent, AssistantDelta, AttributedMessage, BlobRef, CAPSULE_SCHEMA_VERSION, CancelToken,
-  CapabilityGap, CapsuleArtifact, CapsuleDecision, CheckpointCreated, CheckpointId, ContentBlock,
-  ContextAction, ContextCapsule, ContextCompactionCompleted, ContextCompactionEpoch,
-  ContextCompactionStarted, ContextLevel, ContextPolicy, ContextReduced, ContextState,
-  DEFAULT_MAX_MODEL_REQUESTS_PER_TURN, Diagnostic, DiagnosticLevel, EpochReason, EventEnvelope,
-  EventMeta, EventSeq, EventSink, ExternalContextItem, ExternalContextRetrieved, FailurePhase,
+  AgentEvent, AssistantDelta, AttributedMessage, BlobRef, CancelToken, CapabilityGap,
+  CapsuleArtifact, CapsuleDecision, CheckpointCreated, CheckpointId, ContentBlock, ContextAction,
+  ContextCapsule, ContextCompactionCompleted, ContextCompactionEpoch, ContextCompactionStarted,
+  ContextLevel, ContextPolicy, ContextReduced, ContextState, DEFAULT_MAX_MODEL_REQUESTS_PER_TURN,
+  Diagnostic, DiagnosticLevel, EpochReason, EventEnvelope, EventMeta, EventSeq, EventSink,
+  ExternalContextItem, ExternalContextRetrieved, FailurePhase,
   MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN, Message, ModelCapabilities, ModelEpoch,
   ModelEpochStarted, ModelFailover, ModelFailure, ModelFailureKind, ModelProvider, ModelRef,
   ModelRequest, ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta,
@@ -1752,8 +1753,7 @@ impl<'a> TurnLoop<'a> {
               // Context pressure follows the logical prompt footprint, not only
               // newly evaluated tokens. Cache hits are cheap but still occupy the
               // provider's context window and must remain visible to the policy.
-              self.measured_input_tokens =
-                usage.logical_prompt_tokens.or(usage.input_tokens);
+              self.measured_input_tokens = usage.logical_prompt_tokens.or(usage.input_tokens);
               let tool_calls = u32::try_from(calls.len()).map_err(|_| {
                 TurnFailure::Sink(SinkError("tool-call count exceeds durable limit".into()))
               })?;
@@ -1816,9 +1816,7 @@ impl<'a> TurnLoop<'a> {
             finish_reason: failed_usage
               .as_ref()
               .and_then(|usage| usage.finish_reason.clone()),
-            input_tokens: failed_usage
-              .as_ref()
-              .and_then(|usage| usage.input_tokens),
+            input_tokens: failed_usage.as_ref().and_then(|usage| usage.input_tokens),
             logical_prompt_tokens: failed_usage
               .as_ref()
               .and_then(|usage| usage.logical_prompt_tokens),
@@ -2443,82 +2441,12 @@ impl<'a> TurnLoop<'a> {
     if let Some(custom) = &self.checkpointer {
       return custom(&self.messages, state);
     }
-    let mut objective = String::from("Perform assigned task");
-    let mut completed_work = Vec::new();
-    let mut artifacts = Vec::new();
-    let mut decisions = Vec::new();
-    let mut constraints = Vec::new();
-    let unresolved = Vec::new();
-    let next_actions = vec!["Continue session from checkpoint".to_string()];
-
-    for msg in &self.messages {
-      if msg.role == Role::User && !msg.text().trim().is_empty() {
-        let text = msg.text();
-        let first_line = text.lines().next().unwrap_or(&text).trim();
-        if !first_line.is_empty() && !first_line.starts_with('[') {
-          objective = first_line.chars().take(120).collect();
-          break;
-        }
-      }
-    }
-
-    for msg in &self.messages {
-      if msg.role == Role::Assistant {
-        for block in &msg.content {
-          match block {
-            ContentBlock::ToolCall(call) => {
-              let note = format!("Executed tool `{}`", call.name);
-              if !completed_work.contains(&note) {
-                completed_work.push(note);
-              }
-              if let Some(path_val) = call.arguments.get("path").and_then(|p| p.as_str()) {
-                let path = path_val.to_string();
-                if !artifacts.iter().any(|a: &CapsuleArtifact| a.path == path) {
-                  artifacts.push(CapsuleArtifact {
-                    path,
-                    note: format!("referenced by `{}`", call.name),
-                  });
-                }
-              }
-            }
-            ContentBlock::Text { text } => {
-              let trimmed = text.trim();
-              if trimmed.starts_with("Decision:") {
-                decisions.push(CapsuleDecision {
-                  decision: trimmed.chars().take(80).collect(),
-                  rationale: "recorded during turn".into(),
-                });
-              }
-            }
-            _ => {}
-          }
-        }
-      }
-    }
-
-    if let Some(sys) = &self.system {
-      if sys.contains("constraint") || sys.contains("must") {
-        constraints.push("Follow system prompt instructions".into());
-      }
-    }
-
     let current_state = format!(
       "Context pressure ({} tokens) in epoch {}; reason: {reason}",
       state.effective_tokens(),
       state.context_epoch
     );
-
-    ContextCapsule {
-      version: CAPSULE_SCHEMA_VERSION,
-      objective,
-      completed_work,
-      decisions,
-      constraints,
-      current_state,
-      artifacts,
-      unresolved,
-      next_actions,
-    }
+    coding_capsule(&self.messages, self.system.as_deref(), &current_state)
   }
 
   /// Create a checkpoint capsule from current session state, store it, emit
@@ -2671,6 +2599,67 @@ impl<'a> TurnLoop<'a> {
       .context_epoch
       .checked_add(1)
       .ok_or_else(|| TurnError::Sink("context epoch space is exhausted".into()))
+  }
+
+  /// Compact completed assistant/tool interactions from the active turn.
+  ///
+  /// A long coding turn is not indivisible: once a tool result is terminal, the
+  /// completed interaction can be folded into a structured summary. The summary
+  /// replaces the whole visible prefix after a checkpoint floor, which keeps the
+  /// existing durable compaction projection valid and preserves the objective in
+  /// the summary rather than deleting the original user request from resume state.
+  fn compact_completed_turn_cycles(
+    &mut self,
+    turn_id: &TurnId,
+    turn_history_start: &mut usize,
+    target_tokens: u64,
+    reason: String,
+  ) -> Result<u32, TurnError> {
+    let cycle_start = (*turn_history_start).min(self.messages.len());
+    let protected = self.checkpoint_floor.min(self.messages.len());
+    if cycle_start >= self.messages.len() || cycle_start < protected {
+      return Ok(0);
+    }
+
+    let mut selected: Option<(usize, String)> = None;
+    for boundary in (cycle_start + 1)..=self.messages.len() {
+      if !safe_completed_cycle_boundary(&self.messages, cycle_start, boundary) {
+        continue;
+      }
+      let source = self.messages[protected..boundary].to_vec();
+      let summary = match &self.summarizer {
+        Some(summarizer) => summarizer(&source),
+        None => format_coding_summary(
+          &source,
+          self.system.as_deref(),
+          &format!("Active turn continues after context pressure: {reason}"),
+        ),
+      };
+      let mut candidate = self.messages[..protected].to_vec();
+      candidate.push(Message::user(summary.clone()));
+      candidate.extend(self.messages[boundary..].iter().cloned());
+      selected = Some((boundary, summary));
+      if estimate_tokens(&self.assemble_request(candidate)) <= target_tokens {
+        break;
+      }
+    }
+
+    let Some((prefix_end, summary)) = selected else {
+      return Ok(0);
+    };
+    let replaced = self.compact_range(
+      turn_id,
+      prefix_end,
+      &summary,
+      ContextLevel::L1Ordinary,
+      reason,
+    )?;
+    if replaced > 0 {
+      // The summary is now the first post-checkpoint message. Subsequent cycles
+      // remain part of the same active turn and can be reduced again if needed.
+      *turn_history_start = self.checkpoint_floor.saturating_add(1);
+    }
+    Ok(replaced)
   }
 
   /// Compact only pre-turn history while a turn is active, preserving the
@@ -2877,6 +2866,14 @@ impl<'a> TurnLoop<'a> {
           compacted =
             self.compact_turn_prefix(turn_id, turn_history_start, level, reason.clone())?;
         }
+        if compacted == 0 {
+          compacted = self.compact_completed_turn_cycles(
+            turn_id,
+            turn_history_start,
+            target_tokens,
+            reason.clone(),
+          )?;
+        }
         if compacted == 0 && self.evict_oldest(target_tokens, turn_id, turn_history_start)? == 0 {
           // Nothing could be dropped: the newest turn alone is over the target.
           // The recommendation is the surface's again, so it stays visible.
@@ -2924,7 +2921,31 @@ impl<'a> TurnLoop<'a> {
           )?;
         }
       }
-      ContextAction::Warn { .. } | ContextAction::Keep | ContextAction::ReducePayload { .. } => {}
+      ContextAction::ReducePayload { reason } => {
+        let target_tokens = match reason {
+          ReductionReason::RecentTargetExceeded { target_tokens } => target_tokens,
+          _ => estimate_messages(&self.messages).saturating_mul(3) / 4,
+        };
+        let compacted = self.compact_completed_turn_cycles(
+          turn_id,
+          turn_history_start,
+          target_tokens,
+          format!("payload reduction: {reason:?}"),
+        )?;
+        if compacted == 0 {
+          // Older complete turns still benefit from the established L0 eviction
+          // path when the active turn has no completed interaction boundary yet.
+          let evicted = self.evict_oldest(target_tokens, turn_id, turn_history_start)?;
+          if evicted == 0 {
+            self.diagnostic(
+              Some(turn_id.clone()),
+              DiagnosticLevel::Info,
+              "context requested payload reduction, but no completed history boundary is available yet",
+            )?;
+          }
+        }
+      }
+      ContextAction::Warn { .. } | ContextAction::Keep => {}
     }
 
     Ok(self.assemble_request(self.messages.clone()))
@@ -3523,6 +3544,61 @@ fn safe_eviction_boundary(messages: &[Message], start: usize, boundary: usize, e
     .any(|block| matches!(block, ContentBlock::ToolCall(_)))
 }
 
+/// Whether a boundary follows a complete, terminal assistant/tool interaction.
+///
+/// Unlike ordinary turn eviction, the retained suffix may begin with an assistant
+/// tool call. The preserved summary user message immediately before it supplies the
+/// protocol anchor; walking backwards proves every call in the last interaction has
+/// a matching terminal result before allowing the cut. Unknown results are kept in
+/// the visible window so a later request cannot mistake an uncertain mutation for a
+/// completed cycle.
+fn safe_completed_cycle_boundary(messages: &[Message], start: usize, boundary: usize) -> bool {
+  if boundary <= start || boundary > messages.len() {
+    return false;
+  }
+  if messages[boundary - 1].role != Role::Tool {
+    return false;
+  }
+
+  let mut results = BTreeSet::new();
+  let mut saw_tool = false;
+  for message in messages[start..boundary].iter().rev() {
+    match message.role {
+      Role::Tool => {
+        saw_tool = true;
+        for block in &message.content {
+          let ContentBlock::ToolResult(result) = block else {
+            continue;
+          };
+          if result.state == ToolExecutionState::Unknown || !result.state.is_terminal() {
+            return false;
+          }
+          if !results.insert(result.id.clone()) {
+            return false;
+          }
+        }
+      }
+      Role::Assistant => {
+        let calls: Vec<_> = message.tool_calls().collect();
+        if calls.is_empty() {
+          continue;
+        }
+        if !saw_tool {
+          return false;
+        }
+        if calls.iter().any(|call| !results.remove(&call.id)) {
+          return false;
+        }
+        return results.is_empty();
+      }
+      Role::User if saw_tool => return results.is_empty(),
+      Role::System => {}
+      Role::User => {}
+    }
+  }
+  false
+}
+
 fn estimate_message_bytes(message: &Message) -> usize {
   message
     .content
@@ -3537,57 +3613,356 @@ fn estimate_message_bytes(message: &Message) -> usize {
     .sum()
 }
 
-/// Synthesize a structured factual summary of older conversation messages.
-pub fn structured_summary(messages: &[Message]) -> String {
-  let mut summary = String::from("Summary of earlier conversation:\n");
-  for msg in messages {
-    let text = msg.text();
-    let trimmed = text.trim();
-    match msg.role {
-      Role::User if !trimmed.is_empty() => {
-        summary.push_str("- User: ");
-        let preview: String = trimmed
+/// Synthesize a factual coding-work capsule from the visible conversation.
+///
+/// Tool outcomes are attributed only when their matching result is present. This
+/// keeps a checkpoint from turning an unanswered or uncertain operation into a
+/// claim that work completed.
+fn coding_capsule(
+  messages: &[Message],
+  system: Option<&str>,
+  current_state: &str,
+) -> ContextCapsule {
+  let mut objective = None;
+  let mut completed_work = Vec::new();
+  let mut decisions = Vec::new();
+  let mut constraints = Vec::new();
+  let mut artifacts = Vec::new();
+  let mut unresolved = Vec::new();
+  let mut next_actions = Vec::new();
+  let mut prior_state = String::new();
+  let mut pending_calls = BTreeMap::new();
+
+  for message in messages {
+    match message.role {
+      Role::User => {
+        let text = message.text();
+        let trimmed = text.trim();
+        if trimmed.starts_with("[Session Checkpoint Capsule]") {
+          let mut section = "";
+          for line in trimmed.lines() {
+            let line = line.trim();
+            if let Some(value) = line.strip_prefix("objective: ") {
+              objective.get_or_insert_with(|| bounded_text(value, 400));
+            } else if let Some(value) = line.strip_prefix("current_state: ") {
+              prior_state = bounded_text(value, 400);
+            } else if matches!(
+              line,
+              "completed:"
+                | "decisions:"
+                | "constraints:"
+                | "important_artifacts:"
+                | "unresolved:"
+                | "next_actions:"
+            ) {
+              section = line.trim_end_matches(':');
+            } else if let Some(value) = line.strip_prefix("- ") {
+              match section {
+                "completed" => push_unique(&mut completed_work, bounded_text(value, 240)),
+                "decisions" => {
+                  let (decision, rationale) = value
+                    .rsplit_once(": ")
+                    .unwrap_or((value, "carried forward from an earlier visible capsule"));
+                  push_unique(
+                    &mut decisions,
+                    CapsuleDecision {
+                      decision: bounded_text(decision, 240),
+                      rationale: bounded_text(rationale, 240),
+                    },
+                  );
+                }
+                "constraints" => push_unique(&mut constraints, bounded_text(value, 240)),
+                "important_artifacts" => {
+                  if let Some((path, note)) = value.rsplit_once(": ") {
+                    upsert_artifact(&mut artifacts, path, bounded_text(note, 200));
+                  }
+                }
+                "unresolved" => push_unique(&mut unresolved, bounded_text(value, 240)),
+                "next_actions" => push_unique(&mut next_actions, bounded_text(value, 240)),
+                _ => {}
+              }
+            } else {
+              section = "";
+            }
+          }
+          continue;
+        }
+        if !trimmed.is_empty() && objective.is_none() {
+          objective = Some(bounded_text(trimmed.lines().next().unwrap_or(trimmed), 400));
+        }
+        for line in trimmed
           .lines()
-          .next()
-          .unwrap_or(trimmed)
-          .chars()
-          .take(120)
-          .collect();
-        summary.push_str(&preview);
-        summary.push('\n');
+          .map(str::trim)
+          .filter(|line| !line.is_empty())
+        {
+          if contains_instruction_marker(line) {
+            push_unique(
+              &mut constraints,
+              format!("User instruction: {}", bounded_text(line, 240)),
+            );
+          }
+        }
       }
       Role::Assistant => {
-        for block in &msg.content {
+        for block in &message.content {
           match block {
             ContentBlock::Text { text } => {
-              let t_trimmed = text.trim();
-              if !t_trimmed.is_empty() {
-                summary.push_str("- Assistant: ");
-                let preview: String = t_trimmed
-                  .lines()
-                  .next()
-                  .unwrap_or(t_trimmed)
-                  .chars()
-                  .take(120)
-                  .collect();
-                summary.push_str(&preview);
-                summary.push('\n');
+              for line in text.lines().map(str::trim) {
+                if let Some(decision) = line.strip_prefix("Decision:") {
+                  push_unique(
+                    &mut decisions,
+                    CapsuleDecision {
+                      decision: bounded_text(decision.trim(), 240),
+                      rationale: "stated in visible assistant text".into(),
+                    },
+                  );
+                }
               }
             }
             ContentBlock::ToolCall(call) => {
-              summary.push_str(&format!("- Action: called tool `{}`\n", call.name));
+              pending_calls.insert(call.id.to_string(), call.clone());
             }
             _ => {}
           }
         }
       }
       Role::Tool => {
-        summary.push_str("- Tool: completed execution\n");
+        for block in &message.content {
+          let ContentBlock::ToolResult(result) = block else {
+            continue;
+          };
+          let Some(call) = pending_calls.remove(&result.id.to_string()) else {
+            push_unique(
+              &mut unresolved,
+              format!(
+                "Tool result `{}` has no visible matching call.",
+                result.name
+              ),
+            );
+            continue;
+          };
+          let path = ["path", "file", "file_path"]
+            .iter()
+            .find_map(|key| call.arguments.get(key).and_then(serde_json::Value::as_str));
+          let command = coding_command(&call);
+          let is_verification = command.as_deref().is_some_and(is_verification_command);
+          let outcome = match result.state {
+            ToolExecutionState::Succeeded => {
+              if is_verification {
+                let output = bounded_text(result.text.trim(), 160);
+                format!(
+                  "Verification passed: `{}`{}",
+                  command.as_deref().unwrap_or_default(),
+                  if output.is_empty() {
+                    String::new()
+                  } else {
+                    format!(" — {output}")
+                  }
+                )
+              } else {
+                let location = path
+                  .map(|path| format!(" for `{path}`"))
+                  .unwrap_or_default();
+                let output = bounded_text(result.text.trim(), 100);
+                format!(
+                  "Tool `{}` completed{location}{}",
+                  call.name,
+                  if output.is_empty() {
+                    ".".into()
+                  } else {
+                    format!("; observed: {output}")
+                  }
+                )
+              }
+            }
+            ToolExecutionState::Failed => {
+              let detail = bounded_text(result.text.trim(), 240);
+              let status = if is_verification {
+                "Verification failed"
+              } else {
+                "Tool failed"
+              };
+              format!(
+                "{status}: `{}`{}",
+                command.as_deref().unwrap_or(&call.name),
+                if detail.is_empty() {
+                  String::new()
+                } else {
+                  format!(" — {detail}")
+                }
+              )
+            }
+            ToolExecutionState::Unknown
+            | ToolExecutionState::Started
+            | ToolExecutionState::Requested => {
+              format!(
+                "Tool `{}` ended in state `{}`; inspect its effects before retrying.",
+                call.name,
+                result.state.as_str()
+              )
+            }
+          };
+          match result.state {
+            ToolExecutionState::Succeeded => {
+              push_unique(&mut completed_work, outcome);
+              if let Some(path) = path {
+                let note = if matches!(call.name.as_str(), "write" | "edit" | "append") {
+                  format!("modified by `{}`", call.name)
+                } else {
+                  format!("referenced by `{}`", call.name)
+                };
+                upsert_artifact(&mut artifacts, path, note);
+              }
+            }
+            _ => push_unique(&mut unresolved, outcome),
+          }
+        }
       }
-      _ => {}
+      Role::System => {}
     }
   }
-  summary
+
+  for call in pending_calls.values() {
+    push_unique(
+      &mut unresolved,
+      format!("Tool call `{}` has no visible terminal result.", call.name),
+    );
+  }
+  if let Some(system) = system.filter(|system| !system.trim().is_empty()) {
+    constraints.push("Follow the active system instructions.".into());
+    for line in system
+      .lines()
+      .map(str::trim)
+      .filter(|line| contains_instruction_marker(line))
+    {
+      push_unique(&mut constraints, bounded_text(line, 240));
+    }
+  }
+
+  let mut capsule =
+    ContextCapsule::new(objective.unwrap_or_else(|| "Perform assigned task".into()));
+  let omitted_work = retain_recent(&mut completed_work, 32);
+  let omitted_decisions = retain_recent(&mut decisions, 32);
+  let omitted_artifacts = retain_recent(&mut artifacts, 32);
+  capsule.completed_work = completed_work;
+  capsule.decisions = decisions;
+  capsule.constraints = constraints;
+  capsule.current_state = match (prior_state.is_empty(), current_state.is_empty()) {
+    (true, true) => String::new(),
+    (true, false) => current_state.to_string(),
+    (false, true) => prior_state,
+    (false, false) => format!("Earlier state: {prior_state}; current state: {current_state}"),
+  };
+  if omitted_work || omitted_decisions || omitted_artifacts {
+    if !capsule.current_state.is_empty() {
+      capsule.current_state.push_str("; ");
+    }
+    capsule.current_state.push_str(
+      "some older progress details are omitted; consult the canonical journal before claiming completeness",
+    );
+  }
+  capsule.artifacts = artifacts;
+  capsule.unresolved = unresolved;
+  if capsule.unresolved.is_empty() {
+    push_unique(
+      &mut next_actions,
+      "Continue the objective using the retained recent context.".into(),
+    );
+  } else {
+    push_unique(
+      &mut next_actions,
+      "Resolve the listed failures or uncertain operations before claiming completion.".into(),
+    );
+  }
+  retain_recent(&mut next_actions, 8);
+  capsule.next_actions = next_actions;
+  capsule
+}
+
+fn bounded_text(value: &str, max_chars: usize) -> String {
+  value.chars().take(max_chars).collect()
+}
+
+fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
+  if !items.contains(&item) {
+    items.push(item);
+  }
+}
+
+fn upsert_artifact(artifacts: &mut Vec<CapsuleArtifact>, path: &str, note: String) {
+  if let Some(artifact) = artifacts.iter_mut().find(|artifact| artifact.path == path) {
+    artifact.note = note;
+  } else {
+    artifacts.push(CapsuleArtifact {
+      path: path.into(),
+      note,
+    });
+  }
+}
+
+fn retain_recent<T>(items: &mut Vec<T>, limit: usize) -> bool {
+  if items.len() <= limit {
+    return false;
+  }
+  items.drain(..items.len() - limit);
+  true
+}
+
+fn contains_instruction_marker(line: &str) -> bool {
+  let line = line.to_ascii_lowercase();
+  [
+    "must ", "should ", "do not ", "don't ", "never ", "avoid ", "require ",
+  ]
+  .iter()
+  .any(|marker| line.contains(marker))
+}
+
+fn coding_command(call: &ToolCallBlock) -> Option<String> {
+  call
+    .arguments
+    .get("command")
+    .or_else(|| call.arguments.get("cmd"))
+    .and_then(serde_json::Value::as_str)
+    .map(str::to_string)
+    .or_else(|| {
+      call
+        .arguments
+        .get("argv")
+        .and_then(serde_json::Value::as_array)
+        .map(|argv| {
+          argv
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" ")
+        })
+        .filter(|argv| !argv.is_empty())
+    })
+}
+
+fn is_verification_command(command: &str) -> bool {
+  let command = command.to_ascii_lowercase();
+  [
+    "test", "check", "clippy", "fmt", "pytest", "unittest", "vitest", "jest",
+  ]
+  .iter()
+  .any(|marker| command.split_whitespace().any(|part| part.contains(marker)))
+}
+
+/// Synthesize a structured factual summary of older conversation messages.
+pub fn structured_summary(messages: &[Message]) -> String {
+  format_coding_summary(messages, None, "")
+}
+
+fn format_coding_summary(
+  messages: &[Message],
+  system: Option<&str>,
+  current_state: &str,
+) -> String {
+  format!(
+    "Summary of earlier conversation:\n{}",
+    coding_capsule(messages, system, current_state).format_for_model()
+  )
 }
 
 #[cfg(test)]
@@ -3934,6 +4309,238 @@ mod tests {
     })]
   }
 
+  fn tool_message_result(
+    id: rupi_core::ToolCallId,
+    state: ToolExecutionState,
+    text: &str,
+  ) -> Message {
+    Message::new(
+      Role::Tool,
+      vec![ContentBlock::ToolResult(ToolResultBlock {
+        id,
+        name: "test_tool".into(),
+        state,
+        text: text.into(),
+        is_error: state == ToolExecutionState::Failed,
+        reduced: false,
+      })],
+    )
+  }
+
+  #[test]
+  fn coding_summary_preserves_objective_artifacts_and_verification_outcomes() {
+    let edit_id = rupi_core::ToolCallId::new();
+    let passed_id = rupi_core::ToolCallId::new();
+    let failed_id = rupi_core::ToolCallId::new();
+    let messages = vec![
+      Message::user("Build the parser.\nMust retain the existing input format."),
+      Message::new(
+        Role::Assistant,
+        vec![ContentBlock::ToolCall(ToolCallBlock {
+          id: edit_id.clone(),
+          name: "edit".into(),
+          arguments: serde_json::json!({"path":"src/parser.rs"}),
+        })],
+      ),
+      tool_message_result(edit_id, ToolExecutionState::Succeeded, "updated file"),
+      Message::new(
+        Role::Assistant,
+        vec![ContentBlock::ToolCall(ToolCallBlock {
+          id: passed_id.clone(),
+          name: "exec".into(),
+          arguments: serde_json::json!({"command":"cargo test -p parser"}),
+        })],
+      ),
+      tool_message_result(passed_id, ToolExecutionState::Succeeded, "test result: ok"),
+      Message::new(
+        Role::Assistant,
+        vec![ContentBlock::ToolCall(ToolCallBlock {
+          id: failed_id.clone(),
+          name: "exec".into(),
+          arguments: serde_json::json!({"command":"cargo clippy -p parser"}),
+        })],
+      ),
+      tool_message_result(
+        failed_id,
+        ToolExecutionState::Failed,
+        "warning denied by lint",
+      ),
+    ];
+
+    let summary = structured_summary(&messages);
+    assert!(
+      summary.contains("objective: Build the parser."),
+      "{summary}"
+    );
+    assert!(
+      summary.contains("User instruction: Must retain the existing input format."),
+      "{summary}"
+    );
+    assert!(
+      summary.contains("src/parser.rs: modified by `edit`"),
+      "{summary}"
+    );
+    assert!(
+      summary.contains("Verification passed: `cargo test -p parser`"),
+      "{summary}"
+    );
+    assert!(
+      summary.contains("Verification failed: `cargo clippy -p parser`"),
+      "{summary}"
+    );
+  }
+
+  #[test]
+  fn coding_summary_carries_progress_forward_from_an_earlier_capsule() {
+    let mut prior = ContextCapsule::new("Build the parser");
+    prior
+      .completed_work
+      .push("lexer implementation completed".into());
+    prior.artifacts.push(CapsuleArtifact {
+      path: r"C:\repo\src\lexer.rs".into(),
+      note: "modified by `edit`".into(),
+    });
+    prior
+      .unresolved
+      .push("integration tests have not run".into());
+    prior.next_actions.push("run integration tests".into());
+    let messages = vec![Message::user(prior.format_for_model())];
+
+    let summary = structured_summary(&messages);
+    assert!(summary.contains("objective: Build the parser"), "{summary}");
+    assert!(
+      summary.contains("lexer implementation completed"),
+      "{summary}"
+    );
+    assert!(summary.contains(r"C:\repo\src\lexer.rs"), "{summary}");
+    assert!(
+      summary.contains("integration tests have not run"),
+      "{summary}"
+    );
+    assert!(summary.contains("run integration tests"), "{summary}");
+  }
+
+  #[test]
+  fn completed_cycle_boundary_requires_all_known_terminal_results() {
+    let first = rupi_core::ToolCallId::new();
+    let second = rupi_core::ToolCallId::new();
+    let calls = Message::new(
+      Role::Assistant,
+      vec![
+        ContentBlock::ToolCall(ToolCallBlock {
+          id: first.clone(),
+          name: "read".into(),
+          arguments: serde_json::json!({}),
+        }),
+        ContentBlock::ToolCall(ToolCallBlock {
+          id: second.clone(),
+          name: "read".into(),
+          arguments: serde_json::json!({}),
+        }),
+      ],
+    );
+    let messages = vec![
+      calls,
+      tool_message_result(first, ToolExecutionState::Succeeded, "first"),
+      tool_message_result(second.clone(), ToolExecutionState::Succeeded, "second"),
+    ];
+    assert!(!safe_completed_cycle_boundary(&messages, 0, 2));
+    assert!(safe_completed_cycle_boundary(&messages, 0, 3));
+
+    let uncertain = vec![
+      messages[0].clone(),
+      tool_message_result(second, ToolExecutionState::Unknown, "uncertain"),
+    ];
+    assert!(!safe_completed_cycle_boundary(&uncertain, 0, 2));
+  }
+
+  #[test]
+  fn completed_cycles_compact_inside_one_user_turn_and_keep_whole_recent_pairs() {
+    let mut messages = vec![Message::user(
+      "Implement the parser and preserve its format.",
+    )];
+    for index in 0..24 {
+      let id = rupi_core::ToolCallId::new();
+      messages.push(Message::new(
+        Role::Assistant,
+        vec![ContentBlock::ToolCall(ToolCallBlock {
+          id: id.clone(),
+          name: "edit".into(),
+          arguments: serde_json::json!({"path":format!("src/module_{index}.rs")}),
+        })],
+      ));
+      messages.push(tool_message_result(
+        id,
+        ToolExecutionState::Succeeded,
+        &"file update observed ".repeat(40),
+      ));
+    }
+    let original_len = messages.len();
+    let provider = Scripted::new("cycle-compaction", vec![text("unused")]);
+    let tools = registry_with(Vec::new());
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(messages);
+    let turn_id = TurnId::new();
+    let mut turn_history_start = 1;
+
+    let replaced = runtime
+      .compact_completed_turn_cycles(
+        &turn_id,
+        &mut turn_history_start,
+        3_000,
+        "test pressure".into(),
+      )
+      .expect("completed cycles compact");
+
+    assert!(replaced > 0);
+    assert!(runtime.messages().len() < original_len);
+    let summary = runtime
+      .messages()
+      .iter()
+      .find(|message| message.text().contains("[Session Checkpoint Capsule]"))
+      .expect("structured summary remains visible")
+      .text();
+    assert!(
+      summary.contains("objective: Implement the parser"),
+      "{summary}"
+    );
+    assert!(summary.contains("src/module_0.rs"), "{summary}");
+    let call_ids: BTreeSet<_> = runtime
+      .messages()
+      .iter()
+      .filter(|message| message.role == Role::Assistant)
+      .flat_map(Message::tool_calls)
+      .map(|call| call.id.to_string())
+      .collect();
+    let result_ids: BTreeSet<_> = runtime
+      .messages()
+      .iter()
+      .filter(|message| message.role == Role::Tool)
+      .flat_map(|message| &message.content)
+      .filter_map(|block| match block {
+        ContentBlock::ToolResult(result) => Some(result.id.to_string()),
+        _ => None,
+      })
+      .collect();
+    assert_eq!(
+      call_ids, result_ids,
+      "retained tool calls and results stay paired"
+    );
+    assert_eq!(trace.count("context_compaction_epoch"), 1);
+  }
+
   /// A tool that records what it was asked to do.
   #[derive(Clone)]
   struct Spy(Arc<Mutex<Vec<serde_json::Value>>>);
@@ -4023,6 +4630,63 @@ mod tests {
       registry.register(tool);
     }
     registry
+  }
+
+  struct AlwaysReduce;
+
+  impl ContextPolicy for AlwaysReduce {
+    fn evaluate(&self, state: &ContextState) -> rupi_core::ContextDecision {
+      rupi_core::ContextDecision {
+        action: ContextAction::ReducePayload {
+          reason: ReductionReason::RecentTargetExceeded { target_tokens: 1 },
+        },
+        tokens: state.effective_tokens(),
+        level: Some(ContextLevel::L0Payload),
+      }
+    }
+
+    fn name(&self) -> &'static str {
+      "test_reduce"
+    }
+  }
+
+  #[test]
+  fn reduce_payload_compacts_completed_work_before_the_next_model_request() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![Box::new(Spy(Arc::clone(&seen)))]);
+    let provider = Scripted::new(
+      "reduce-completed-cycle",
+      vec![
+        tool_call("spy", serde_json::json!({"path":"src/parser.rs"})),
+        text("continue from the recorded result"),
+      ],
+    );
+    let mut trace = Recorder::default();
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &AlwaysReduce,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn("Build the parser", &CancelToken::new(), &mut SilentProgress)
+    .expect("turn completes after reducing the first cycle");
+
+    assert_eq!(report.status, TurnStatus::Completed);
+    assert_eq!(provider.requests().len(), 2);
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    let next_request = &provider.requests()[1];
+    let summary = next_request
+      .messages
+      .iter()
+      .find(|message| message.text().contains("[Session Checkpoint Capsule]"))
+      .expect("the next request carries a coding capsule")
+      .text();
+    assert!(summary.contains("objective: Build the parser"), "{summary}");
+    assert!(summary.contains("src/parser.rs"), "{summary}");
+    assert!(summary.contains("Tool `spy` completed"), "{summary}");
+    assert_eq!(trace.count("context_compaction_epoch"), 1);
   }
 
   struct FailingMessageSink {
