@@ -2826,6 +2826,7 @@ impl<'a> TurnLoop<'a> {
     let capabilities = self.provider().capabilities();
     let state = {
       let mut state = ContextState::zero(capabilities.context_window);
+      state.model = Some(self.active_model());
       state.context_epoch = self.context_epoch;
       state.measured_tokens = self.measured_input_tokens;
       state.estimated_tokens = estimate_messages(&self.messages);

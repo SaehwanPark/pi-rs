@@ -45,6 +45,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::capability::ModelRef;
+
 /// The four reduction levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -102,6 +104,9 @@ pub enum ReductionReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextState {
   pub window: u64,
+  /// Active model whose capabilities and working set this state describes.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub model: Option<ModelRef>,
   pub estimated_tokens: u64,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub measured_tokens: Option<u64>,
@@ -129,6 +134,7 @@ impl ContextState {
   pub fn zero(window: u64) -> Self {
     Self {
       window,
+      model: None,
       estimated_tokens: 0,
       measured_tokens: None,
       recent_tokens: 0,
@@ -323,6 +329,7 @@ impl ContextThresholds {
 pub struct ProfilePolicy {
   pub profile: ContextProfile,
   pub thresholds: ContextThresholds,
+  reference_window: u64,
 }
 
 impl ProfilePolicy {
@@ -330,6 +337,7 @@ impl ProfilePolicy {
     Self {
       profile,
       thresholds: ContextThresholds::for_profile(profile, window),
+      reference_window: window,
     }
   }
 }
@@ -346,7 +354,11 @@ impl ContextPolicy for ProfilePolicy {
   /// worst outcome for predictability.
   fn evaluate(&self, state: &ContextState) -> ContextDecision {
     let tokens = state.effective_tokens();
-    let thresholds = ContextThresholds::for_profile(self.profile, state.window);
+    let thresholds = if state.window == self.reference_window {
+      self.thresholds
+    } else {
+      ContextThresholds::for_profile(self.profile, state.window)
+    };
 
     if state.overflow_observed {
       if tokens > thresholds.compact_tokens && state.at_safe_boundary {

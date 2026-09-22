@@ -104,6 +104,7 @@ fn main() -> ExitCode {
       AdaptiveContextPolicy::new(ContextProfile::Balanced, 128_000, true).with_detector(&detector);
     let state = ContextState {
       window: 128_000,
+      model: None,
       estimated_tokens: 35_000,
       measured_tokens: Some(35_000),
       recent_tokens: 8_000,
