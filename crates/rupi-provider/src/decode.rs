@@ -142,10 +142,18 @@ impl Decoder {
         .and_then(|details| {
           details
             .get("cached_tokens")
-            .or_else(|| details.get("cache_read_tokens"))
+            .and_then(Value::as_u64)
+            .or_else(|| details.get("cache_read_tokens").and_then(Value::as_u64))
         })
-        .or_else(|| usage.get("cache_read_tokens"))
-        .and_then(Value::as_u64)
+        .or_else(|| {
+          [
+            "prompt_cache_hit_tokens",
+            "cached_tokens",
+            "cache_read_tokens",
+          ]
+          .iter()
+          .find_map(|field| usage.get(*field).and_then(Value::as_u64))
+        })
         .or(self.cache_read_tokens);
       self.cache_write_tokens = details
         .and_then(|details| details.get("cache_write_tokens"))
@@ -1012,6 +1020,43 @@ mod tests {
     assert_eq!(usage.uncached_input_tokens, Some(20));
     assert_eq!(usage.input_tokens, Some(100));
     assert_eq!(usage.provider_total_tokens, Some(108));
+  }
+
+  #[test]
+  fn openai_compatible_top_level_cache_aliases_are_normalized() {
+    for (cache_fields, expected_cached, expected_uncached) in [
+      (json!({"prompt_cache_hit_tokens": 37}), 37, 63),
+      (json!({"cached_tokens": 29}), 29, 71),
+      (
+        json!({
+          "prompt_tokens_details": {"cached_tokens": 70},
+          "prompt_cache_hit_tokens": 40,
+          "cached_tokens": 30
+        }),
+        70,
+        30,
+      ),
+    ] {
+      let mut usage_fields = cache_fields;
+      usage_fields["prompt_tokens"] = json!(100);
+      let mut collector = Collector::default();
+      let mut decoder = Decoder::new(ReasoningExposure::None);
+      decoder
+        .chunk(
+          &json!({
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": usage_fields,
+          }),
+          &mut collector,
+        )
+        .unwrap();
+      let usage = decoder
+        .finish(StreamEnd::DoneSentinel, &mut collector)
+        .unwrap();
+      assert_eq!(usage.cache_read_tokens, Some(expected_cached));
+      assert_eq!(usage.uncached_input_tokens, Some(expected_uncached));
+      assert_eq!(usage.logical_prompt_tokens, Some(100));
+    }
   }
 
   #[test]
