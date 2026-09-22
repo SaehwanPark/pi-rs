@@ -54,7 +54,7 @@
 
 use std::ops::Range;
 use std::{
-  io::{self, Write},
+  io::{self, IsTerminal, Write},
   panic,
   sync::Arc,
 };
@@ -1110,25 +1110,33 @@ pub fn execute(args: InteractiveArgs) -> Result<(), String> {
   // The surface is not configurable here. Colour and width come from the terminal
   // the transcript is written to, which this command already requires.
   let surface = SurfaceArgs::default();
-  run::open_session(&args.config, &args.cwd, &surface, None, |session| {
-    // Raw mode is entered only once the session is open, so a bad config stays what
-    // it was: a line printed on a terminal nothing has rearranged. From here on the
-    // guard is what restores it, including when `run` returns an error.
-    let _terminal = RawTerminal::enter().map_err(terminal_failure)?;
-    let columns = term::Stream::Stdout.width().unwrap_or(FALLBACK_COLUMNS);
-    // Pi loads prompt templates before the editor opens, and so this does: the scan
-    // is two small directories. Project locations need trust, and this command has
-    // no trust decision to consult, so — like `rupi prompts` without --project —
-    // they are not read.
-    let templates = prompt::discover(&rupi_compat::scan::Discovery::new(args.cwd.clone()));
-    let result = Loop::new(session.model().to_string(), columns)
-      .with_templates(templates)
-      .run(session);
-    match result {
-      Ok(()) => session.close().map_err(run::session_error),
-      Err(error) => Err(error),
-    }
-  })
+  let approval_available = io::stdin().is_terminal();
+  run::open_session_with_approval(
+    &args.config,
+    &args.cwd,
+    &surface,
+    None,
+    approval_available,
+    |session| {
+      // Raw mode is entered only once the session is open, so a bad config stays what
+      // it was: a line printed on a terminal nothing has rearranged. From here on the
+      // guard is what restores it, including when `run` returns an error.
+      let _terminal = RawTerminal::enter().map_err(terminal_failure)?;
+      let columns = term::Stream::Stdout.width().unwrap_or(FALLBACK_COLUMNS);
+      // Pi loads prompt templates before the editor opens, and so this does: the scan
+      // is two small directories. Project locations need trust, and this command has
+      // no trust decision to consult, so — like `rupi prompts` without --project —
+      // they are not read.
+      let templates = prompt::discover(&rupi_compat::scan::Discovery::new(args.cwd.clone()));
+      let result = Loop::new(session.model().to_string(), columns)
+        .with_templates(templates)
+        .run(session);
+      match result {
+        Ok(()) => session.close().map_err(run::session_error),
+        Err(error) => Err(error),
+      }
+    },
+  )
 }
 
 /// An I/O failure against the terminal, in the words this command reports.

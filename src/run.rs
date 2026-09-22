@@ -1,6 +1,6 @@
 use std::{
   fs,
-  io::{self, Stderr, Stdout, Write},
+  io::{self, IsTerminal, Stderr, Stdout, Write},
   path::Path,
 };
 
@@ -12,7 +12,7 @@ use rupi_core::{
 use rupi_provider::{Deferred, OpenAiCompat, ProviderConfig};
 use rupi_runtime::{ResumeState, StoreTrace, Trace, TurnError, TurnLoop, TurnProgress, TurnReport};
 use rupi_store::{Store, WritePolicy};
-use rupi_tools::{Executed, ToolRegistry, Workspace};
+use rupi_tools::{Approval, Executed, ToolRegistry, Workspace};
 use rupi_tui::{Palette, Surface, TranscriptOptions, is_streamed, render_event, term};
 
 use crate::cli::SurfaceArgs;
@@ -38,7 +38,18 @@ pub fn execute(args: RunArgs) -> Result<(), String> {
         }
       } else {
         match session.turn(&args.prompt) {
-          Ok(()) => session.close().map_err(session_error),
+          Ok(report) => match report.status {
+            TurnStatus::Completed => session.close().map_err(session_error),
+            TurnStatus::BudgetExhausted => session
+              .close_interrupted("model request budget exhausted")
+              .map_err(session_error),
+            TurnStatus::Cancelled => session
+              .close_interrupted("turn cancelled")
+              .map_err(session_error),
+            TurnStatus::Failed { kind } => session
+              .close_interrupted(format!("turn failed ({kind})"))
+              .map_err(session_error),
+          },
           Err(error) => Err(turn_error(&session.close_after_failure(error))),
         }
       }
@@ -61,9 +72,20 @@ pub(crate) fn open_session(
   config: &Path,
   cwd: &Path,
   surface: &SurfaceArgs,
+  resume: Option<&str>,
+  turns: impl FnOnce(&mut SessionHandle<'_>) -> Result<(), String>,
+) -> Result<(), String> {
+  open_session_with_approval(config, cwd, surface, resume, false, turns)
+}
+
+pub(crate) fn open_session_with_approval(
+  config: &Path,
+  cwd: &Path,
+  surface: &SurfaceArgs,
   // A session to continue rather than begin, as written by the caller; `None` opens
   // a new session. Resolution against the store happens here, not in parsing.
   resume: Option<&str>,
+  interactive_approval: bool,
   turns: impl FnOnce(&mut SessionHandle<'_>) -> Result<(), String>,
 ) -> Result<(), String> {
   let config_text = fs::read_to_string(config)
@@ -215,15 +237,12 @@ pub(crate) fn open_session(
 
   let options = surface_options(surface);
   let mut trace = ReportingTrace::new(StoreTrace::new(session), options);
-  let progress = CliProgress::new(&tools, options);
+  let progress = CliProgress::new(&tools, options, interactive_approval);
   let mut system_prompt = format!(
     "You are Rupi, a coding assistant working in the supplied workspace.\n\
      Working directory: {canonical_cwd}.\n\
      Inspect relevant files and project instructions before editing. Make the requested\
      changes instead of stopping at a plan when implementation is requested.\n\
-     Use `read` and `grep` to inspect files; use `edit`, `write`, and `append` to change\
-     them. Prefer `process` with an explicit program and argument list when a shell is not\
-     needed; use `exec` only when shell syntax is required.\n\
      After changes, run the most relevant available checks. Investigate failures and\
      continue fixing them while the request budget remains. Report what changed and which\
      checks actually ran; never claim an unrun check passed."
@@ -241,6 +260,7 @@ pub(crate) fn open_session(
     TraceId::new(),
   )
   .with_working_dir(canonical_cwd)
+  .with_interactive_tool_approval(interactive_approval)
   .with_thinking(config.thinking)
   .with_max_requests(config.limits.max_model_requests_per_turn as usize)
   .with_progress_boundary(
@@ -311,11 +331,10 @@ impl SessionHandle<'_> {
 
   /// Run one user turn that nothing outside this call can cancel.
   ///
-  /// A flushed request-budget boundary is a successful resumable outcome. Use
-  /// [`Self::turn_with`] when the caller needs the structured report directly.
-  pub fn turn(&mut self, prompt: &str) -> Result<(), TurnError> {
-    self.turn_with(prompt, &CancelToken::new())?;
-    Ok(())
+  /// A request-budget boundary is a successful resumable outcome, reported through
+  /// [`TurnReport::status`] so one-shot callers can close it as interrupted work.
+  pub fn turn(&mut self, prompt: &str) -> Result<TurnReport, TurnError> {
+    self.turn_with(prompt, &CancelToken::new())
   }
 
   /// Run one bounded no-tool finalization assessment for a resumed partial session.
@@ -486,10 +505,21 @@ impl SessionHandle<'_> {
   /// write failure is reported only once the session is durably closed, and a sink
   /// failure outranks it, because a lost line is not worth losing the record.
   pub fn close(&mut self) -> Result<(), SessionError> {
+    self.close_with_reason(SessionEndReason::UserExit)
+  }
+
+  /// Flush the transcript and close an incomplete but durably recorded session.
+  pub fn close_interrupted(&mut self, message: impl Into<String>) -> Result<(), SessionError> {
+    self.close_with_reason(SessionEndReason::Interrupted {
+      message: message.into(),
+    })
+  }
+
+  fn close_with_reason(&mut self, reason: SessionEndReason) -> Result<(), SessionError> {
     self.transcript_error = self.progress.finish().err();
     self
       .runtime
-      .end_session(SessionEndReason::UserExit)
+      .end_session(reason)
       .map_err(SessionError::Turn)?;
     match self.transcript_error.take() {
       Some(error) => Err(SessionError::Transcript(error)),
@@ -707,14 +737,16 @@ fn turn_error(error: &TurnError) -> String {
 struct CliProgress<'a> {
   surface: Surface<Stdout, Stderr>,
   tools: &'a ToolRegistry,
+  interactive_approval: bool,
   io_error: Option<io::Error>,
 }
 
 impl<'a> CliProgress<'a> {
-  fn new(tools: &'a ToolRegistry, options: TranscriptOptions) -> Self {
+  fn new(tools: &'a ToolRegistry, options: TranscriptOptions, interactive_approval: bool) -> Self {
     Self {
       surface: Surface::new(io::stdout(), io::stderr(), options),
       tools,
+      interactive_approval,
       io_error: None,
     }
   }
@@ -772,6 +804,52 @@ impl TurnProgress for CliProgress<'_> {
     );
   }
 
+  fn approve_mutating_tool(
+    &mut self,
+    metadata: &rupi_core::ToolMetadata,
+    arguments: &serde_json::Value,
+  ) -> Approval {
+    if !self.interactive_approval || !io::stdin().is_terminal() {
+      return Approval::Deny(
+        "interactive terminal approval is unavailable; nothing was changed".into(),
+      );
+    }
+
+    let rendered = serde_json::to_string_pretty(arguments)
+      .unwrap_or_else(|_| "[arguments could not be rendered]".into());
+    let rendered = escape_terminal_controls(&rendered, true);
+    let mut preview: String = rendered.chars().take(4_000).collect();
+    if rendered.chars().count() > 4_000 {
+      preview.push_str("\n… [preview truncated]");
+    }
+    let name = escape_terminal_controls(&metadata.name, false);
+    let description = escape_terminal_controls(&metadata.description, false);
+    let answer = (|| -> io::Result<String> {
+      let mut stderr = io::stderr().lock();
+      writeln!(
+        stderr,
+        "\n[approval] Mutating tool: {} — {}",
+        name, description
+      )?;
+      writeln!(stderr, "Arguments:\n{preview}")?;
+      write!(stderr, "Allow this action? [y/N] ")?;
+      stderr.flush()?;
+      let mut answer = String::new();
+      io::stdin().read_line(&mut answer)?;
+      Ok(answer)
+    })();
+    match answer {
+      Ok(answer) if answer.trim().eq_ignore_ascii_case("y") => Approval::Allow,
+      Ok(_) => Approval::Deny("the user declined this mutation; nothing was changed".into()),
+      Err(error) => {
+        if self.io_error.is_none() {
+          self.io_error = Some(error);
+        }
+        Approval::Deny("approval input failed; nothing was changed".into())
+      }
+    }
+  }
+
   fn on_tool_progress(&mut self, call: &rupi_core::ToolCallBlock, text: &str) {
     save(
       &mut self.io_error,
@@ -803,6 +881,29 @@ fn save(slot: &mut Option<io::Error>, result: io::Result<()>) {
   {
     *slot = Some(error);
   }
+}
+
+/// Escape control characters in untrusted text before writing an approval prompt.
+///
+/// Pretty-printed JSON may keep its own line layout; tool metadata is always a
+/// single-line field. C0 and C1 controls are escaped so an MCP description cannot
+/// inject terminal commands or forge additional prompt lines.
+fn escape_terminal_controls(value: &str, preserve_layout: bool) -> String {
+  let mut escaped = String::with_capacity(value.len());
+  for character in value.chars() {
+    match character {
+      '\n' if preserve_layout => escaped.push('\n'),
+      '\t' if preserve_layout => escaped.push('\t'),
+      '\n' => escaped.push_str("\\n"),
+      '\r' => escaped.push_str("\\r"),
+      '\t' => escaped.push_str("\\t"),
+      control if control.is_control() => {
+        escaped.push_str(&format!("\\u{{{:x}}}", control as u32));
+      }
+      printable => escaped.push(printable),
+    }
+  }
+  escaped
 }
 
 /// The durable sink, plus transcript rendering of the events a live turn does not

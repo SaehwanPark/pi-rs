@@ -275,8 +275,18 @@ pub enum ProviderEvent {
   },
   TextDelta(String),
   /// A complete, decoded tool call. Partial tool-call fragments stay inside
-  /// the adapter; a malformed tool call is a protocol failure, not a call.
+  /// the adapter.
   ToolCall(ToolCallBlock),
+  /// A complete model-authored tool call that cannot safely be dispatched.
+  ///
+  /// Adapters use this for malformed arguments or ambiguous fragment
+  /// correlation. The runtime records a failed tool result so the model can
+  /// correct its invocation; it must never execute this call.
+  ToolCallRejected {
+    id: crate::ToolCallId,
+    name: String,
+    reason: String,
+  },
 }
 
 /// Sink for provider output while a request streams.

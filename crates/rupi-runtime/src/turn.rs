@@ -35,10 +35,10 @@ use rupi_core::{
   ModelRequest, ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta,
   ReasoningProvenance, ReductionReason, Role, SessionEndReason, SessionEnded, SessionId,
   SessionStarted, SinkError, ThinkingLevel, ToolCallBlock, ToolCompleted, ToolExecutionState,
-  ToolFailed, ToolProgress, ToolRequested, ToolResultBlock, ToolStarted, ToolUnknown, TraceId,
-  TurnCompleted, TurnId, TurnStatus, UserMessage,
+  ToolFailed, ToolOutcome, ToolProgress, ToolRequested, ToolResultBlock, ToolStarted, ToolUnknown,
+  TraceId, TurnCompleted, TurnId, TurnStatus, UserMessage,
 };
-use rupi_tools::{Executed, ToolRegistry};
+use rupi_tools::{Approval, ApprovalGate, Executed, ToolRegistry};
 
 use crate::failover::{FailoverPolicy, Recovery};
 
@@ -115,6 +115,17 @@ pub trait TurnProgress: Send {
   fn on_reasoning(&mut self, _text: &str, _provenance: ReasoningProvenance) {}
   fn on_text_delta(&mut self, _text: &str) {}
   fn on_tool_requested(&mut self, _call: &ToolCallBlock) {}
+  /// Answer a mutating-tool approval request on a surface that can ask a person.
+  ///
+  /// The safe default refuses. Interactive approvals must be explicitly enabled
+  /// on the turn loop and implemented by the attached surface.
+  fn approve_mutating_tool(
+    &mut self,
+    _metadata: &rupi_core::ToolMetadata,
+    _arguments: &serde_json::Value,
+  ) -> Approval {
+    Approval::Deny("this surface cannot approve mutating tools; nothing was changed".into())
+  }
   fn on_tool_progress(&mut self, _call: &ToolCallBlock, _text: &str) {}
   fn on_tool_finished(&mut self, _call: &ToolCallBlock, _executed: &Executed) {}
 }
@@ -379,9 +390,16 @@ struct Response {
   epoch: u32,
   text: Option<String>,
   calls: Vec<ToolCallBlock>,
+  rejected_calls: BTreeMap<String, String>,
   /// The completion is held until the exact assistant message is assembled, so
   /// the canonical completion and its projection share one transaction.
   completion: EventEnvelope,
+}
+
+struct RecordedResponse {
+  assistant_event_id: rupi_core::EventId,
+  calls: Vec<ToolCallBlock>,
+  rejected_calls: BTreeMap<String, String>,
 }
 
 /// Drives turns against one primary model, with an optional backup.
@@ -424,6 +442,7 @@ pub struct TurnLoop<'a> {
   /// remains tool-capable, while the bounded recovery assessment can never
   /// repeat a mutating side effect.
   tools_enabled: bool,
+  interactive_tool_approval: bool,
   session_started: bool,
   /// Whether the first lifecycle event belongs to a continuation of an existing
   /// durable journal rather than a newly created session.
@@ -501,6 +520,7 @@ impl<'a> TurnLoop<'a> {
       progress_boundary_used: false,
       requests: AtomicUsize::new(0),
       tools_enabled: true,
+      interactive_tool_approval: false,
       session_started: false,
       resumed: false,
       interrupted_tools: Vec::new(),
@@ -577,6 +597,15 @@ impl<'a> TurnLoop<'a> {
   /// Set the system prompt.
   pub fn with_system(mut self, system: impl Into<String>) -> Self {
     self.system = Some(system.into());
+    self
+  }
+
+  /// Allow the progress surface to answer per-call mutation approval prompts.
+  ///
+  /// Disabled by default. The tool registry still controls configured automatic
+  /// approval and allow/deny policy.
+  pub fn with_interactive_tool_approval(mut self, enabled: bool) -> Self {
+    self.interactive_tool_approval = enabled;
     self
   }
 
@@ -1138,7 +1167,11 @@ impl<'a> TurnLoop<'a> {
         }
         Err(TurnFailure::Sink(error)) => return Err(TurnError::from(error)),
       };
-      let (assistant_event_id, calls) = self.record_response(response, &mut report)?;
+      let RecordedResponse {
+        assistant_event_id,
+        calls,
+        rejected_calls,
+      } = self.record_response(response, &mut report)?;
 
       if calls.is_empty() {
         // The model answered instead of asking: the turn is over.
@@ -1177,6 +1210,7 @@ impl<'a> TurnLoop<'a> {
         turn_id.clone(),
         assistant_event_id,
         &calls,
+        &rejected_calls,
         cancel,
         progress,
       )?;
@@ -1209,7 +1243,11 @@ impl<'a> TurnLoop<'a> {
         }
         Err(TurnFailure::Sink(error)) => return Err(TurnError::from(error)),
       };
-      let (assistant_event_id, calls) = self.record_response(response, &mut report)?;
+      let RecordedResponse {
+        assistant_event_id,
+        calls,
+        ..
+      } = self.record_response(response, &mut report)?;
       report.budget_exhausted = true;
       if calls.is_empty() {
         self.diagnostic(
@@ -1720,6 +1758,7 @@ impl<'a> TurnLoop<'a> {
       let Collector {
         text,
         calls,
+        rejected_calls,
         committed,
         reasoning_provenance: provenance,
         sink_error,
@@ -1789,6 +1828,7 @@ impl<'a> TurnLoop<'a> {
                 epoch,
                 text: (!text.is_empty()).then_some(text),
                 calls,
+                rejected_calls,
                 completion,
               });
             }
@@ -2696,12 +2736,21 @@ impl<'a> TurnLoop<'a> {
   /// context policy. Emergency overflow recovery uses this same constructor.
   fn assemble_request(&self, messages: Vec<Message>) -> ModelRequest {
     let capabilities = self.provider().capabilities();
+    let may_approve_mutations =
+      self.interactive_tool_approval || self.tools.auto_approves_mutating();
     let tools = if self.tools_enabled && capabilities.tools {
       self
         .tools
         .specs()
         .into_iter()
-        .filter(|spec| self.progress_tool_is_exposed(&spec.name))
+        .filter(|spec| {
+          self.progress_tool_is_exposed(&spec.name)
+            && (may_approve_mutations
+              || self
+                .tools
+                .metadata_for(&spec.name)
+                .is_some_and(|metadata| metadata.read_only))
+        })
         .collect()
     } else {
       Vec::new()
@@ -2709,9 +2758,12 @@ impl<'a> TurnLoop<'a> {
     let mut request = ModelRequest::new(self.active_model(), capabilities, messages)
       .with_tools(tools)
       .with_thinking(self.thinking);
-    if let Some(system) = self.system.clone() {
-      request = request.with_system(system);
+    let mut system = self.system.clone().unwrap_or_default();
+    if !system.is_empty() {
+      system.push_str("\n\n");
     }
+    system.push_str(&tool_availability_prompt(&request.tools));
+    request = request.with_system(system);
     request
   }
 
@@ -2824,11 +2876,14 @@ impl<'a> TurnLoop<'a> {
     turn_history_start: &mut usize,
   ) -> Result<ModelRequest, TurnError> {
     let capabilities = self.provider().capabilities();
+    let estimated_request = self.assemble_request(self.messages.clone());
+    let estimated_tokens = estimate_tokens(&estimated_request);
     let state = {
       let mut state = ContextState::zero(capabilities.context_window);
+      state.model = Some(self.active_model());
       state.context_epoch = self.context_epoch;
       state.measured_tokens = self.measured_input_tokens;
-      state.estimated_tokens = estimate_messages(&self.messages);
+      state.estimated_tokens = estimated_tokens;
       state.recent_tokens =
         estimate_messages(&self.messages[(*turn_history_start).min(self.messages.len())..]);
       state.working_messages = self.messages.len() as u32;
@@ -2964,11 +3019,12 @@ impl<'a> TurnLoop<'a> {
     &mut self,
     response: Response,
     report: &mut TurnReport,
-  ) -> Result<(rupi_core::EventId, Vec<ToolCallBlock>), TurnError> {
+  ) -> Result<RecordedResponse, TurnError> {
     let Response {
       epoch,
       text,
       calls,
+      rejected_calls,
       mut completion,
     } = response;
     report.epoch = epoch;
@@ -2996,7 +3052,11 @@ impl<'a> TurnLoop<'a> {
       self.trace.emit_without_message(&mut completion)?;
       self.envelopes.push(completion);
     }
-    Ok((assistant_event_id, calls))
+    Ok(RecordedResponse {
+      assistant_event_id,
+      calls,
+      rejected_calls,
+    })
   }
 
   /// Add the runtime-owned instruction that explains why the final request has no tools.
@@ -3062,6 +3122,7 @@ impl<'a> TurnLoop<'a> {
     turn_id: TurnId,
     assistant_event_id: rupi_core::EventId,
     calls: &[ToolCallBlock],
+    rejected_calls: &BTreeMap<String, String>,
     cancel: &CancelToken,
     progress: &mut dyn TurnProgress,
   ) -> Result<bool, TurnError> {
@@ -3112,6 +3173,39 @@ impl<'a> TurnLoop<'a> {
         break;
       }
 
+      if let Some(parse_reason) = rejected_calls.get(call.id.as_str()) {
+        let reason = format!(
+          "The tool call was not run because its model-generated request was invalid: {parse_reason}. Send a corrected tool call with complete JSON object arguments."
+        );
+        let executed = Executed {
+          request: rupi_core::ToolRequest {
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+          },
+          outcome: ToolOutcome::failed(reason.clone()),
+          state: ToolExecutionState::Failed,
+          started: false,
+          refusal: Some(reason),
+          full_output: None,
+          cancelled: false,
+        };
+        let (block, seq) = self.record_tool_outcome(
+          turn_id.clone(),
+          call,
+          &executed,
+          0,
+          read_only,
+          Some(requested.meta.event_id),
+        )?;
+        progress.on_tool_finished(call, &executed);
+        self.push_message(
+          Message::new(Role::Tool, vec![ContentBlock::ToolResult(block)]),
+          seq,
+        );
+        continue;
+      }
+
       let request = rupi_core::ToolRequest {
         call_id: call.id.clone(),
         name: call.name.clone(),
@@ -3124,7 +3218,19 @@ impl<'a> TurnLoop<'a> {
         epoch: self.epoch_index(),
         model: self.active_model(),
       };
+      let approval = match metadata.as_ref().filter(|metadata| !metadata.read_only) {
+        None => Approval::Allow,
+        Some(_) if self.tools.auto_approves_mutating() => Approval::Allow,
+        Some(metadata) if self.interactive_tool_approval => {
+          progress.approve_mutating_tool(metadata, &call.arguments)
+        }
+        Some(_) => Approval::Deny(
+          "approval is required for this mutating tool, but this surface cannot ask; nothing was changed"
+            .into(),
+        ),
+      };
       let executed = {
+        let mut gate = FixedApprovalGate(approval);
         let mut sink = LiveToolSink { progress, call };
         let trace = &mut *self.trace;
         let mut started_event_id = None;
@@ -3149,9 +3255,13 @@ impl<'a> TurnLoop<'a> {
           result
         };
         let clock = Instant::now();
-        let executed = self
-          .tools
-          .execute_observed(&request, &mut sink, cancel, &mut on_started)?;
+        let executed = self.tools.execute_observed_with_gate(
+          &request,
+          &mut sink,
+          cancel,
+          &mut gate,
+          &mut on_started,
+        )?;
         (executed, elapsed_ms(clock), started_event_id)
       };
       let (block, seq) = self.record_tool_outcome(
@@ -3329,6 +3439,7 @@ struct Collector<'a> {
   first_delta_ms: Option<u64>,
   text: String,
   calls: Vec<ToolCallBlock>,
+  rejected_calls: BTreeMap<String, String>,
   committed: bool,
   reasoning_index: u32,
   text_index: u32,
@@ -3353,6 +3464,7 @@ impl<'a> Collector<'a> {
       first_delta_ms: None,
       text: String::new(),
       calls: Vec::new(),
+      rejected_calls: BTreeMap::new(),
       committed: false,
       reasoning_index: 0,
       text_index: 0,
@@ -3421,6 +3533,19 @@ impl rupi_core::ProviderEventSink for Collector<'_> {
         if self.sink_error.is_none() {
           self.committed = true;
           self.calls.push(call.clone());
+        }
+      }
+      rupi_core::ProviderEvent::ToolCallRejected { id, name, reason } => {
+        if self.sink_error.is_none() {
+          self.committed = true;
+          self.calls.push(ToolCallBlock {
+            id: id.clone(),
+            name: name.clone(),
+            arguments: serde_json::json!({}),
+          });
+          self
+            .rejected_calls
+            .insert(id.as_str().to_string(), reason.clone());
         }
       }
     }
@@ -3496,6 +3621,32 @@ fn estimate_tokens(request: &ModelRequest) -> u64 {
   (bytes / 4).max(1) as u64
 }
 
+struct FixedApprovalGate(Approval);
+
+impl ApprovalGate for FixedApprovalGate {
+  fn decide(
+    &mut self,
+    _metadata: &rupi_core::ToolMetadata,
+    _arguments: &serde_json::Value,
+  ) -> Approval {
+    self.0.clone()
+  }
+}
+
+fn tool_availability_prompt(tools: &[rupi_core::ToolSpec]) -> String {
+  if tools.is_empty() {
+    return "No tools are available for this request. Do not claim to inspect or change workspace state.".into();
+  }
+  let names = tools
+    .iter()
+    .map(|tool| tool.name.as_str())
+    .collect::<Vec<_>>()
+    .join(", ");
+  format!(
+    "Tools available for this request: {names}. Use only these tools; the listed schemas define the permitted arguments."
+  )
+}
+
 /// Leave explicit headroom after a provider has proved the advertised window
 /// estimate was optimistic. The same assembled request is measured before this
 /// target is accepted, so system text, tools, and message ordering all count.
@@ -3552,7 +3703,7 @@ fn safe_eviction_boundary(messages: &[Message], start: usize, boundary: usize, e
 ///
 /// Unlike ordinary turn eviction, the retained suffix may begin with an assistant
 /// tool call. The preserved summary user message immediately before it supplies the
-/// protocol anchor; walking backwards proves every call in the last interaction has
+/// protocol anchor; walking backwards proves every call in the candidate prefix has
 /// a matching terminal result before allowing the cut. Unknown results are kept in
 /// the visible window so a later request cannot mistake an uncertain mutation for a
 /// completed cycle.
@@ -3593,14 +3744,11 @@ fn safe_completed_cycle_boundary(messages: &[Message], start: usize, boundary: u
         if calls.iter().any(|call| !results.remove(&call.id)) {
           return false;
         }
-        return results.is_empty();
       }
-      Role::User if saw_tool => return results.is_empty(),
-      Role::System => {}
-      Role::User => {}
+      Role::System | Role::User => {}
     }
   }
-  false
+  results.is_empty()
 }
 
 fn estimate_message_bytes(message: &Message) -> usize {
@@ -4287,7 +4435,9 @@ mod tests {
         for event in events {
           match event {
             ProviderEvent::TextDelta(_) => usage.output_tokens = Some(4),
-            ProviderEvent::ToolCall(_) => usage.finish_reason = Some("tool_calls".into()),
+            ProviderEvent::ToolCall(_) | ProviderEvent::ToolCallRejected { .. } => {
+              usage.finish_reason = Some("tool_calls".into())
+            }
             ProviderEvent::ReasoningDelta { .. } => {}
           }
           sink.emit(event);
@@ -4523,6 +4673,36 @@ mod tests {
   }
 
   #[test]
+  fn completed_cycle_boundary_does_not_cross_an_earlier_unknown_result() {
+    let completed = rupi_core::ToolCallId::new();
+    let uncertain = rupi_core::ToolCallId::new();
+    let later = rupi_core::ToolCallId::new();
+    let call = |id: &rupi_core::ToolCallId| {
+      Message::new(
+        Role::Assistant,
+        vec![ContentBlock::ToolCall(ToolCallBlock {
+          id: id.clone(),
+          name: "read".into(),
+          arguments: serde_json::json!({}),
+        })],
+      )
+    };
+    let messages = vec![
+      call(&completed),
+      tool_message_result(completed, ToolExecutionState::Succeeded, "completed"),
+      call(&uncertain),
+      tool_message_result(uncertain, ToolExecutionState::Unknown, "outcome unknown"),
+      call(&later),
+      tool_message_result(later, ToolExecutionState::Succeeded, "later completed"),
+    ];
+
+    assert!(safe_completed_cycle_boundary(&messages, 0, 2));
+    assert!(!safe_completed_cycle_boundary(&messages, 0, 4));
+    assert!(safe_completed_cycle_boundary(&messages, 4, 6));
+    assert!(!safe_completed_cycle_boundary(&messages, 0, 6));
+  }
+
+  #[test]
   fn completed_cycles_compact_inside_one_user_turn_and_keep_whole_recent_pairs() {
     let mut messages = vec![Message::user(
       "Implement the parser and preserve its format.",
@@ -4700,6 +4880,174 @@ mod tests {
     registry
   }
 
+  fn registry_with_default_deny(tools: Vec<Box<dyn Tool>>) -> ToolRegistry {
+    let mut registry = ToolRegistry::new(Workspace::new(std::env::temp_dir()).expect("temp dir"));
+    for tool in tools {
+      registry.register(tool);
+    }
+    registry
+  }
+
+  struct ApprovalProgress {
+    decision: Approval,
+    prompts: usize,
+  }
+
+  impl TurnProgress for ApprovalProgress {
+    fn approve_mutating_tool(
+      &mut self,
+      _metadata: &rupi_core::ToolMetadata,
+      _arguments: &serde_json::Value,
+    ) -> Approval {
+      self.prompts += 1;
+      self.decision.clone()
+    }
+  }
+
+  #[test]
+  fn model_tools_and_guidance_match_headless_and_interactive_approval() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with_default_deny(vec![
+      Box::new(Spy(Arc::new(Mutex::new(Vec::new())))),
+      Box::new(MutatingSpy {
+        seen,
+        outcome: ToolOutcome::succeeded("ok"),
+      }),
+    ]);
+    let provider = Scripted::new("tool-affordances", Vec::new());
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let mut trace = Recorder::default();
+    let mut headless = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user("inspect the workspace")]);
+    let mut turn_history_start = 0;
+    let headless_request = headless
+      .build_request(&TurnId::new(), &mut turn_history_start)
+      .expect("headless request builds");
+    let headless_names: Vec<_> = headless_request
+      .tools
+      .iter()
+      .map(|spec| spec.name.as_str())
+      .collect();
+    assert_eq!(headless_names, ["spy"]);
+    let headless_system = headless_request.system.as_deref().unwrap();
+    assert!(headless_system.contains("Tools available for this request: spy"));
+    assert!(!headless_system.contains("write_probe"));
+
+    let mut trace = Recorder::default();
+    let mut interactive = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_interactive_tool_approval(true)
+    .with_messages(vec![Message::user("inspect the workspace")]);
+    let mut turn_history_start = 0;
+    let interactive_request = interactive
+      .build_request(&TurnId::new(), &mut turn_history_start)
+      .expect("interactive request builds");
+    let interactive_system = interactive_request.system.as_deref().unwrap();
+    assert!(interactive_system.contains("spy, write_probe"));
+
+    let mut without_tool_support = Scripted::new("no-tools", Vec::new());
+    without_tool_support.capabilities.tools = false;
+    let mut trace = Recorder::default();
+    let mut degraded = TurnLoop::new(
+      &without_tool_support,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_interactive_tool_approval(true);
+    let mut turn_history_start = 0;
+    let degraded_request = degraded
+      .build_request(&TurnId::new(), &mut turn_history_start)
+      .expect("tool-less model request builds");
+    assert!(degraded_request.tools.is_empty());
+    assert!(
+      degraded_request
+        .system
+        .as_deref()
+        .unwrap()
+        .contains("No tools are available for this request.")
+    );
+  }
+
+  #[test]
+  fn default_headless_refuses_mutation_and_interactive_approval_executes_it() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with_default_deny(vec![Box::new(MutatingSpy {
+      seen: Arc::clone(&seen),
+      outcome: ToolOutcome::succeeded("mutated"),
+    })]);
+    let policy = rupi_core::ProfilePolicy::new(rupi_core::ContextProfile::Balanced, 128_000);
+
+    let provider = Scripted::new(
+      "headless-denial",
+      vec![
+        tool_call("write_probe", serde_json::json!({})),
+        text("done"),
+      ],
+    );
+    let mut trace = Recorder::default();
+    TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn(
+      "change the workspace",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .expect("a refused tool call still has a model-visible result");
+    assert!(seen.lock().unwrap().is_empty());
+
+    let provider = Scripted::new(
+      "interactive-approval",
+      vec![
+        tool_call("write_probe", serde_json::json!({})),
+        text("done"),
+      ],
+    );
+    let mut trace = Recorder::default();
+    let mut progress = ApprovalProgress {
+      decision: Approval::Allow,
+      prompts: 0,
+    };
+    TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_interactive_tool_approval(true)
+    .run_turn("change the workspace", &CancelToken::new(), &mut progress)
+    .expect("approved tool call completes");
+    assert_eq!(progress.prompts, 1);
+    assert_eq!(seen.lock().unwrap().len(), 1);
+  }
+
   struct AlwaysReduce;
 
   impl ContextPolicy for AlwaysReduce {
@@ -4716,6 +5064,70 @@ mod tests {
     fn name(&self) -> &'static str {
       "test_reduce"
     }
+  }
+
+  struct CaptureContextState(Arc<Mutex<Option<ContextState>>>);
+
+  impl ContextPolicy for CaptureContextState {
+    fn evaluate(&self, state: &ContextState) -> rupi_core::ContextDecision {
+      *self.0.lock().unwrap() = Some(state.clone());
+      rupi_core::ContextDecision {
+        action: ContextAction::Keep,
+        tokens: state.effective_tokens(),
+        level: None,
+      }
+    }
+
+    fn name(&self) -> &'static str {
+      "capture_context_state"
+    }
+  }
+
+  #[test]
+  fn pre_policy_estimate_includes_system_prompt_and_tool_schemas() {
+    let mut provider = Scripted::new("request-sizing", Vec::new());
+    provider.capabilities.context_window = 16_000;
+    let tools = registry_with(vec![Box::new(SizedTool {
+      description: "description ".repeat(4_000),
+      schema: serde_json::json!({"type":"object","description":"schema ".repeat(4_000)}),
+    })]);
+    let observed = Arc::new(Mutex::new(None));
+    let policy = CaptureContextState(Arc::clone(&observed));
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_system("system ".repeat(4_000))
+    .with_messages(vec![Message::user("short request")]);
+    let mut turn_history_start = 0;
+
+    let request = runtime
+      .build_request(&TurnId::new(), &mut turn_history_start)
+      .expect("request is assembled");
+    let state = observed
+      .lock()
+      .unwrap()
+      .clone()
+      .expect("policy receives context state");
+
+    assert_eq!(state.estimated_tokens, estimate_tokens(&request));
+    assert!(state.estimated_tokens > estimate_messages(&request.messages));
+    assert!(
+      state.estimated_tokens
+        > rupi_core::ContextThresholds::for_profile(
+          rupi_core::ContextProfile::Balanced,
+          provider.capabilities.context_window,
+        )
+        .compact_tokens,
+      "system text and tool schema alone should push this small window past its working threshold"
+    );
+    assert!(!request.tools.is_empty());
+    assert!(request.system.is_some());
   }
 
   #[test]
@@ -5005,7 +5417,9 @@ mod tests {
     // The system prompt reached the provider, and only once.
     let requests = provider.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].system.as_deref(), Some("be brief"));
+    assert!(requests[0].system.as_deref().is_some_and(|system| {
+      system.starts_with("be brief\n\nNo tools are available for this request.")
+    }));
     assert_eq!(
       requests[0].messages.len(),
       1,
@@ -5594,7 +6008,9 @@ mod tests {
       .unwrap();
     let request = &provider.requests()[0];
 
-    assert_eq!(request.system.as_deref(), Some("system instructions"));
+    assert!(request.system.as_deref().is_some_and(|system| {
+      system.starts_with("system instructions\n\nTools available for this request: spy.")
+    }));
     assert_eq!(request.thinking, ThinkingLevel::High);
     assert_eq!(request.tools.len(), 1);
     assert_eq!(request.tools[0].name, "spy");
@@ -5834,6 +6250,60 @@ mod tests {
   }
 
   #[test]
+  fn rejected_tool_calls_are_returned_to_the_model_without_execution() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![Box::new(Spy(Arc::clone(&seen)))]);
+    let call_id = rupi_core::ToolCallId::new();
+    let provider = Scripted::new(
+      "malformed-call",
+      vec![
+        vec![ProviderEvent::ToolCallRejected {
+          id: call_id,
+          name: "spy".into(),
+          reason: "tool arguments are not valid JSON: unexpected end".into(),
+        }],
+        text("I corrected the request."),
+      ],
+    );
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn("inspect", &CancelToken::new(), &mut SilentProgress)
+    .unwrap();
+
+    assert_eq!(report.status, TurnStatus::Completed);
+    assert_eq!(report.requests, 2);
+    assert_eq!(report.text, "I corrected the request.");
+    assert!(seen.lock().unwrap().is_empty(), "the tool must never run");
+    assert_eq!(trace.count("tool_started"), 0);
+    assert_eq!(trace.count("tool_failed"), 1);
+    let requests = provider.requests();
+    let fed = requests[1]
+      .messages
+      .iter()
+      .find(|message| message.role == Role::Tool)
+      .expect("the failed result is returned to the same model");
+    let ContentBlock::ToolResult(result) = &fed.content[0] else {
+      panic!("expected a tool result block");
+    };
+    assert_eq!(result.state, ToolExecutionState::Failed);
+    assert!(result.is_error);
+    assert!(result.text.contains("not run"));
+    assert!(result.text.contains("corrected tool call"));
+  }
+
+  #[test]
   fn progress_boundary_narrows_the_next_request_to_configured_tools() {
     let read_seen = Arc::new(Mutex::new(Vec::new()));
     let write_seen = Arc::new(Mutex::new(Vec::new()));
@@ -5889,10 +6359,24 @@ mod tests {
         .collect::<Vec<_>>(),
       vec!["write_probe"]
     );
+    assert!(
+      requests[1]
+        .system
+        .as_deref()
+        .unwrap()
+        .contains("Tools available for this request: write_probe.")
+    );
     assert_eq!(
       requests[2].tools.len(),
       2,
       "a successful progress tool ends the one-shot boundary"
+    );
+    assert!(
+      requests[2]
+        .system
+        .as_deref()
+        .unwrap()
+        .contains("Tools available for this request: spy, write_probe.")
     );
     assert!(
       requests[1]

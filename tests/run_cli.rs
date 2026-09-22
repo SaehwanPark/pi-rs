@@ -15,7 +15,7 @@ use std::{
 
 use rupi_core::{
   AgentEvent, ModelCapabilities, ModelEndpoint, ModelRef, ReasoningExposure, Role, RuntimeConfig,
-  TurnStatus,
+  SessionEndReason, TurnStatus,
 };
 use rupi_store::{StateLayout, Store, TraceJournal, WritePolicy};
 use tempfile::TempDir;
@@ -297,6 +297,12 @@ fn one_shot_budget_exhaustion_exits_successfully_with_a_resumable_status() {
     &entry.envelope.event,
     AgentEvent::TurnCompleted(done) if done.status == TurnStatus::BudgetExhausted
   )));
+  assert!(matches!(
+    &trace.last().expect("session end follows the completed turn").envelope.event,
+    AgentEvent::SessionEnded(ended)
+      if matches!(&ended.reason, SessionEndReason::Interrupted { message }
+        if message == "model request budget exhausted")
+  ));
 }
 
 #[test]
@@ -912,7 +918,11 @@ fn a_run_with_no_skills_nearby_still_sends_the_core_system_prompt() {
     requests[0].body
   );
   assert!(requests[0].body.contains("Working directory:"));
-  assert!(requests[0].body.contains("Prefer `process`"));
+  assert!(
+    requests[0].body.contains(
+      "Tools available for this request: append, edit, exec, grep, process, read, write."
+    )
+  );
   assert!(
     !requests[0].body.contains("available_skills"),
     "{}",

@@ -60,6 +60,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       }
       ProviderEvent::TextDelta(text) => answer.push_str(text),
       ProviderEvent::ToolCall(call) => println!("tool_call {} {call:?}", call.name),
+      ProviderEvent::ToolCallRejected { name, reason, .. } => {
+        println!("tool_call_rejected {name}: {reason}")
+      }
     }
   }
   if !reasoning.is_empty() {

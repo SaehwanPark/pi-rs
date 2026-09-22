@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use rupi_core::ModelRef;
 use rupi_core::context::{
   ContextAction, ContextDecision, ContextLevel, ContextPolicy, ContextProfile, ContextState,
   ContextThresholds, ProfilePolicy, ReductionReason,
@@ -106,11 +107,32 @@ impl KneeDetector {
   /// computes piecewise slopes (Δ first_delta_ms / Δ tokens * 1000), and flags a knee
   /// where the forward marginal slope surges significantly above the preceding baseline.
   pub fn detect_knee(&self) -> Option<KneePoint> {
-    if self.samples.len() < self.min_samples {
+    let model = self.samples.first()?.model.as_deref();
+    if self
+      .samples
+      .iter()
+      .any(|sample| sample.model.as_deref() != model)
+    {
+      return None;
+    }
+    self.detect_knee_for_model(model)
+  }
+
+  /// Detect a knee from observations belonging to exactly one model identity.
+  ///
+  /// `None` selects only unscoped samples; it never mixes them with named models.
+  pub fn detect_knee_for_model(&self, model: Option<&str>) -> Option<KneePoint> {
+    let samples: Vec<_> = self
+      .samples
+      .iter()
+      .filter(|sample| sample.model.as_deref() == model)
+      .cloned()
+      .collect();
+    if samples.len() < self.min_samples {
       return None;
     }
 
-    let mut sorted = self.samples.clone();
+    let mut sorted = samples;
     sorted.sort_by_key(|s| s.tokens);
     // Dedup adjacent matching token counts by averaging latencies
     let mut deduped: Vec<LatencySample> = Vec::new();
@@ -192,6 +214,7 @@ pub struct AdaptiveContextPolicy {
   base_policy: ProfilePolicy,
   adaptive_thresholds: ContextThresholds,
   knee: Option<KneePoint>,
+  knee_model: Option<String>,
   enabled: bool,
 }
 
@@ -203,6 +226,7 @@ impl AdaptiveContextPolicy {
       base_policy,
       adaptive_thresholds: static_thresholds,
       knee: None,
+      knee_model: None,
       enabled,
     }
   }
@@ -216,25 +240,40 @@ impl AdaptiveContextPolicy {
       return self;
     }
 
-    if let Some(knee) = detector.detect_knee() {
-      self.knee = Some(knee);
-      let static_thresh = self.base_policy.thresholds;
-
-      // Only cap if the knee occurs before our current compact threshold
-      if knee.tokens < static_thresh.compact_tokens {
-        let cap = knee.tokens;
-        let scale = cap as f64 / static_thresh.compact_tokens as f64;
-
-        self.adaptive_thresholds = ContextThresholds {
-          warn_tokens: ((static_thresh.warn_tokens as f64) * scale) as u64,
-          reduce_tokens: ((static_thresh.reduce_tokens as f64) * scale) as u64,
-          compact_tokens: cap,
-          checkpoint_tokens: cap + (cap / 10).max(2_048),
-          recent_target_tokens: ((static_thresh.recent_target_tokens as f64) * scale) as u64,
-        };
-      }
+    let Some(first) = detector.samples().first() else {
+      return self;
+    };
+    let model = first.model.as_deref();
+    if detector
+      .samples()
+      .iter()
+      .any(|sample| sample.model.as_deref() != model)
+    {
+      return self;
+    }
+    if let Some(knee) = detector.detect_knee_for_model(model) {
+      self.knee_model = model.map(str::to_owned);
+      self.apply_knee(knee);
     }
     self
+  }
+
+  /// Attach observations for a specific model, ignoring other model samples.
+  pub fn with_detector_for_model(mut self, detector: &KneeDetector, model: &ModelRef) -> Self {
+    if !self.enabled {
+      return self;
+    }
+    let key = model.as_key();
+    if let Some(knee) = detector.detect_knee_for_model(Some(&key)) {
+      self.knee_model = Some(key);
+      self.apply_knee(knee);
+    }
+    self
+  }
+
+  fn apply_knee(&mut self, knee: KneePoint) {
+    self.knee = Some(knee);
+    self.adaptive_thresholds = cap_thresholds(self.base_policy.thresholds, knee);
   }
 
   pub fn is_enabled(&self) -> bool {
@@ -278,7 +317,12 @@ impl ContextPolicy for AdaptiveContextPolicy {
 
   fn evaluate(&self, state: &ContextState) -> ContextDecision {
     let tokens = state.effective_tokens();
-    let thresholds = self.effective_thresholds();
+    let static_thresholds = ContextThresholds::for_profile(self.base_policy.profile, state.window);
+    let active_model = state.model.as_ref().map(ModelRef::as_key);
+    let thresholds = match (self.knee, active_model.as_ref() == self.knee_model.as_ref()) {
+      (Some(knee), true) if self.enabled => cap_thresholds(static_thresholds, knee),
+      _ => static_thresholds,
+    };
 
     if state.overflow_observed {
       return ContextDecision {
@@ -375,6 +419,22 @@ impl ContextPolicy for AdaptiveContextPolicy {
   }
 }
 
+fn cap_thresholds(static_thresholds: ContextThresholds, knee: KneePoint) -> ContextThresholds {
+  if knee.tokens >= static_thresholds.compact_tokens {
+    return static_thresholds;
+  }
+
+  let cap = knee.tokens;
+  let scale = cap as f64 / static_thresholds.compact_tokens as f64;
+  ContextThresholds {
+    warn_tokens: ((static_thresholds.warn_tokens as f64) * scale) as u64,
+    reduce_tokens: ((static_thresholds.reduce_tokens as f64) * scale) as u64,
+    compact_tokens: cap,
+    checkpoint_tokens: cap + (cap / 10).max(2_048),
+    recent_target_tokens: ((static_thresholds.recent_target_tokens as f64) * scale) as u64,
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -430,6 +490,69 @@ mod tests {
     assert!(comp.adaptive_thresholds.compact_tokens < static_policy.thresholds.compact_tokens);
     assert!(comp.adaptive_thresholds.reduce_tokens < static_policy.thresholds.reduce_tokens);
     assert!(comp.adaptive_thresholds.warn_tokens < static_policy.thresholds.warn_tokens);
+  }
+
+  #[test]
+  fn adaptive_knees_are_scoped_to_the_active_model_and_window() {
+    let large_model = ModelRef::new("cloud", "large");
+    let backup_model = ModelRef::new("local", "small");
+    let mut detector = KneeDetector::new();
+    for (tokens, latency) in [
+      (1_000, 100),
+      (2_000, 110),
+      (4_000, 120),
+      (8_000, 130),
+      (16_000, 550),
+      (24_000, 1_500),
+    ] {
+      detector.add_sample(
+        LatencySample::new(tokens, latency, latency + 100).with_model(large_model.as_key()),
+      );
+    }
+    for (tokens, latency) in [
+      (8_000, 100),
+      (16_000, 110),
+      (24_000, 120),
+      (32_000, 130),
+      (48_000, 550),
+    ] {
+      detector.add_sample(
+        LatencySample::new(tokens, latency, latency + 100).with_model(backup_model.as_key()),
+      );
+    }
+    assert_eq!(
+      detector.detect_knee(),
+      None,
+      "different models are not pooled"
+    );
+
+    let policy = AdaptiveContextPolicy::new(ContextProfile::Balanced, 262_144, true)
+      .with_detector_for_model(&detector, &large_model);
+    let large_state = ContextState {
+      model: Some(large_model),
+      estimated_tokens: 9_000,
+      recent_tokens: 0,
+      since_last_compaction_ms: 600_000,
+      ..ContextState::zero(262_144)
+    };
+    assert!(matches!(
+      policy.evaluate(&large_state).action,
+      ContextAction::Compact { .. }
+    ));
+
+    let small_window = 32_768;
+    let small_thresholds = ContextThresholds::for_profile(ContextProfile::Balanced, small_window);
+    let backup_state = ContextState {
+      model: Some(backup_model),
+      estimated_tokens: small_thresholds.compact_tokens + 1,
+      recent_tokens: 0,
+      since_last_compaction_ms: 600_000,
+      ..ContextState::zero(small_window)
+    };
+    assert!(matches!(
+      policy.evaluate(&backup_state).action,
+      ContextAction::Compact { .. }
+    ));
   }
 
   #[test]

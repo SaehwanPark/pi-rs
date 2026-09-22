@@ -251,6 +251,11 @@ impl ToolRegistry {
     count
   }
 
+  /// Whether policy explicitly permits mutating tools to run without a prompt.
+  pub fn auto_approves_mutating(&self) -> bool {
+    self.default_gate == DefaultGate::Allow
+  }
+
   /// Register the built-in set.
   ///
   /// The built-in set is the whole point of registering tools instead of
@@ -420,6 +425,22 @@ impl ToolRegistry {
         self.dispatch(request, progress, cancel, &mut refuse, on_started)
       }
     }
+  }
+
+  /// Execute with an explicit approval gate and the durable start observer.
+  ///
+  /// The runtime uses this when its surface can ask a human. Headless callers
+  /// should use [`Self::execute_observed`], whose configured default remains
+  /// closed unless the operator opted into automatic approval.
+  pub fn execute_observed_with_gate(
+    &self,
+    request: &ToolRequest,
+    progress: &mut dyn ToolProgress,
+    cancel: &CancelToken,
+    gate: &mut dyn ApprovalGate,
+    on_started: &mut dyn FnMut() -> Result<(), rupi_core::SinkError>,
+  ) -> Result<Executed, rupi_core::SinkError> {
+    self.dispatch(request, progress, cancel, gate, on_started)
   }
 
   /// Execute one call, answering a mutating call with `gate` instead of the

@@ -30,6 +30,18 @@ use super::*;
 use crate::cli::RunArgs;
 
 #[test]
+fn approval_prompt_escapes_terminal_controls_in_untrusted_text() {
+  assert_eq!(
+    escape_terminal_controls("tool\u{1b}[2J\nsecond\u{9b}line", false),
+    "tool\\u{1b}[2J\\nsecond\\u{9b}line"
+  );
+  assert_eq!(
+    escape_terminal_controls("{\n  \"key\": \"value\u{9b}\"\n}", true),
+    "{\n  \"key\": \"value\\u{9b}\"\n}"
+  );
+}
+
+#[test]
 fn a_second_turn_on_one_handle_sends_the_first_turn_with_it() {
   let temp = TempDir::new().unwrap();
   let workspace = temp.path().join("workspace");
