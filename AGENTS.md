@@ -64,6 +64,7 @@
 - Be aware of AI subscription usage limits and reset windows. The parent/current
   agent checks limits directly per `docs/ai-usage-policy.md`; never spawn a model-backed
   subagent solely to monitor usage.
+- Use `llama.cpp` to serve AI models locally when necessary to examine how `rupi` performs with local models. See `docs/local-ai-serving.md` for details.
 
 ## Subagents
 
