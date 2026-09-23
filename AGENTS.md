@@ -62,7 +62,7 @@
   reconstruction must verify performance against defined budgets.
 - Update `ROADMAP.md` only from verified evidence. Keep incomplete work active and do not mark stage gates complete until gate evidence exists.
 - Be aware of AI subscription usage limits and reset windows. The parent/current
-  agent checks limits directly per `docs/codexbar.md`; never spawn a model-backed
+  agent checks limits directly per `docs/ai-usage-policy.md`; never spawn a model-backed
   subagent solely to monitor usage.
 
 ## Subagents

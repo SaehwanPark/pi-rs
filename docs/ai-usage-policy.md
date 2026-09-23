@@ -12,8 +12,8 @@ model-backed subagent solely to monitor usage.
 
 Use the highest relevant used percentage reported for the active provider.
 
-- **Below 98%:** normal bounded work may continue.
-- **98% or higher:** if 5-hour usage percentage is higher, check when their limit is reset, then wait until the 5-hour limit is reset (use `sleep <seconds>`). Wait two more minutes before resuming work. The same rule applied to weekly usage/limit. You should **not** check the usage/limit when you are waiting (to save tokens).
+- **Below 99%:** normal bounded work may continue.
+- **99% or higher:** if 5-hour usage percentage is higher, check when their limit is reset, then wait until the 5-hour limit is reset (use `sleep <seconds>`). Wait two more minutes before resuming work. The same rule applied to weekly usage/limit. You should **not** check the usage/limit when you are waiting (to save tokens).
 
 Check at these points rather than running a dedicated monitor:
 
