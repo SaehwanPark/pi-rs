@@ -819,7 +819,13 @@ Compaction happens too often     -> relaxed
 
 The model's reported context window may lower thresholds for constrained models.
 
-Large advertised windows should not automatically increase thresholds.
+Large advertised windows should not automatically increase thresholds. Explicit numeric
+`ContextOverrides` are applied after deriving the profile thresholds for each active model
+window, including a failover backup. Values are normalized to preserve
+`warn <= reduce <= compact < checkpoint < window` and `recent_target < compact`; any
+normalization is recorded as a durable diagnostic. When opt-in adaptive mode observes a
+model-specific performance knee, the knee is applied after the overrides and may only
+lower those thresholds further.
 
 Advanced numerical configuration can exist for specialized benchmarking.
 

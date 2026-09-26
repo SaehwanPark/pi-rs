@@ -453,6 +453,8 @@ pub struct TurnLoop<'a> {
   /// an error would let a caller catch the error and issue a provider request
   /// against history whose side effects are still uncertain.
   recovery_blocked: bool,
+  /// Active model windows for which threshold-normalization diagnostics were emitted.
+  reported_context_adjustments: BTreeSet<(String, u64)>,
   context_epoch: u32,
   /// Leading checkpoint capsule messages protected from ordinary compaction.
   checkpoint_floor: usize,
@@ -523,6 +525,7 @@ impl<'a> TurnLoop<'a> {
       resumed: false,
       interrupted_tools: Vec::new(),
       recovery_blocked: false,
+      reported_context_adjustments: BTreeSet::new(),
       context_epoch: 0,
       checkpoint_floor: 0,
       checkpoint_cited_from: None,
@@ -3024,6 +3027,19 @@ impl<'a> TurnLoop<'a> {
       state.at_safe_boundary = true;
       state
     };
+    if let Some(message) = self.context.configuration_warning(&state) {
+      let model_key = state
+        .model
+        .as_ref()
+        .map(ModelRef::as_key)
+        .unwrap_or_else(|| "<unknown>".into());
+      if self
+        .reported_context_adjustments
+        .insert((model_key, state.window))
+      {
+        self.diagnostic(Some(turn_id.clone()), DiagnosticLevel::Warn, message)?;
+      }
+    }
     let decision = self.context.evaluate(&state);
     match decision.action {
       // Refusal is the honest answer to a request that cannot fit. Truncating
@@ -7315,6 +7331,84 @@ mod tests {
   }
 
   #[test]
+  fn context_overrides_are_reclamped_and_reported_on_failover() {
+    let primary = Scripted::new("override-primary", vec![text("unused")])
+      .always_fails(ModelFailureKind::ProviderUnavailable);
+    let mut backup = Scripted::new("override-backup", vec![text("from backup")]);
+    backup.capabilities.context_window = 8_192;
+    let temp = rupi_store::TempDir::new("runtime-context-override-clamp");
+    let store = rupi_store::Store::open(temp.path(), rupi_store::WritePolicy::default())
+      .expect("store opens");
+    let session_id = SessionId::new();
+    let session = store
+      .begin(SessionHeader {
+        session_id: session_id.clone(),
+        version: rupi_core::session::SESSION_SCHEMA_VERSION,
+        started_at_ms: 1,
+        working_dir: "/workspace".into(),
+        model: primary.model().clone(),
+        parent_session: None,
+        branched_from_event: None,
+        imported_from: None,
+      })
+      .expect("session begins");
+    let tools = registry_with(Vec::new());
+    let mut trace = StoreTrace::new(session);
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      primary.capabilities().context_window,
+    )
+    .with_overrides(rupi_core::ContextOverrides {
+      warn_tokens: Some(9_000),
+      reduce_tokens: Some(10_000),
+      compact_tokens: Some(11_000),
+      checkpoint_tokens: Some(12_000),
+      recent_target_tokens: Some(10_000),
+    });
+
+    let report = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      session_id.clone(),
+      TraceId::new(),
+    )
+    .with_backup(&backup)
+    .with_failover(FailoverPolicy::default().with_max_attempts(1))
+    .run_turn(
+      "answer from the active model",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .expect("the backup answers after a valid failover");
+
+    assert_eq!(report.text, "from backup");
+    assert_eq!(primary.requests().len(), 1);
+    assert_eq!(backup.requests().len(), 1);
+    trace.flush().expect("flush durable diagnostic");
+    let trace_path = trace.session().trace_path().to_path_buf();
+    drop(trace);
+    let journal = rupi_store::TraceJournal::read(&trace_path).expect("read canonical trace");
+    let warnings = journal
+      .items
+      .iter()
+      .filter_map(|entry| match &entry.envelope.event {
+        AgentEvent::Diagnostic(diagnostic)
+          if diagnostic
+            .message
+            .contains("context overrides were clamped") =>
+        {
+          Some(diagnostic.message.as_str())
+        }
+        _ => None,
+      })
+      .collect::<Vec<_>>();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("active 8192-token window"));
+  }
+
+  #[test]
   fn a_policy_override_keeps_the_attached_backup() {
     // The builders are separate because the caller owns the provider and the
     // operator tunes the policy. An override that quietly dropped the backup would
@@ -9580,9 +9674,15 @@ mod tests {
     let mut provider = Scripted::new("pressured", vec![text("ok")]);
     provider.capabilities.context_window = PRESSURED_WINDOW;
     let tools = registry_with(Vec::new());
-    let mut policy =
-      rupi_core::ProfilePolicy::new(rupi_core::ContextProfile::Balanced, PRESSURED_WINDOW);
-    policy.thresholds.checkpoint_tokens = 1_000;
+    let policy =
+      rupi_core::ProfilePolicy::new(rupi_core::ContextProfile::Balanced, PRESSURED_WINDOW)
+        .with_overrides(rupi_core::ContextOverrides {
+          warn_tokens: Some(100),
+          reduce_tokens: Some(200),
+          compact_tokens: Some(500),
+          checkpoint_tokens: Some(1_000),
+          recent_target_tokens: Some(250),
+        });
     let mut trace = Recorder::default();
 
     TurnLoop::new(
@@ -9625,9 +9725,15 @@ mod tests {
     let mut provider = Scripted::new("pressured", vec![text("ok")]);
     provider.capabilities.context_window = PRESSURED_WINDOW;
     let tools = registry_with(Vec::new());
-    let mut policy =
-      rupi_core::ProfilePolicy::new(rupi_core::ContextProfile::Balanced, PRESSURED_WINDOW);
-    policy.thresholds.checkpoint_tokens = 1_000;
+    let policy =
+      rupi_core::ProfilePolicy::new(rupi_core::ContextProfile::Balanced, PRESSURED_WINDOW)
+        .with_overrides(rupi_core::ContextOverrides {
+          warn_tokens: Some(100),
+          reduce_tokens: Some(200),
+          compact_tokens: Some(500),
+          checkpoint_tokens: Some(1_000),
+          recent_target_tokens: Some(250),
+        });
     let mut trace = Recorder::default();
 
     TurnLoop::new(

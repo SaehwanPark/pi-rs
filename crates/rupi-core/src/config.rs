@@ -264,7 +264,11 @@ impl ModelEndpoint {
 }
 
 /// Numeric overrides for experts who need them. Absent means profile-derived.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+///
+/// Overrides are applied after deriving thresholds for the active model window, then
+/// normalized to preserve the threshold ladder. Adaptive mode may lower them further
+/// when an observed performance knee requires an earlier compaction point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ContextOverrides {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub warn_tokens: Option<u64>,

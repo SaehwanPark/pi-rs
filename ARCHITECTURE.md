@@ -420,6 +420,13 @@ All current-turn messages remain verbatim and in order. A second refusal, an ove
 after committed output, or a candidate that cannot fit is terminal. Context overflow
 never activates model failover.
 
+Context thresholds are derived for the active model's window before explicit
+`ContextOverrides` are applied. The result is normalized to preserve
+`warn <= reduce <= compact < checkpoint < window` and `recent_target < compact`; when
+normalization changes operator values, the runtime emits one durable warning per active
+model/window. In opt-in adaptive mode, a detected model-specific knee may lower the
+normalized static thresholds further, never raise them.
+
 An observed output-limit stop is a separate, bounded recovery case. The runtime permits
 one same-model retry only when reported output usage is strictly below the request's
 explicit output ceiling and older, pre-turn history can be compacted. The incomplete
@@ -628,9 +635,11 @@ model reasoning.
 `rupi-experiments` defines pure evaluation and measurement boundaries for adaptive context
 policies, standby backup analysis, and MCP capability exposure:
 - **Context adaptation**: `KneeDetector` tracks `first_delta_ms` against context token estimates
-  to detect non-linear prefill latency knees. `AdaptiveContextPolicy` only lowers or caps
-  profile-derived thresholds when a knee occurs before `compact_tokens`; thresholds never exceed
-  static profile limits, and adaptive mode remains opt-in (`RuntimeConfig.adaptive_context`).
+  to detect non-linear prefill latency knees. `AdaptiveContextPolicy` starts with thresholds
+  derived for the active model window, applies explicit `ContextOverrides`, then only lowers or
+  caps them when a model-specific knee occurs; adaptive mode remains opt-in
+  (`RuntimeConfig.adaptive_context`). Invalid ordering or backup-window overflow is clamped with
+  a durable diagnostic, and thresholds always preserve the context ladder.
 - **Backup standby evaluation**: `evaluate_standby_tradeoff` models startup latency and RSS memory
   overheads against takeover speedup. Cold lazy backup remains the default execution posture.
 - **MCP capability exposure**: `evaluate_mcp_exposure` measures token footprint across minimal,

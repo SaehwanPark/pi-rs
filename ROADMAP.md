@@ -941,7 +941,11 @@ on the Round-4 PR and remains incomplete until each behavior has regression evid
       deltas and never-executed tool calls remain trace evidence but are omitted from the
       next request/session projection. Tests cover below-ceiling recovery, full-ceiling
       rejection, no side effects, same-model behavior, one-shot bounds, and request budget.
-- [ ] Apply context overrides consistently across active windows and adaptive policy.
+- [x] Apply context overrides consistently across active windows and adaptive policy.
+      Each active model window derives profile thresholds before overrides are applied;
+      normalized ordering is enforced, and adjustments emit one durable warning per model
+      window. Adaptive knees apply afterward as caps that can only lower those thresholds.
+      Core, adaptive-policy, failover, and durable-diagnostic regressions cover precedence.
 - [ ] Keep P2 tokenizer-estimator calibration and model-readable reduced-output recovery tracked;
       these are outside the Round-4 blocking slice and must not be presented as implemented.
 
