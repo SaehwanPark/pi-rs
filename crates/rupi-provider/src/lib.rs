@@ -27,7 +27,10 @@ pub mod openai;
 mod relay;
 pub mod sse;
 
-pub use config::{BuildError, DEFAULT_BASE_URL, MaxTokensField, ProviderConfig, ThinkingInput};
+pub use config::{
+  BuildError, DEFAULT_BASE_URL, MaxTokensField, ProviderConfig, StrictToolSchemaSupport,
+  ThinkingDisableMode, ThinkingInput,
+};
 pub use decode::Decoder;
 pub use deferred::Deferred;
 pub use mapping::{request_body, serves};

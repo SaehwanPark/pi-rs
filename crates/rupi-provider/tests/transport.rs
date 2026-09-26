@@ -18,9 +18,10 @@ use std::{
 };
 
 use rupi_core::{
-  CancelToken, Collector, CompletionCertainty, CompletionUsage, FailurePhase, Message,
-  ModelCapabilities, ModelFailure, ModelFailureKind, ModelProvider, ModelRef, ModelRequest,
-  ProviderEvent, ReasoningExposure, ReasoningProvenance,
+  CancelToken, Collector, CompletionCertainty, CompletionUsage, ContentBlock, FailurePhase,
+  Message, ModelCapabilities, ModelEndpoint, ModelFailure, ModelFailureKind, ModelProvider,
+  ModelRef, ModelRequest, ProviderEvent, ReasoningChunk, ReasoningExposure, ReasoningProvenance,
+  Role, ThinkingLevel, ToolSamplingConstraint, ToolSamplingStrictness,
 };
 use rupi_provider::{MaxTokensField, OpenAiCompat, ProviderConfig, ThinkingInput};
 
@@ -423,6 +424,104 @@ fn a_decoded_tool_call_without_done_is_an_uncertain_completion() {
 }
 
 #[test]
+fn endpoint_json_drives_compatibility_headers_and_request_dialect() {
+  let server = FakeServer::answer(status(
+    200,
+    "OK",
+    r#"{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\":\"a.rs\",\"offset\":null}"}}]},"finish_reason":"tool_calls"}]}"#,
+    "",
+  ));
+  let endpoint: ModelEndpoint = serde_json::from_value(serde_json::json!({
+    "provider": "local-vulkan",
+    "model": "qwen3.8-flash",
+    "base_url": server.base_url(),
+    "capabilities": {
+      "text": true,
+      "images": false,
+      "tools": true,
+      "exposed_reasoning": "native",
+      "context_window": 8192
+    },
+    "openai_compat": {
+      "stream": false,
+      "stream_usage": false,
+      "max_tokens_field": "max_tokens",
+      "thinking_input": "reasoning_effort",
+      "thinking_disable": "reasoning_effort_none",
+      "strict_tool_schema": "supported",
+      "preserve_reasoning": true,
+      "headers": {"x-routing-hint": "low-latency"}
+    }
+  }))
+  .unwrap();
+  let provider = OpenAiCompat::new(ProviderConfig::from_endpoint(&endpoint).unwrap()).unwrap();
+  let mut req = request("follow up");
+  req.thinking = ThinkingLevel::Off;
+  req.tools = vec![rupi_core::ToolSpec {
+    name: "read".into(),
+    description: "Read a path".into(),
+    parameters: serde_json::json!({
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string"},
+        "offset": {"type": "integer"}
+      },
+      "required": ["path"]
+    }),
+    sampling_constraint: Some(ToolSamplingConstraint::JsonSchema {
+      strictness: ToolSamplingStrictness::Prefer,
+    }),
+  }];
+  req.messages.insert(
+    1,
+    Message::new(
+      Role::Assistant,
+      vec![
+        ContentBlock::Reasoning(ReasoningChunk::new(
+          "native reasoning",
+          ReasoningProvenance::Native,
+        )),
+        ContentBlock::text("earlier answer"),
+      ],
+    ),
+  );
+  let (result, collector) = stream(&provider, &req);
+  result.expect("one-shot completion");
+  assert!(matches!(
+    &collector.events()[0],
+    ProviderEvent::ToolCall(call) if call.arguments == serde_json::json!({"path": "a.rs"})
+  ));
+  let request_text = server.request();
+  assert!(
+    request_text
+      .to_lowercase()
+      .contains("x-routing-hint: low-latency"),
+    "{request_text}"
+  );
+  let body_start = request_text.find("\r\n\r\n").expect("body");
+  let body: serde_json::Value = serde_json::from_str(&request_text[body_start + 4..]).unwrap();
+  assert_eq!(body["stream"], false);
+  assert!(body.get("stream_options").is_none());
+  assert_eq!(body["max_tokens"], 256);
+  assert_eq!(body["reasoning_effort"], "none");
+  assert_eq!(body["messages"][1]["reasoning_content"], "native reasoning");
+  assert_eq!(body["tools"][0]["function"]["strict"], true);
+  assert_eq!(
+    body["tools"][0]["function"]["parameters"]["required"]
+      .as_array()
+      .unwrap()
+      .len(),
+    2,
+    "strict schemas make optional properties required and nullable"
+  );
+  assert_eq!(
+    body["tools"][0]["function"]["parameters"]["properties"]["offset"]["type"],
+    serde_json::json!(["integer", "null"])
+  );
+}
+
+#[test]
 fn a_non_streaming_endpoint_is_supported() {
   let server = FakeServer::answer(status(
     200,
@@ -475,6 +574,7 @@ fn tools_are_not_sent_when_the_model_cannot_use_them() {
     name: "read".into(),
     description: "Read".into(),
     parameters: serde_json::json!({"type": "object"}),
+    sampling_constraint: None,
   }];
   let (result, _) = stream(&adapter, &req);
   result.expect("completion");
@@ -579,6 +679,10 @@ fn a_quiet_stream_expires_at_the_logical_idle_timeout() {
   let (result, _) = stream(&adapter, &request("quiet timeout"));
   let failure = result.expect_err("quiet response must time out");
   assert_eq!(failure.kind, ModelFailureKind::Timeout);
+  assert_eq!(
+    failure.replay_safety,
+    rupi_core::RequestReplaySafety::AmbiguousPostBoundary
+  );
   assert!(started.elapsed() < Duration::from_secs(5), "{failure:?}");
   server.join().expect("server");
   let second = adapter.stream(
@@ -619,6 +723,10 @@ fn total_request_deadline_is_distinct_from_idle_timeout() {
   let failure = result.expect_err("total request budget must expire");
   assert_eq!(failure.kind, ModelFailureKind::Timeout);
   assert_eq!(failure.phase, FailurePhase::WaitingForResponse);
+  assert_eq!(
+    failure.replay_safety,
+    rupi_core::RequestReplaySafety::AmbiguousPostBoundary
+  );
   assert!(failure.message.contains("total timeout"), "{failure:?}");
   let elapsed = started.elapsed();
   // The logical budget is 200 ms; allow bounded scheduling/teardown grace when
@@ -772,6 +880,7 @@ fn request_bodies_are_what_the_server_actually_received() {
     name: "grep".into(),
     description: "Search".into(),
     parameters: serde_json::json!({"type": "object", "properties": {"pattern": {"type": "string"}}}),
+    sampling_constraint: None,
   }];
   req.stop = vec!["\n\nuser:".into()];
   let (result, _) = stream(&adapter, &req);

@@ -149,36 +149,25 @@ pub(crate) fn open_session_with_approval(
     skills_prompt.push_str(setup.skill());
   }
 
+  let overrides = config.context_overrides.unwrap_or_default();
   let policy: Box<dyn rupi_core::context::ContextPolicy> =
     if config.adaptive_context.unwrap_or(false) {
-      Box::new(rupi_experiments::AdaptiveContextPolicy::new(
-        config.context_profile,
-        provider.capabilities().context_window,
-        true,
-      ))
+      Box::new(
+        rupi_experiments::AdaptiveContextPolicy::new(
+          config.context_profile,
+          provider.capabilities().context_window,
+          true,
+        )
+        .with_overrides(overrides),
+      )
     } else {
-      let mut policy = rupi_core::ProfilePolicy::new(
-        config.context_profile,
-        provider.capabilities().context_window,
-      );
-      if let Some(overrides) = &config.context_overrides {
-        if let Some(value) = overrides.warn_tokens {
-          policy.thresholds.warn_tokens = value;
-        }
-        if let Some(value) = overrides.reduce_tokens {
-          policy.thresholds.reduce_tokens = value;
-        }
-        if let Some(value) = overrides.compact_tokens {
-          policy.thresholds.compact_tokens = value;
-        }
-        if let Some(value) = overrides.checkpoint_tokens {
-          policy.thresholds.checkpoint_tokens = value;
-        }
-        if let Some(value) = overrides.recent_target_tokens {
-          policy.thresholds.recent_target_tokens = value;
-        }
-      }
-      Box::new(policy)
+      Box::new(
+        rupi_core::ProfilePolicy::new(
+          config.context_profile,
+          provider.capabilities().context_window,
+        )
+        .with_overrides(overrides),
+      )
     };
   let write_policy = WritePolicy::from_retention(&config.trace, &config.redaction);
   // The name is resolved against a read-only store, before `Store::open`, because `open`

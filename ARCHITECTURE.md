@@ -150,6 +150,18 @@ pub enum ModelFailureKind {
 
 Only explicit categories should qualify for automatic failover.
 
+OpenAI-compatible endpoint quirks travel through `ModelEndpoint.openai_compat`, not provider
+adapter defaults that the CLI cannot reach. Streaming, usage inclusion, token-limit field,
+thinking-control dialect and safe extra headers are endpoint-scoped. An explicit thinking-off
+encoding is opt-in; adapters do not assume that every compatible server accepts
+`reasoning_effort: "none"`. Prior assistant reasoning is omitted by default and can only be
+replayed for an opted-in endpoint when its provenance is `Native`; provider summaries,
+declared rationale and reconstructed rationale are never relabeled as native reasoning.
+Built-in tools prefer strict schema sampling only when the endpoint explicitly declares
+support. A required constraint refuses before dispatch when unsupported or not safely
+normalizable; the registry's pre-execution argument validator remains authoritative. Header
+values are redacted from config serialization and debug output.
+
 ## 6. Event model
 
 Important runtime behavior must emit typed events.
@@ -344,13 +356,17 @@ pub struct ToolMetadata {
 Coding workflows may configure `RuntimeLimits::max_model_requests_without_progress` and
 an optional `progress_tool_names` allowlist. After the configured number of tool-bearing
 requests without one of those tools, `TurnLoop` records a runtime-owned model-visible
-instruction and exposes only the allowlisted tools on the next request. With no allowlist,
-all permitted mutating tools are exposed. The boundary is a bounded nudge, not a claim that
-the host changed: the normal `Requested`/`Started`/`Succeeded`/`Failed`/`Unknown` lifecycle
-still decides what actually happened. A successful configured progress tool satisfies the
+instruction, exposes only the allowlisted tools on the next request, and requests
+`ToolChoice::Required` where supported. That provider hint is not trusted as enforcement:
+a text-only completion while the boundary remains active is retained in the canonical trace,
+excluded from model-visible history and final report text, and followed by a corrective
+request. Exhausting the request budget without a successful configured progress tool ends
+as `BudgetExhausted`, never `Completed`. With no allowlist, all permitted mutating tools
+are exposed. The normal `Requested`/`Started`/`Succeeded`/`Failed`/`Unknown` lifecycle still
+decides what actually happened. A successful configured progress tool satisfies the
 one-shot boundary for the rest of that turn, and callers must verify the workspace
-independently.
-The default is disabled so read-only questions and inspection workflows remain unchanged.
+independently. The default is disabled so read-only questions and inspection workflows
+remain unchanged.
 
 ## 10. Context engine
 
@@ -403,6 +419,22 @@ using one bounded local summary and the exact normal request shape, then reissue
 All current-turn messages remain verbatim and in order. A second refusal, an overflow
 after committed output, or a candidate that cannot fit is terminal. Context overflow
 never activates model failover.
+
+Context thresholds are derived for the active model's window before explicit
+`ContextOverrides` are applied. The result is normalized to preserve
+`warn <= reduce <= compact < checkpoint < window` and `recent_target < compact`; when
+normalization changes operator values, the runtime emits one durable warning per active
+model/window. In opt-in adaptive mode, a detected model-specific knee may lower the
+normalized static thresholds further, never raise them.
+
+An observed output-limit stop is a separate, bounded recovery case. The runtime permits
+one same-model retry only when reported output usage is strictly below the request's
+explicit output ceiling and older, pre-turn history can be compacted. The incomplete
+attempt remains in the canonical trace, but its deltas and never-executed tool calls are
+not projected into the next request or resumed model context. A response that used its
+full ceiling, has no measurable output usage/ceiling, or has no safely compactable prior
+history remains incomplete; the output-limit path never invokes failover or executes
+calls from the truncated response.
 
 ### Structured capsules
 
@@ -486,10 +518,18 @@ backup's window was smaller.
 
 After failover, the backup remains active until the user explicitly changes model.
 
+Same-model retry requires both a retryable failure kind and `RequestReplaySafety::Safe`.
+A pre-dispatch connection failure and an explicit retry-safe HTTP response (429 or 5xx)
+may retry. When a POST may have reached the endpoint, skip the same-model retry and go
+directly to the configured failover decision. Committed output does not qualify for generic
+retry or failover replay; the separately classified, one-shot output-limit recovery above
+is the only exception and stays on the same model. This prevents a quarantined adapter
+from consuming budget under a fake `ModelRetry` event.
+
 Interactive session control:
 - `/failover` triggers manual switch to backup model with `EpochReason::ManualSwitch`.
 - `/switch-back` triggers manual return to primary model with `EpochReason::ManualSwitchBack`.
-- Retries on qualifying availability failures apply exponential backoff (or server `retry-after`) and remain interruptible via `CancelToken`.
+- Safe retries on qualifying availability failures apply exponential backoff (or server `retry-after`) and remain interruptible via `CancelToken`.
 
 Do not auto-ping-pong.
 
@@ -595,9 +635,11 @@ model reasoning.
 `rupi-experiments` defines pure evaluation and measurement boundaries for adaptive context
 policies, standby backup analysis, and MCP capability exposure:
 - **Context adaptation**: `KneeDetector` tracks `first_delta_ms` against context token estimates
-  to detect non-linear prefill latency knees. `AdaptiveContextPolicy` only lowers or caps
-  profile-derived thresholds when a knee occurs before `compact_tokens`; thresholds never exceed
-  static profile limits, and adaptive mode remains opt-in (`RuntimeConfig.adaptive_context`).
+  to detect non-linear prefill latency knees. `AdaptiveContextPolicy` starts with thresholds
+  derived for the active model window, applies explicit `ContextOverrides`, then only lowers or
+  caps them when a model-specific knee occurs; adaptive mode remains opt-in
+  (`RuntimeConfig.adaptive_context`). Invalid ordering or backup-window overflow is clamped with
+  a durable diagnostic, and thresholds always preserve the context ladder.
 - **Backup standby evaluation**: `evaluate_standby_tradeoff` models startup latency and RSS memory
   overheads against takeover speedup. Cold lazy backup remains the default execution posture.
 - **MCP capability exposure**: `evaluate_mcp_exposure` measures token footprint across minimal,

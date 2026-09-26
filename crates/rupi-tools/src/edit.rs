@@ -52,6 +52,7 @@ impl Tool for EditTool {
   fn arguments_schema(&self) -> serde_json::Value {
     json!({
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "path": { "type": "string", "description": "Existing file, relative to the workspace." },
         "find": { "type": "string", "description": "Exact text to replace, including whitespace." },

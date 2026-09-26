@@ -43,6 +43,7 @@ impl Tool for ProcessTool {
   fn arguments_schema(&self) -> Value {
     json!({
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "program": { "type": "string", "description": "Executable to run directly; no shell is inserted. On Windows use cmd.exe only when shell syntax is required." },
         "args": {

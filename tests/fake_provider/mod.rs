@@ -86,6 +86,11 @@ pub struct FakeServer {
 impl FakeServer {
   /// Serves `responses`, one per request, in order, and records every request.
   pub fn answer(responses: Vec<String>) -> Self {
+    Self::answer_delayed(responses, Duration::ZERO)
+  }
+
+  /// As [`Self::answer`], delaying every response after its complete request arrives.
+  pub fn answer_delayed(responses: Vec<String>, delay: Duration) -> Self {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider");
     let addr = listener.local_addr().expect("fake provider address");
     listener.set_nonblocking(true).expect("non-blocking accept");
@@ -122,6 +127,9 @@ impl FakeServer {
                 let answer = script
                   .next()
                   .unwrap_or_else(|| exhausted_response(&request.line));
+                if !delay.is_zero() {
+                  thread::sleep(delay);
+                }
                 // The runtime may already have hung up. That is not a failure of the
                 // fake: the request is recorded either way, and `requests` reports the
                 // script.

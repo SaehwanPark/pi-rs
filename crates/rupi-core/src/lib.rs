@@ -47,8 +47,9 @@ pub use capability::{
 };
 pub use config::{
   ConfigError, ContextOverrides, DEFAULT_MAX_MODEL_REQUESTS_PER_TURN,
-  MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN, McpServerConfig, ModelEndpoint, RuntimeConfig,
-  RuntimeLimits, ToolPolicy, UiConfig,
+  MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN, McpServerConfig, ModelEndpoint, OpenAiCompatOptions,
+  OpenAiMaxTokensField, OpenAiStrictToolSchemaSupport, OpenAiThinkingDisable, OpenAiThinkingInput,
+  RuntimeConfig, RuntimeLimits, ToolPolicy, UiConfig,
 };
 pub use context::{
   CAPSULE_SCHEMA_VERSION, CapsuleArtifact, CapsuleDecision, ContextAction, ContextCapsule,
@@ -63,7 +64,9 @@ pub use event::{
   SessionEndReason, SessionEnded, SessionStarted, ToolCompleted, ToolFailed, ToolRequested,
   ToolStarted, ToolUnknown, TurnCompleted, TurnStatus, UserMessage, next_context_epoch,
 };
-pub use failure::{CompletionCertainty, FailurePhase, ModelFailure, ModelFailureKind};
+pub use failure::{
+  CompletionCertainty, FailurePhase, ModelFailure, ModelFailureKind, RequestReplaySafety,
+};
 pub use ids::{
   CheckpointId, EventId, EventSeq, SessionId, SpanId, ToolCallId, TraceId, TurnId, now_millis,
   uuidv7,
@@ -72,7 +75,8 @@ pub use message::{ContentBlock, Message, Role, ToolCallBlock, ToolResultBlock};
 pub use provenance::{ReasoningChunk, ReasoningProvenance};
 pub use provider::{
   CancelToken, Collector, CompletionUsage, ModelProvider, ModelRequest, ProviderEvent,
-  ProviderEventSink, ThinkingLevel, ToolSpec,
+  ProviderEventSink, ThinkingLevel, ToolChoice, ToolSamplingConstraint, ToolSamplingStrictness,
+  ToolSpec,
 };
 pub use redact::{Redacted, RedactionPolicy, SecretKind};
 pub use session::{

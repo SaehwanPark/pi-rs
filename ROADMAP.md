@@ -908,6 +908,50 @@ budgets. The recommended live model comparison cases 01, 02, 04, and 06 were not
 configured endpoint at `127.0.0.1:8000` was offline, and the documented 88-GB model checkpoint
 exceeds this host's approximately 64-GB physical memory. This does not establish Pi parity.
 
+### In-progress audit follow-up — Round 4
+
+`audits/pi-benchmark-audit/round04.md` identifies seven runtime/provider gaps. Work is tracked
+on the Round-4 PR and remains incomplete until each behavior has regression evidence:
+
+- [x] Validate every supplied tool argument against the registered schema; reject extra fields
+      on built-ins before preflight, approval, or execution (`crates/rupi-tools/src/registry.rs`;
+      registry regressions cover optional fields, nested arrays/objects, enums, extra properties,
+      and the pre-`ToolStarted` boundary).
+- [-] Enforce the progress boundary as a runtime postcondition, not only prompt/tool filtering.
+      Required tool choice is sent as a provider hint; rejected text-only completion is omitted
+      from model-visible history and final report text, and unsatisfied budget ends incomplete.
+- [x] Make same-model retry eligibility depend on request replay safety as well as failure kind.
+      `ModelFailure` distinguishes safe dispatch, ambiguous POST boundaries, and committed output;
+      the runtime retries only safe requests. Explicit retry-safe HTTP responses and known
+      pre-dispatch failures retain retry behavior, while ambiguous timeouts go directly to
+      failover/stop. Provider and CLI regressions assert quarantine, request counts, and no fake
+      `ModelRetry` event.
+- [x] Expose OpenAI-compatible dialect configuration through `ModelEndpoint`.
+      Endpoint options now reach adapter stream/usage mode, token-limit field, thinking input and
+      explicit-off dialect, native-reasoning replay, and redacted custom headers. Config parsing,
+      validation/redaction, adapter mapping, and fake-server wire regressions cover the path.
+- [x] Add capability-gated preferred/required constrained tool sampling.
+      Built-ins request `Prefer`; endpoint support is explicit. The adapter normalizes the
+      supported strict-schema subset, falls back for preferences, and refuses unsupported or
+      unnormalizable `Require` requests before dispatch. Runtime argument validation remains
+      authoritative; registry, mapper, and wire regressions cover the contract.
+- [x] Add one bounded recovery attempt for eligible output truncation.
+      The runtime compares reported output usage with the explicit effective request
+      ceiling, compacts only pre-turn history, and retries once on the same model. Failed
+      deltas and never-executed tool calls remain trace evidence but are omitted from the
+      next request/session projection. Tests cover below-ceiling recovery, full-ceiling
+      rejection, no side effects, same-model behavior, one-shot bounds, and request budget.
+- [x] Apply context overrides consistently across active windows and adaptive policy.
+      Each active model window derives profile thresholds before overrides are applied;
+      normalized ordering is enforced, and adjustments emit one durable warning per model
+      window. Adaptive knees apply afterward as caps that can only lower those thresholds.
+      Core, adaptive-policy, failover, and durable-diagnostic regressions cover precedence.
+- [ ] Keep P2 tokenizer-estimator calibration and model-readable reduced-output recovery tracked;
+      these are outside the Round-4 blocking slice and must not be presented as implemented.
+
+The local-model behavior comparisons remain contingent on an available endpoint/model; deterministic
+fault-injection tests are the required gate for the runtime contracts in this slice.
+
 ### P2 — Later / deliberately deferred
 
 - [x] Windows CI matrix (hosted CI covers Ubuntu, macOS, and Windows; benchmark execution remains non-Windows only).

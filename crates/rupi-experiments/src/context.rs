@@ -7,11 +7,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use rupi_core::ModelRef;
 use rupi_core::context::{
   ContextAction, ContextDecision, ContextLevel, ContextPolicy, ContextProfile, ContextState,
   ContextThresholds, ProfilePolicy, ReductionReason,
 };
+use rupi_core::{ContextOverrides, ModelRef};
 
 /// A recorded latency observation for a model request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -231,6 +231,18 @@ impl AdaptiveContextPolicy {
     }
   }
 
+  /// Apply explicit operator thresholds before any adaptive knee cap.
+  pub fn with_overrides(mut self, overrides: ContextOverrides) -> Self {
+    self.base_policy = self.base_policy.with_overrides(overrides);
+    self.adaptive_thresholds = self
+      .base_policy
+      .thresholds_for_window(self.base_policy.reference_window());
+    if let Some(knee) = self.knee {
+      self.apply_knee(knee);
+    }
+    self
+  }
+
   /// Adaptively adjust thresholds using observations from a knee detector.
   ///
   /// INVARIANT: Adaptive thresholds only lower/cap static thresholds.
@@ -273,7 +285,9 @@ impl AdaptiveContextPolicy {
 
   fn apply_knee(&mut self, knee: KneePoint) {
     self.knee = Some(knee);
-    self.adaptive_thresholds = cap_thresholds(self.base_policy.thresholds, knee);
+    let window = self.base_policy.reference_window();
+    self.adaptive_thresholds = cap_thresholds(self.base_policy.thresholds_for_window(window), knee)
+      .normalized_for_window(window);
   }
 
   pub fn is_enabled(&self) -> bool {
@@ -288,12 +302,16 @@ impl AdaptiveContextPolicy {
     if self.enabled && self.knee.is_some() {
       self.adaptive_thresholds
     } else {
-      self.base_policy.thresholds
+      self
+        .base_policy
+        .thresholds_for_window(self.base_policy.reference_window())
     }
   }
 
   pub fn compare_with_static(&self) -> ProfileComparison {
-    let static_t = self.base_policy.thresholds;
+    let static_t = self
+      .base_policy
+      .thresholds_for_window(self.base_policy.reference_window());
     let eff_t = self.effective_thresholds();
     let reduction = static_t.compact_tokens.saturating_sub(eff_t.compact_tokens);
     ProfileComparison {
@@ -315,12 +333,27 @@ impl ContextPolicy for AdaptiveContextPolicy {
     }
   }
 
+  fn configuration_warning(&self, state: &ContextState) -> Option<String> {
+    self.base_policy.configuration_warning(state)
+  }
+
   fn evaluate(&self, state: &ContextState) -> ContextDecision {
     let tokens = state.effective_tokens();
-    let static_thresholds = ContextThresholds::for_profile(self.base_policy.profile, state.window);
+    if state.window < 3 {
+      return ContextDecision {
+        action: ContextAction::Refuse {
+          reason: "active context window is too small to form valid policy thresholds".into(),
+        },
+        tokens,
+        level: None,
+      };
+    }
+    let static_thresholds = self.base_policy.thresholds_for_window(state.window);
     let active_model = state.model.as_ref().map(ModelRef::as_key);
     let thresholds = match (self.knee, active_model.as_ref() == self.knee_model.as_ref()) {
-      (Some(knee), true) if self.enabled => cap_thresholds(static_thresholds, knee),
+      (Some(knee), true) if self.enabled => {
+        cap_thresholds(static_thresholds, knee).normalized_for_window(state.window)
+      }
       _ => static_thresholds,
     };
 
@@ -430,7 +463,9 @@ fn cap_thresholds(static_thresholds: ContextThresholds, knee: KneePoint) -> Cont
     warn_tokens: ((static_thresholds.warn_tokens as f64) * scale) as u64,
     reduce_tokens: ((static_thresholds.reduce_tokens as f64) * scale) as u64,
     compact_tokens: cap,
-    checkpoint_tokens: cap + (cap / 10).max(2_048),
+    checkpoint_tokens: static_thresholds
+      .checkpoint_tokens
+      .min(cap.saturating_add((cap / 10).max(2_048))),
     recent_target_tokens: ((static_thresholds.recent_target_tokens as f64) * scale) as u64,
   }
 }
@@ -438,6 +473,30 @@ fn cap_thresholds(static_thresholds: ContextThresholds, knee: KneePoint) -> Cont
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn adaptive_knee_does_not_raise_any_static_or_overridden_threshold() {
+    let static_thresholds = ContextThresholds {
+      warn_tokens: 1_000,
+      reduce_tokens: 20_000,
+      compact_tokens: 50_000,
+      checkpoint_tokens: 50_500,
+      recent_target_tokens: 40_000,
+    };
+    let knee = KneePoint {
+      tokens: 49_000,
+      slope_before: 1.0,
+      slope_after: 3.0,
+      acceleration_ratio: 3.0,
+    };
+    let adaptive = cap_thresholds(static_thresholds, knee).normalized_for_window(128_000);
+
+    assert!(adaptive.warn_tokens <= static_thresholds.warn_tokens);
+    assert!(adaptive.reduce_tokens <= static_thresholds.reduce_tokens);
+    assert!(adaptive.compact_tokens <= static_thresholds.compact_tokens);
+    assert!(adaptive.checkpoint_tokens <= static_thresholds.checkpoint_tokens);
+    assert!(adaptive.recent_target_tokens <= static_thresholds.recent_target_tokens);
+  }
 
   #[test]
   fn linear_curve_has_no_knee() {
@@ -493,6 +552,50 @@ mod tests {
   }
 
   #[test]
+  fn adaptive_knee_caps_explicit_overrides_without_raising_them() {
+    let window = 128_000;
+    let mut detector = KneeDetector::new();
+    detector.add_sample(LatencySample::new(8_000, 100, 200));
+    detector.add_sample(LatencySample::new(16_000, 110, 220));
+    detector.add_sample(LatencySample::new(24_000, 120, 240));
+    detector.add_sample(LatencySample::new(32_000, 130, 260));
+    detector.add_sample(LatencySample::new(48_000, 550, 900));
+    let overrides = ContextOverrides {
+      warn_tokens: Some(10_000),
+      reduce_tokens: Some(20_000),
+      compact_tokens: Some(50_000),
+      checkpoint_tokens: Some(60_000),
+      recent_target_tokens: Some(8_000),
+    };
+    let policy = AdaptiveContextPolicy::new(ContextProfile::Balanced, window, true)
+      .with_overrides(overrides)
+      .with_detector(&detector);
+    let comparison = policy.compare_with_static();
+
+    assert_eq!(comparison.static_thresholds.compact_tokens, 50_000);
+    assert_eq!(comparison.knee_tokens, Some(32_000));
+    assert!(comparison.adaptive_thresholds.compact_tokens <= 32_000);
+    assert!(
+      comparison.adaptive_thresholds.compact_tokens < comparison.static_thresholds.compact_tokens
+    );
+    assert!(
+      comparison.adaptive_thresholds.warn_tokens <= comparison.adaptive_thresholds.reduce_tokens
+    );
+    assert!(
+      comparison.adaptive_thresholds.reduce_tokens <= comparison.adaptive_thresholds.compact_tokens
+    );
+    assert!(
+      comparison.adaptive_thresholds.compact_tokens
+        < comparison.adaptive_thresholds.checkpoint_tokens
+    );
+    assert!(comparison.adaptive_thresholds.checkpoint_tokens < window);
+    assert!(
+      comparison.adaptive_thresholds.recent_target_tokens
+        < comparison.adaptive_thresholds.compact_tokens
+    );
+  }
+
+  #[test]
   fn adaptive_knees_are_scoped_to_the_active_model_and_window() {
     let large_model = ModelRef::new("cloud", "large");
     let backup_model = ModelRef::new("local", "small");
@@ -526,7 +629,15 @@ mod tests {
       "different models are not pooled"
     );
 
+    let overrides = ContextOverrides {
+      warn_tokens: Some(2_000),
+      reduce_tokens: Some(4_000),
+      compact_tokens: Some(10_000),
+      checkpoint_tokens: Some(12_000),
+      recent_target_tokens: Some(5_000),
+    };
     let policy = AdaptiveContextPolicy::new(ContextProfile::Balanced, 262_144, true)
+      .with_overrides(overrides)
       .with_detector_for_model(&detector, &large_model);
     let large_state = ContextState {
       model: Some(large_model),
@@ -541,7 +652,10 @@ mod tests {
     ));
 
     let small_window = 32_768;
-    let small_thresholds = ContextThresholds::for_profile(ContextProfile::Balanced, small_window);
+    let (small_thresholds, _) =
+      ContextThresholds::for_profile(ContextProfile::Balanced, small_window)
+        .with_overrides(&overrides, small_window);
+    assert_eq!(small_thresholds.compact_tokens, 10_000);
     let backup_state = ContextState {
       model: Some(backup_model),
       estimated_tokens: small_thresholds.compact_tokens + 1,

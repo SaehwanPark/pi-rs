@@ -21,7 +21,7 @@ use rupi_core::{
 use crate::{
   config::{BuildError, ProviderConfig, agent_for, agent_for_proxy, redact_url},
   decode::{self, Decoder, StreamEnd},
-  mapping::request_body,
+  mapping::{self, request_body},
   relay::CancellableHttpRelay,
 };
 
@@ -105,10 +105,9 @@ impl OpenAiCompat {
   /// boxing it would add indirection to every match without protecting a hot path.
   #[allow(clippy::result_large_err)]
   fn send(&self, body: &str, cancel: &CancelToken) -> Result<ureq::Response, ModelFailure> {
-    // A bounded socket read is only a cancellation poll. Once request bytes may
-    // have reached the endpoint, this adapter must not issue the same POST again:
-    // the runtime owns retries, records them as ModelRetry, and can make the
-    // ambiguous request boundary visible to callers.
+    // The transport classifies known pre-dispatch failures as replay-safe. Any
+    // failure after bytes may have reached the endpoint stays ambiguous and is
+    // quarantined; the runtime skips a same-adapter retry and may fail over.
     let mut call = self
       .agent
       .post(&self.config.chat_completions_url())
@@ -135,6 +134,9 @@ impl OpenAiCompat {
         if is_ureq_timeout(&other) {
           failure.kind = ModelFailureKind::Timeout;
         }
+        if request_was_not_dispatched(&other) {
+          failure.replay_safety = rupi_core::RequestReplaySafety::Safe;
+        }
         Err(failure)
       }
     }
@@ -146,10 +148,12 @@ impl OpenAiCompat {
   fn read_stream(
     &self,
     response: ureq::Response,
+    request: &ModelRequest,
     sink: &mut dyn ProviderEventSink,
     cancel: &CancelToken,
   ) -> Result<CompletionUsage, ModelFailure> {
-    let mut decoder = Decoder::new(self.config.capabilities.exposed_reasoning);
+    let mut decoder = Decoder::new(self.config.capabilities.exposed_reasoning)
+      .with_strict_tool_schemas(mapping::strict_tool_argument_schemas(&self.config, request));
     // Which kind of end we actually observe decides whether this turn may be
     // reported as complete.
     let mut end = StreamEnd::DoneSentinel;
@@ -228,6 +232,7 @@ impl OpenAiCompat {
   fn read_one_shot(
     &self,
     response: ureq::Response,
+    request: &ModelRequest,
     sink: &mut dyn ProviderEventSink,
     cancel: &CancelToken,
   ) -> Result<CompletionUsage, ModelFailure> {
@@ -254,7 +259,8 @@ impl OpenAiCompat {
     }
     let value = decode_chunk(std::str::from_utf8(&body).unwrap_or(""))
       .map_err(|failure| failure.with_model(self.model_ref()))?;
-    let mut decoder = Decoder::new(self.config.capabilities.exposed_reasoning);
+    let mut decoder = Decoder::new(self.config.capabilities.exposed_reasoning)
+      .with_strict_tool_schemas(mapping::strict_tool_argument_schemas(&self.config, request));
     decoder
       .chunk(&value, sink)
       .map_err(|failure| annotated(&failure, false).with_model(self.model_ref()))?;
@@ -283,9 +289,9 @@ impl OpenAiCompat {
       Err(failure) => return Err(failure.with_model(self.model_ref())),
     };
     if self.config.stream {
-      self.read_stream(response, sink, cancel)
+      self.read_stream(response, request, sink, cancel)
     } else {
-      self.read_one_shot(response, sink, cancel)
+      self.read_one_shot(response, request, sink, cancel)
     }
   }
 
@@ -300,6 +306,8 @@ impl OpenAiCompat {
     sink: &mut dyn ProviderEventSink,
     cancel: &CancelToken,
   ) -> Result<CompletionUsage, ModelFailure> {
+    mapping::validate_tool_sampling(&self.config, request)
+      .map_err(|failure| failure.with_model(self.model_ref()))?;
     if self.quarantined.load(Ordering::Acquire) {
       return Err(
         ModelFailure::new(
@@ -314,7 +322,7 @@ impl OpenAiCompat {
       return Err(
         ModelFailure::new(
           ModelFailureKind::ProviderUnavailable,
-          FailurePhase::WaitingForResponse,
+          FailurePhase::PreRequest,
           "provider adapter already has an in-flight request",
         )
         .with_model(self.model_ref()),
@@ -330,7 +338,7 @@ impl OpenAiCompat {
         return Err(
           ModelFailure::new(
             ModelFailureKind::Transport,
-            FailurePhase::WaitingForResponse,
+            FailurePhase::PreRequest,
             format!("provider cancellation relay failed to start: {error}"),
           )
           .with_model(self.model_ref()),
@@ -345,7 +353,7 @@ impl OpenAiCompat {
         return Err(
           ModelFailure::new(
             ModelFailureKind::Transport,
-            FailurePhase::WaitingForResponse,
+            FailurePhase::PreRequest,
             error.to_string(),
           )
           .with_model(self.model_ref()),
@@ -411,7 +419,15 @@ impl OpenAiCompat {
         // could duplicate an uncertain request. Recovery must choose a fresh
         // adapter or an explicitly separate model.
         self.active_request.store(false, Ordering::Release);
-        return Err(decode::cancelled(emitted).with_model(model));
+        return Err(
+          decode::cancelled(emitted)
+            .with_replay_safety(if emitted {
+              rupi_core::RequestReplaySafety::CommittedOutput
+            } else {
+              rupi_core::RequestReplaySafety::AmbiguousPostBoundary
+            })
+            .with_model(model),
+        );
       }
       if let Some(budget) = total_budget.filter(|budget| request_started.elapsed() >= *budget) {
         request_cancel.cancel();
@@ -451,7 +467,7 @@ impl OpenAiCompat {
             matches!(
               failure.kind,
               ModelFailureKind::Transport | ModelFailureKind::Timeout | ModelFailureKind::Cancelled
-            )
+            ) && failure.replay_safety != rupi_core::RequestReplaySafety::Safe
           }) {
             // Socket/timeout/cancel failures are ambiguous after the POST
             // boundary. Explicit provider responses (5xx, throttles, protocol
@@ -472,7 +488,15 @@ impl OpenAiCompat {
           let _ = worker_handle.join();
           drain_worker_events(&receiver, sink, &mut emitted);
           self.active_request.store(false, Ordering::Release);
-          return Err(decode::cancelled(emitted).with_model(model));
+          return Err(
+            decode::cancelled(emitted)
+              .with_replay_safety(if emitted {
+                rupi_core::RequestReplaySafety::CommittedOutput
+              } else {
+                rupi_core::RequestReplaySafety::AmbiguousPostBoundary
+              })
+              .with_model(model),
+          );
         }
         Err(mpsc::RecvTimeoutError::Timeout) if last_activity.elapsed() >= idle_budget => {
           request_cancel.cancel();
@@ -592,6 +616,20 @@ fn decode_chunk(data: &str) -> Result<serde_json::Value, ModelFailure> {
   })
 }
 
+fn request_was_not_dispatched(error: &ureq::Error) -> bool {
+  matches!(
+    error.kind(),
+    ureq::ErrorKind::InvalidUrl
+      | ureq::ErrorKind::UnknownScheme
+      | ureq::ErrorKind::Dns
+      | ureq::ErrorKind::InsecureRequestHttpsOnly
+      | ureq::ErrorKind::ConnectionFailed
+      | ureq::ErrorKind::InvalidProxyUrl
+      | ureq::ErrorKind::ProxyConnect
+      | ureq::ErrorKind::ProxyUnauthorized
+  )
+}
+
 fn is_transient_read_timeout(error: &io::Error) -> bool {
   matches!(
     error.kind(),
@@ -638,7 +676,12 @@ impl ModelProvider for OpenAiCompat {
   }
 
   fn capabilities(&self) -> ModelCapabilities {
-    self.config.capabilities.clone()
+    let mut capabilities = self.config.capabilities.clone();
+    capabilities.max_output_tokens = self
+      .config
+      .max_output_tokens
+      .or(capabilities.max_output_tokens);
+    capabilities
   }
 
   fn reset_after_abandonment(&self) {
@@ -673,7 +716,10 @@ impl ModelProvider for OpenAiCompat {
 
 #[cfg(test)]
 mod tests {
-  use rupi_core::{Collector, ModelRef, ProviderEvent, ReasoningExposure};
+  use rupi_core::{
+    Collector, ModelRef, ProviderEvent, ReasoningExposure, ToolSamplingConstraint,
+    ToolSamplingStrictness,
+  };
 
   use super::*;
 
@@ -714,6 +760,17 @@ mod tests {
   }
 
   #[test]
+  fn configured_output_ceiling_is_exposed_to_runtime_requests() {
+    let provider = OpenAiCompat::new(ProviderConfig {
+      max_output_tokens: Some(1_024),
+      ..ProviderConfig::local("local", "model", "http://127.0.0.1/v1", 4_096)
+    })
+    .unwrap();
+
+    assert_eq!(provider.capabilities().max_output_tokens, Some(1_024));
+  }
+
+  #[test]
   fn debug_output_redacts_credentials_and_signed_url_parts() {
     let with_key = OpenAiCompat::new(ProviderConfig {
       api_key: Some("sk-super-secret".into()),
@@ -747,18 +804,56 @@ mod tests {
   }
 
   #[test]
-  fn an_unreachable_endpoint_is_an_availability_failure_not_a_protocol_bug() {
-    // Port 9 (discard) on loopback refuses connections almost instantly.
+  fn a_required_strict_tool_refuses_before_opening_the_endpoint() {
+    let mut config =
+      ProviderConfig::local("local", "qwen3.8-flash", "http://127.0.0.1:9/v1", 4_096);
+    config.capabilities.tools = true;
+    let adapter = OpenAiCompat::new(config).unwrap();
+    let mut request = request();
+    request.capabilities.tools = true;
+    request.tools.push(rupi_core::ToolSpec {
+      name: "read".into(),
+      description: "Read a path".into(),
+      parameters: serde_json::json!({
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"]
+      }),
+      sampling_constraint: Some(ToolSamplingConstraint::JsonSchema {
+        strictness: ToolSamplingStrictness::Require,
+      }),
+    });
     let mut collector = Collector::default();
-    let failure = adapter()
+    let failure = adapter
+      .stream(&request, &mut collector, &CancelToken::new())
+      .unwrap_err();
+    assert_eq!(failure.kind, ModelFailureKind::Protocol);
+    assert_eq!(failure.phase, FailurePhase::PreRequest);
+    assert!(failure.message.contains("does not support it"));
+    assert!(collector.events().is_empty());
+  }
+
+  #[test]
+  fn an_unreachable_endpoint_is_an_availability_failure_not_a_protocol_bug() {
+    // Bound the remote connect attempt: the relay returns an explicit 502 when
+    // it cannot open the provider connection before dispatch.
+    let mut config =
+      ProviderConfig::local("local", "qwen3.8-flash", "http://127.0.0.1:9/v1", 4_096);
+    config.connect_timeout_ms = 200;
+    let adapter = OpenAiCompat::new(config).unwrap();
+    let mut collector = Collector::default();
+    let failure = adapter
       .stream(&request(), &mut collector, &CancelToken::new())
       .unwrap_err();
-    assert!(
-      failure.kind.is_retryable(),
-      "connection refused must be retryable: {failure:?}"
-    );
+    assert_eq!(failure.kind, ModelFailureKind::ProviderUnavailable);
+    assert_eq!(failure.status, Some(502));
     assert_eq!(failure.phase, FailurePhase::WaitingForResponse);
     assert!(!failure.partial_output_emitted);
+    assert_eq!(
+      failure.replay_safety,
+      rupi_core::RequestReplaySafety::Safe,
+      "the refused connection never dispatched a request"
+    );
   }
 
   #[test]

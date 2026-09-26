@@ -89,6 +89,38 @@ impl ThinkingLevel {
   }
 }
 
+/// Provider instruction for tool use on one request.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ToolChoice {
+  /// Let the model choose whether and which exposed tool to call.
+  #[default]
+  Auto,
+  /// Do not ask the model to call any tool.
+  None,
+  /// Require the model to call one of the exposed tools.
+  Required,
+  /// Require this exposed tool by name.
+  Specific(String),
+}
+
+/// How strongly a tool requests provider-assisted schema-constrained sampling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSamplingStrictness {
+  /// Ask the provider to constrain generation when the endpoint supports it.
+  Prefer,
+  /// Refuse the request unless the endpoint can apply the schema constraint.
+  Require,
+}
+
+/// A model-generation constraint requested by one tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ToolSamplingConstraint {
+  /// Generate arguments against the declared JSON Schema.
+  JsonSchema { strictness: ToolSamplingStrictness },
+}
+
 /// One tool exposed to the model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolSpec {
@@ -96,6 +128,10 @@ pub struct ToolSpec {
   pub description: String,
   /// JSON Schema for arguments.
   pub parameters: serde_json::Value,
+  /// Optional provider-assisted generation constraint. Runtime validation is
+  /// still the authority before a tool can start.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub sampling_constraint: Option<ToolSamplingConstraint>,
 }
 
 /// One model request.
@@ -106,6 +142,7 @@ pub struct ModelRequest {
   pub system: Option<String>,
   pub messages: Vec<Message>,
   pub tools: Vec<ToolSpec>,
+  pub tool_choice: ToolChoice,
   pub max_output_tokens: Option<u64>,
   pub temperature: Option<f32>,
   pub thinking: ThinkingLevel,
@@ -120,6 +157,7 @@ impl ModelRequest {
       system: None,
       messages,
       tools: Vec::new(),
+      tool_choice: ToolChoice::Auto,
       max_output_tokens: None,
       temperature: None,
       thinking: ThinkingLevel::default(),
@@ -134,6 +172,11 @@ impl ModelRequest {
 
   pub fn with_tools(mut self, tools: Vec<ToolSpec>) -> Self {
     self.tools = tools;
+    self
+  }
+
+  pub fn with_tool_choice(mut self, choice: ToolChoice) -> Self {
+    self.tool_choice = choice;
     self
   }
 
@@ -565,8 +608,20 @@ mod tests {
       name: "read".into(),
       description: "read a file".into(),
       parameters: serde_json::json!({"type": "object"}),
+      sampling_constraint: None,
     }]);
     assert!(with_tools.estimate_tokens() > small.estimate_tokens());
+  }
+
+  #[test]
+  fn older_tool_specs_default_to_no_sampling_constraint() {
+    let spec: ToolSpec = serde_json::from_value(serde_json::json!({
+      "name": "read",
+      "description": "read a file",
+      "parameters": {"type": "object"}
+    }))
+    .unwrap();
+    assert_eq!(spec.sampling_constraint, None);
   }
 
   #[test]

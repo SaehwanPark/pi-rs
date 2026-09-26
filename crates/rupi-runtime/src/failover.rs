@@ -11,7 +11,7 @@
 //! takeover, because a second model does not fix a request that is simply too big
 //! — compaction does, and that is the context engine's job.
 
-use rupi_core::{CapabilityGap, ModelCapabilities, ModelFailureKind, ModelRef};
+use rupi_core::{CapabilityGap, ModelCapabilities, ModelFailure, ModelFailureKind, ModelRef};
 
 /// What the runtime decided about a failed request.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,12 +89,9 @@ impl FailoverPolicy {
   ///
   /// `attempt` counts requests already made against the *current* model for this
   /// turn, starting at 1.
-  pub fn decide(
-    &self,
-    kind: ModelFailureKind,
-    attempt: u32,
-    partial_output_emitted: bool,
-  ) -> Recovery {
+  pub fn decide(&self, failure: &ModelFailure) -> Recovery {
+    let kind = failure.kind;
+    let attempt = failure.attempts;
     // A cancelled turn is not a fault to recover from: the user asked us to stop,
     // and switching models in order to keep going would override that.
     if matches!(kind, ModelFailureKind::Cancelled) {
@@ -104,13 +101,13 @@ impl FailoverPolicy {
     // Once output has been streamed, restarting would duplicate committed content
     // in the transcript. Continuing across a model boundary is a different
     // feature from retrying, so this aborts rather than inventing it here.
-    if partial_output_emitted {
+    if failure.partial_output_emitted {
       return Recovery::Abort;
     }
 
     // Retry transient availability failures against the model that was asked,
     // until the attempt budget is spent.
-    if kind.is_retryable() && attempt < self.max_attempts {
+    if failure.safe_to_retry() && attempt < self.max_attempts {
       return Recovery::Retry {
         attempt,
         max_attempts: self.max_attempts,
@@ -178,11 +175,31 @@ mod tests {
       .requiring(tool_use_primary())
   }
 
+  fn recovery(
+    policy: &FailoverPolicy,
+    kind: ModelFailureKind,
+    attempt: u32,
+    partial_output: bool,
+  ) -> Recovery {
+    let failure = ModelFailure::new(
+      kind,
+      if partial_output {
+        rupi_core::FailurePhase::Streaming
+      } else {
+        rupi_core::FailurePhase::PreRequest
+      },
+      "scripted failure",
+    )
+    .with_attempts(attempt)
+    .with_partial_output(partial_output);
+    policy.decide(&failure)
+  }
+
   #[test]
   fn quality_failures_never_trigger_failover() {
     // The central prohibition: a bad answer is not an availability failure.
     for kind in [ModelFailureKind::Semantic, ModelFailureKind::Authentication] {
-      let decision = backup(true, 128_000).decide(kind, 1, false);
+      let decision = recovery(&backup(true, 128_000), kind, 1, false);
       assert_eq!(decision, Recovery::Abort, "{kind:?} must not recover");
     }
   }
@@ -196,7 +213,7 @@ mod tests {
       ModelFailureKind::RateLimited,
       ModelFailureKind::ProviderUnavailable,
     ] {
-      let decision = policy.decide(kind, 1, false);
+      let decision = recovery(&policy, kind, 1, false);
       assert_eq!(
         decision,
         Recovery::Retry {
@@ -209,9 +226,32 @@ mod tests {
   }
 
   #[test]
+  fn ambiguous_post_boundary_failure_skips_same_model_retry() {
+    let policy = backup(true, 128_000).with_max_attempts(5);
+    let failure = ModelFailure::new(
+      ModelFailureKind::Timeout,
+      rupi_core::FailurePhase::WaitingForResponse,
+      "request may have reached the provider",
+    )
+    .with_attempts(1);
+
+    let explicit_rejection = failure
+      .clone()
+      .with_replay_safety(rupi_core::RequestReplaySafety::Safe);
+    assert!(matches!(
+      policy.decide(&explicit_rejection),
+      Recovery::Retry { .. }
+    ));
+    assert!(
+      matches!(policy.decide(&failure), Recovery::Failover { .. }),
+      "an ambiguous request skips same-model retry and goes straight to failover"
+    );
+  }
+
+  #[test]
   fn retries_are_spent_before_takeover() {
     let policy = backup(true, 128_000).with_max_attempts(2);
-    let decision = policy.decide(ModelFailureKind::Transport, 2, false);
+    let decision = recovery(&policy, ModelFailureKind::Transport, 2, false);
     assert!(
       matches!(decision, Recovery::Failover { .. }),
       "after the budget: {decision:?}"
@@ -222,7 +262,7 @@ mod tests {
   fn streaming_output_forbids_a_retry() {
     // Restarting after output was committed would duplicate it in the transcript.
     let policy = backup(true, 128_000).with_max_attempts(5);
-    let decision = policy.decide(ModelFailureKind::Transport, 1, true);
+    let decision = recovery(&policy, ModelFailureKind::Transport, 1, true);
     assert_eq!(
       decision,
       Recovery::Abort,
@@ -232,7 +272,12 @@ mod tests {
 
   #[test]
   fn cancellation_is_not_a_fault() {
-    let decision = backup(true, 128_000).decide(ModelFailureKind::Cancelled, 1, false);
+    let decision = recovery(
+      &backup(true, 128_000),
+      ModelFailureKind::Cancelled,
+      1,
+      false,
+    );
     assert_eq!(decision, Recovery::Abort, "the user said stop");
   }
 
@@ -241,14 +286,14 @@ mod tests {
     let policy = FailoverPolicy::default()
       .with_max_attempts(1)
       .requiring(tool_use_primary());
-    let decision = policy.decide(ModelFailureKind::ProviderUnavailable, 1, false);
+    let decision = recovery(&policy, ModelFailureKind::ProviderUnavailable, 1, false);
     assert_eq!(decision, Recovery::Abort);
   }
 
   #[test]
   fn a_backup_that_cannot_do_the_work_is_refused_by_name() {
     let policy = backup(false, 128_000).with_max_attempts(1);
-    let decision = policy.decide(ModelFailureKind::ProviderUnavailable, 1, false);
+    let decision = recovery(&policy, ModelFailureKind::ProviderUnavailable, 1, false);
     match decision {
       Recovery::Refused { to, gaps } => {
         assert_eq!(to, model("backup"), "the refusal names what was refused");
@@ -274,7 +319,7 @@ mod tests {
         max_output_tokens: None,
       })
       .with_max_attempts(1);
-    match policy.decide(ModelFailureKind::ProviderUnavailable, 1, false) {
+    match recovery(&policy, ModelFailureKind::ProviderUnavailable, 1, false) {
       Recovery::Refused { gaps, .. } => assert_eq!(gaps, vec![CapabilityGap::Images]),
       other => panic!("expected a named refusal, got {other:?}"),
     }
@@ -288,7 +333,7 @@ mod tests {
       .with_max_attempts(1)
       .requiring(tool_use_primary());
     assert_eq!(
-      policy.decide(ModelFailureKind::ProviderUnavailable, 1, false),
+      recovery(&policy, ModelFailureKind::ProviderUnavailable, 1, false),
       Recovery::Abort
     );
   }
@@ -298,7 +343,7 @@ mod tests {
     // A window shortfall is recoverable by compaction, so it is reported as a gap
     // rather than as a refusal.
     let policy = backup(true, 32_000).with_max_attempts(1);
-    match policy.decide(ModelFailureKind::ProviderUnavailable, 1, false) {
+    match recovery(&policy, ModelFailureKind::ProviderUnavailable, 1, false) {
       Recovery::Failover { gaps, .. } => assert!(
         gaps
           .iter()
@@ -312,7 +357,7 @@ mod tests {
   fn context_overflow_is_not_a_takeover_trigger() {
     // The remedy is compaction. Switching models would hide the real fix.
     let policy = backup(true, 1_000_000).with_max_attempts(1);
-    let decision = policy.decide(ModelFailureKind::ContextOverflow, 1, false);
+    let decision = recovery(&policy, ModelFailureKind::ContextOverflow, 1, false);
     assert_eq!(decision, Recovery::Abort);
   }
 
@@ -322,7 +367,7 @@ mod tests {
     // request to the same endpoint would most likely fail the same way, so the
     // only useful recovery left is a different model.
     let policy = backup(true, 128_000).with_max_attempts(4);
-    let decision = policy.decide(ModelFailureKind::Protocol, 1, false);
+    let decision = recovery(&policy, ModelFailureKind::Protocol, 1, false);
     assert!(
       matches!(decision, Recovery::Failover { .. }),
       "{decision:?}"
@@ -332,7 +377,7 @@ mod tests {
       .with_max_attempts(4)
       .requiring(tool_use_primary());
     assert_eq!(
-      alone.decide(ModelFailureKind::Protocol, 1, false),
+      recovery(&alone, ModelFailureKind::Protocol, 1, false),
       Recovery::Abort
     );
   }
@@ -343,7 +388,7 @@ mod tests {
     for attempt in 1..4 {
       assert!(
         matches!(
-          policy.decide(ModelFailureKind::RateLimited, attempt, false),
+          recovery(&policy, ModelFailureKind::RateLimited, attempt, false),
           Recovery::Retry { .. }
         ),
         "attempt {attempt} should still retry"
@@ -351,7 +396,7 @@ mod tests {
     }
     assert!(
       matches!(
-        policy.decide(ModelFailureKind::RateLimited, 4, false),
+        recovery(&policy, ModelFailureKind::RateLimited, 4, false),
         Recovery::Failover { .. }
       ),
       "attempt 4 must stop retrying"

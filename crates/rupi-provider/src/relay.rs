@@ -201,6 +201,18 @@ fn serve(
   }
 
   let Some(mut remote) = connect_remote(target, upstream, connect_timeout, stop) else {
+    if !stop.load(Ordering::Acquire) {
+      // No provider connection was established and no request bytes were sent
+      // upstream. Return an explicit error instead of closing the local proxy
+      // socket, so the adapter can distinguish this safe retry from an
+      // ambiguous reset after dispatch.
+      let body = r#"{"error":{"message":"upstream connection failed before dispatch"}}"#;
+      let response = format!(
+        "HTTP/1.1 502 Bad Gateway\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+      );
+      let _ = client.write_all(response.as_bytes());
+    }
     return false;
   };
   let _ = remote.set_read_timeout(Some(POLL));

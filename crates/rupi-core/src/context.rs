@@ -45,7 +45,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::capability::ModelRef;
+use crate::{capability::ModelRef, config::ContextOverrides};
 
 /// The four reduction levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -198,6 +198,10 @@ pub trait ContextPolicy: Send + Sync {
   fn evaluate(&self, state: &ContextState) -> ContextDecision;
   /// Human-named profile in use, for `/context`.
   fn name(&self) -> &'static str;
+  /// Optional durable notice when configuration had to be adjusted for this window.
+  fn configuration_warning(&self, _state: &ContextState) -> Option<String> {
+    None
+  }
 }
 
 /// Built-in profiles. `balanced` is the default.
@@ -308,6 +312,53 @@ impl ContextThresholds {
       recent_target_tokens: ((effective_window.min(fractions.working_cap_tokens as f64))
         * fractions.recent_target) as u64,
     }
+    .normalized_for_window(window)
+  }
+
+  /// Apply explicit overrides and normalize their ordering for one active window.
+  ///
+  /// The returned flag is true when the requested numbers could not satisfy the
+  /// invariant ladder and had to be clamped.
+  pub fn with_overrides(self, overrides: &ContextOverrides, window: u64) -> (Self, bool) {
+    let requested = Self {
+      warn_tokens: overrides.warn_tokens.unwrap_or(self.warn_tokens),
+      reduce_tokens: overrides.reduce_tokens.unwrap_or(self.reduce_tokens),
+      compact_tokens: overrides.compact_tokens.unwrap_or(self.compact_tokens),
+      checkpoint_tokens: overrides
+        .checkpoint_tokens
+        .unwrap_or(self.checkpoint_tokens),
+      recent_target_tokens: overrides
+        .recent_target_tokens
+        .unwrap_or(self.recent_target_tokens),
+    };
+    let normalized = requested.normalized_for_window(window);
+    (normalized, normalized != requested)
+  }
+
+  /// Clamp absolute thresholds to a positive active window while preserving the
+  /// strict ordering required by the context-policy ladder.
+  pub fn normalized_for_window(self, window: u64) -> Self {
+    if window < 3 {
+      return Self {
+        warn_tokens: 0,
+        reduce_tokens: 0,
+        compact_tokens: 0,
+        checkpoint_tokens: 0,
+        recent_target_tokens: 0,
+      };
+    }
+    let compact_tokens = self.compact_tokens.clamp(1, window - 2);
+    let reduce_tokens = self.reduce_tokens.min(compact_tokens);
+    let warn_tokens = self.warn_tokens.min(reduce_tokens);
+    Self {
+      warn_tokens,
+      reduce_tokens,
+      compact_tokens,
+      checkpoint_tokens: self.checkpoint_tokens.clamp(compact_tokens + 1, window - 1),
+      recent_target_tokens: self
+        .recent_target_tokens
+        .min(compact_tokens.saturating_sub(1)),
+    }
   }
 
   /// Cooldown before another structural compaction of the same session.
@@ -329,6 +380,8 @@ impl ContextThresholds {
 pub struct ProfilePolicy {
   pub profile: ContextProfile,
   pub thresholds: ContextThresholds,
+  /// Explicit operator overrides applied after deriving each active window.
+  pub overrides: ContextOverrides,
   reference_window: u64,
 }
 
@@ -337,14 +390,67 @@ impl ProfilePolicy {
     Self {
       profile,
       thresholds: ContextThresholds::for_profile(profile, window),
+      overrides: ContextOverrides::default(),
       reference_window: window,
     }
+  }
+
+  /// Apply explicit thresholds to every active model window.
+  pub fn with_overrides(mut self, overrides: ContextOverrides) -> Self {
+    self.overrides = overrides;
+    self
+  }
+
+  /// Effective thresholds after deriving the requested active window, applying
+  /// overrides, and enforcing the threshold-ordering invariant.
+  pub fn thresholds_for_window(&self, window: u64) -> ContextThresholds {
+    self.thresholds_for_window_with_status(window).0
+  }
+
+  /// The window used when this policy was constructed.
+  pub fn reference_window(&self) -> u64 {
+    self.reference_window
+  }
+
+  fn base_thresholds_for_window(&self, window: u64) -> ContextThresholds {
+    if window == self.reference_window {
+      self.thresholds
+    } else {
+      ContextThresholds::for_profile(self.profile, window)
+    }
+  }
+
+  fn thresholds_for_window_with_status(&self, window: u64) -> (ContextThresholds, bool) {
+    self
+      .base_thresholds_for_window(window)
+      .with_overrides(&self.overrides, window)
   }
 }
 
 impl ContextPolicy for ProfilePolicy {
   fn name(&self) -> &'static str {
     self.profile.as_str()
+  }
+
+  fn configuration_warning(&self, state: &ContextState) -> Option<String> {
+    if state.window < 3 {
+      return Some(format!(
+        "active context window {} is too small to form an ordered threshold ladder",
+        state.window
+      ));
+    }
+    let (thresholds, adjusted) = self.thresholds_for_window_with_status(state.window);
+    adjusted.then(|| {
+      format!(
+        "context overrides were clamped for the active {}-token window (warn {}, reduce {}, compact {}, checkpoint {}, recent target {})",
+        state.window,
+        thresholds.warn_tokens,
+        thresholds.reduce_tokens,
+        thresholds.compact_tokens,
+        thresholds.checkpoint_tokens,
+        thresholds.recent_target_tokens,
+      )
+    })
   }
 
   /// Ladder order: overflow, checkpoint, ordinary compaction, payload
@@ -354,11 +460,16 @@ impl ContextPolicy for ProfilePolicy {
   /// worst outcome for predictability.
   fn evaluate(&self, state: &ContextState) -> ContextDecision {
     let tokens = state.effective_tokens();
-    let thresholds = if state.window == self.reference_window {
-      self.thresholds
-    } else {
-      ContextThresholds::for_profile(self.profile, state.window)
-    };
+    if state.window < 3 {
+      return ContextDecision {
+        action: ContextAction::Refuse {
+          reason: "active context window is too small to form valid policy thresholds".into(),
+        },
+        tokens,
+        level: None,
+      };
+    }
+    let thresholds = self.thresholds_for_window(state.window);
 
     if state.overflow_observed {
       if tokens > thresholds.compact_tokens && state.at_safe_boundary {
@@ -809,6 +920,56 @@ mod tests {
       ),
       "the primary's 262k window must not leave the 32k backup context below threshold: {decision:?}"
     );
+  }
+
+  #[test]
+  fn explicit_overrides_follow_the_active_window_and_preserve_the_ladder() {
+    let policy =
+      ProfilePolicy::new(ContextProfile::Balanced, 262_144).with_overrides(ContextOverrides {
+        warn_tokens: Some(30_000),
+        reduce_tokens: Some(28_000),
+        compact_tokens: Some(24_000),
+        checkpoint_tokens: Some(15_000),
+        recent_target_tokens: Some(30_000),
+      });
+    let backup_window = 32_768;
+    let thresholds = policy.thresholds_for_window(backup_window);
+
+    assert_eq!(thresholds.compact_tokens, 24_000);
+    assert_eq!(thresholds.warn_tokens, 24_000);
+    assert_eq!(thresholds.reduce_tokens, 24_000);
+    assert_eq!(thresholds.checkpoint_tokens, 24_001);
+    assert_eq!(thresholds.recent_target_tokens, 23_999);
+    assert!(
+      policy
+        .configuration_warning(&ContextState::zero(backup_window))
+        .is_some()
+    );
+
+    let decision = policy.evaluate(&ContextState {
+      estimated_tokens: 24_000,
+      since_last_compaction_ms: 600_000,
+      ..ContextState::zero(backup_window)
+    });
+    assert!(matches!(
+      decision.action,
+      ContextAction::Compact {
+        level: ContextLevel::L1Ordinary,
+        ..
+      }
+    ));
+  }
+
+  #[test]
+  fn normalized_thresholds_obey_active_window_bounds() {
+    for window in [4, 16_000, 32_768, 262_144, 1_000_000] {
+      let thresholds = ContextThresholds::for_profile(ContextProfile::Balanced, window);
+      assert!(thresholds.warn_tokens <= thresholds.reduce_tokens);
+      assert!(thresholds.reduce_tokens <= thresholds.compact_tokens);
+      assert!(thresholds.compact_tokens < thresholds.checkpoint_tokens);
+      assert!(thresholds.checkpoint_tokens < window);
+      assert!(thresholds.recent_target_tokens < thresholds.compact_tokens);
+    }
   }
 
   #[test]

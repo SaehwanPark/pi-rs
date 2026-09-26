@@ -647,6 +647,7 @@ fn write_config_with(root: &Path, base_url: &str, change: impl Fn(&mut RuntimeCo
     connect_timeout_ms: None,
     read_timeout_ms: None,
     request_timeout_ms: None,
+    openai_compat: Default::default(),
   });
   change(&mut config);
   let path = root.join("config.json");
@@ -754,6 +755,7 @@ fn session_manual_failover_and_switch_back_across_turns() {
       connect_timeout_ms: None,
       read_timeout_ms: None,
       request_timeout_ms: None,
+      openai_compat: Default::default(),
     });
   });
   let surface = SurfaceArgs::default();

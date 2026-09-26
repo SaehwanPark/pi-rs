@@ -34,6 +34,9 @@ pub struct Decoder {
   /// What the endpoint declared about its reasoning output, which is what decides
   /// the provenance claim of any thinking text decoded from it.
   exposure: ReasoningExposure,
+  /// Original schemas for calls whose optional nulls encode omitted fields
+  /// under this endpoint's strict-sampling dialect.
+  strict_tool_schemas: std::collections::BTreeMap<String, Value>,
   /// Internal slots are separate from provider indexes and IDs. The provider
   /// may omit either correlation field, and their numeric/string namespaces can
   /// overlap.
@@ -81,6 +84,7 @@ impl Decoder {
   pub fn new(exposure: ReasoningExposure) -> Self {
     Self {
       exposure,
+      strict_tool_schemas: std::collections::BTreeMap::new(),
       tools: std::collections::BTreeMap::new(),
       tool_indices: std::collections::HashMap::new(),
       tool_ids: std::collections::HashMap::new(),
@@ -93,6 +97,15 @@ impl Decoder {
       output_tokens: None,
       emitted_output: false,
     }
+  }
+
+  /// Remember the original schemas for tools sent with strict sampling.
+  pub(crate) fn with_strict_tool_schemas(
+    mut self,
+    schemas: std::collections::BTreeMap<String, Value>,
+  ) -> Self {
+    self.strict_tool_schemas = schemas;
+    self
   }
 
   /// Provenance for thinking text arriving now.
@@ -248,7 +261,7 @@ impl Decoder {
           id.as_str()
         )));
       }
-      let (arguments, argument_error) = if builder.arguments.trim().is_empty() {
+      let (mut arguments, argument_error) = if builder.arguments.trim().is_empty() {
         (Value::Object(serde_json::Map::new()), None)
       } else {
         match serde_json::from_str::<Value>(&builder.arguments) {
@@ -263,6 +276,11 @@ impl Decoder {
           ),
         }
       };
+      if argument_error.is_none()
+        && let Some(schema) = self.strict_tool_schemas.get(&builder.name)
+      {
+        restore_omitted_optional_arguments(&mut arguments, schema);
+      }
       let reason = match (builder.correlation_error, argument_error) {
         (Some(correlation), Some(arguments)) => Some(format!("{correlation}; {arguments}")),
         (Some(reason), None) | (None, Some(reason)) => Some(reason),
@@ -591,9 +609,16 @@ pub fn http_failure(
 ) -> rupi_core::ModelFailure {
   let message = error_message(body);
   let kind = rupi_core::ModelFailure::classify_http(status, &message);
+  let replay_safety =
+    if status == 429 || (500..=599).contains(&status) || phase == FailurePhase::PreRequest {
+      rupi_core::RequestReplaySafety::Safe
+    } else {
+      rupi_core::RequestReplaySafety::AmbiguousPostBoundary
+    };
   rupi_core::ModelFailure::new(kind, phase, summarize(&message))
     .with_status(status)
     .with_retry_after_ms(retry_after_ms(retry_after, body).unwrap_or(0))
+    .with_replay_safety(replay_safety)
     .with_detail(truncate(body, MAX_ERROR_BODY_BYTES / 4))
 }
 
@@ -619,8 +644,7 @@ pub fn stream_failure(error: &io::Error, emitted_output: bool) -> rupi_core::Mod
   ) {
     failure.kind = rupi_core::ModelFailureKind::Timeout;
   }
-  failure.partial_output_emitted = emitted_output;
-  failure
+  failure.with_partial_output(emitted_output)
 }
 
 /// The user-visible consequence of a cancel: not an availability failure.
@@ -711,6 +735,45 @@ fn truncate(text: &str, max_chars: usize) -> String {
   }
   let kept: String = text.chars().take(max_chars).collect();
   format!("{kept}\u{2026}({} chars truncated)", count - max_chars)
+}
+
+/// Remove null sentinels for optional fields after strict-schema sampling.
+///
+/// OpenAI-style strict schemas make every property required and represent an
+/// omitted optional value as `null`. Restore the original argument object
+/// shape before the runtime's canonical schema validation and tool dispatch.
+fn restore_omitted_optional_arguments(value: &mut Value, schema: &Value) {
+  if let (Some(arguments), Some(properties)) = (
+    value.as_object_mut(),
+    schema.get("properties").and_then(Value::as_object),
+  ) {
+    let required: std::collections::HashSet<&str> = schema
+      .get("required")
+      .and_then(Value::as_array)
+      .into_iter()
+      .flatten()
+      .filter_map(Value::as_str)
+      .collect();
+    let omitted: Vec<String> = properties
+      .keys()
+      .filter(|name| {
+        !required.contains(name.as_str()) && arguments.get(*name).is_some_and(Value::is_null)
+      })
+      .cloned()
+      .collect();
+    for name in omitted {
+      arguments.remove(&name);
+    }
+    for (name, child_schema) in properties {
+      if let Some(child) = arguments.get_mut(name) {
+        restore_omitted_optional_arguments(child, child_schema);
+      }
+    }
+  } else if let (Some(items), Some(values)) = (schema.get("items"), value.as_array_mut()) {
+    for item in values {
+      restore_omitted_optional_arguments(item, items);
+    }
+  }
 }
 
 #[cfg(test)]
@@ -863,6 +926,49 @@ mod tests {
       }
       other => panic!("expected a tool call, got {other:?}"),
     }
+  }
+
+  #[test]
+  fn strict_sampling_null_sentinels_restore_optional_argument_omission() {
+    let schema = json!({
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string"},
+        "offset": {"type": "integer"},
+        "options": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {"mode": {"type": "string"}}
+        }
+      },
+      "required": ["path"]
+    });
+    let mut decoder = Decoder::new(ReasoningExposure::None)
+      .with_strict_tool_schemas(std::collections::BTreeMap::from([("read".into(), schema)]));
+    let mut collector = Collector::default();
+    decoder
+      .chunk(
+        &chunk(json!({
+          "tool_calls": [{
+            "index": 0,
+            "id": "call_1",
+            "function": {
+              "name": "read",
+              "arguments": r#"{"path":"a.rs","offset":null,"options":{"mode":null}}"#
+            }
+          }]
+        })),
+        &mut collector,
+      )
+      .unwrap();
+    decoder
+      .finish(StreamEnd::DoneSentinel, &mut collector)
+      .unwrap();
+    let ProviderEvent::ToolCall(call) = &collector.events()[0] else {
+      panic!("strictly sampled calls remain valid tool calls")
+    };
+    assert_eq!(call.arguments, json!({"path": "a.rs", "options": {}}));
   }
 
   #[test]
@@ -1293,6 +1399,10 @@ mod tests {
     assert_eq!(failure.kind, ModelFailureKind::Transport);
     assert_eq!(failure.phase, FailurePhase::Streaming);
     assert!(failure.partial_output_emitted);
+    assert_eq!(
+      failure.replay_safety,
+      rupi_core::RequestReplaySafety::CommittedOutput
+    );
   }
 
   #[test]
@@ -1324,6 +1434,7 @@ mod tests {
     assert_eq!(failure.status, Some(429));
     assert_eq!(failure.retry_after_ms, Some(2_000));
     assert_eq!(failure.message, "Too many requests");
+    assert!(failure.safe_to_retry(), "an explicit 429 is replay-safe");
 
     assert_eq!(
       http_failure(
@@ -1335,9 +1446,11 @@ mod tests {
       .kind,
       ModelFailureKind::Authentication
     );
-    assert_eq!(
-      http_failure(500, "internal", None, FailurePhase::WaitingForResponse).kind,
-      ModelFailureKind::ProviderUnavailable
+    let unavailable = http_failure(500, "internal", None, FailurePhase::WaitingForResponse);
+    assert_eq!(unavailable.kind, ModelFailureKind::ProviderUnavailable);
+    assert!(
+      unavailable.safe_to_retry(),
+      "an explicit 5xx is replay-safe"
     );
   }
 

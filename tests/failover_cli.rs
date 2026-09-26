@@ -77,6 +77,7 @@ fn endpoint(model: &str, base_url: Option<String>) -> ModelEndpoint {
     connect_timeout_ms: None,
     read_timeout_ms: None,
     request_timeout_ms: None,
+    openai_compat: Default::default(),
   }
 }
 
@@ -241,6 +242,55 @@ fn a_down_primary_hands_the_turn_to_the_backup() {
   // The primary got its full attempt budget, and only then did the work move.
   assert_eq!(scene.primary.requests().len(), 2, "retry, then yield");
   assert_eq!(scene.standby.requests().len(), 1);
+}
+
+#[test]
+fn an_ambiguous_post_timeout_skips_the_fake_same_model_retry() {
+  let temp = TempDir::new().expect("state root");
+  let root = temp.path();
+  let primary = FakeServer::answer_delayed(
+    vec![text_response("late primary response")],
+    std::time::Duration::from_millis(750),
+  );
+  let standby = FakeServer::answer(vec![text_response("served by the standby")]);
+  let workspace = root.join("workspace");
+  fs::create_dir_all(&workspace).expect("workspace");
+  let mut config = config_at(
+    root,
+    &primary.base_url(),
+    Backup::Served(standby.base_url()),
+  );
+  config
+    .endpoints
+    .iter_mut()
+    .find(|endpoint| endpoint.model == "agent")
+    .expect("primary endpoint")
+    .read_timeout_ms = Some(100);
+  let config = write_config_from(root, &config);
+
+  let output = run(&config, &workspace, "go");
+  let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+  let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+  assert!(output.status.success(), "{stderr}");
+  assert_eq!(stdout, "served by the standby\n");
+  assert_eq!(primary.requests().len(), 1, "one ambiguous POST only");
+  assert_eq!(standby.requests().len(), 1, "the backup answers directly");
+  let events = trace(&root.join("state"));
+  assert_eq!(
+    events
+      .iter()
+      .filter(|event| event.kind == "model_retry")
+      .count(),
+    0,
+    "no same-adapter retry is recorded when quarantine would reject it"
+  );
+  assert_eq!(
+    events
+      .iter()
+      .filter(|event| event.kind == "model_failover")
+      .count(),
+    1
+  );
 }
 
 #[test]

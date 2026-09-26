@@ -819,7 +819,13 @@ Compaction happens too often     -> relaxed
 
 The model's reported context window may lower thresholds for constrained models.
 
-Large advertised windows should not automatically increase thresholds.
+Large advertised windows should not automatically increase thresholds. Explicit numeric
+`ContextOverrides` are applied after deriving the profile thresholds for each active model
+window, including a failover backup. Values are normalized to preserve
+`warn <= reduce <= compact < checkpoint < window` and `recent_target < compact`; any
+normalization is recorded as a durable diagnostic. When opt-in adaptive mode observes a
+model-specific performance knee, the knee is applied after the overrides and may only
+lower those thresholds further.
 
 Advanced numerical configuration can exist for specialized benchmarking.
 
@@ -1099,7 +1105,19 @@ fails ----+
 backup model
 ```
 
-Retry should precede failover.
+Retry should precede failover only when replay is proven safe. A retryable failure kind
+alone is insufficient: each `ModelFailure` carries `RequestReplaySafety` with `Safe`,
+`AmbiguousPostBoundary`, or `CommittedOutput`. A known pre-dispatch failure or an explicit
+retry-safe HTTP response may retry; an ambiguous POST skips same-model retry and moves
+directly to the configured failover decision. Committed output is not eligible for generic
+retries or failover replay.
+
+An explicit output-limit completion (`length` or `max_tokens`) has one narrow exception:
+when reported output usage is known and strictly below the request's explicit output
+ceiling, and pre-turn history can be safely compacted, the runtime may retry once on the
+same model. The failed deltas and unexecuted tool calls remain canonical trace evidence
+but are omitted from model-visible projections; no call from the incomplete response is
+executed. Full-ceiling, unmeasured, or uncompactable cases remain incomplete.
 
 ### Eligible automatic failover cases
 
@@ -1172,11 +1190,15 @@ Read-only operations are more safely retryable.
 
 For explicitly bounded implementation workflows, an opt-in progress boundary may count
 model requests that invoke tools without calling a configured progress tool. When the
-boundary activates, the runtime records its instruction and narrows the next request's
-tool schemas to the configured progress tools (or permitted mutating tools when no
-allowlist is supplied). This is a model-guidance and exposure boundary only: it must not
-claim that a host mutation succeeded, and the normal `Requested`, `Started`, `Succeeded`,
-`Failed`, or `Unknown` lifecycle remains authoritative. A successful configured progress
+boundary activates, the runtime records its instruction, narrows the next request's tool
+schemas to the configured progress tools (or permitted mutating tools when no allowlist is
+supplied), and requests required tool choice where the provider supports it. That hint is
+not enforcement: a text-only completion while the boundary remains active is retained in
+the canonical trace but excluded from model-visible history and final report text, then
+followed by a corrective request. Exhausting the request budget without a successful
+configured progress tool is `BudgetExhausted`, never `Completed`. The normal `Requested`,
+`Started`, `Succeeded`, `Failed`, or `Unknown` lifecycle remains authoritative; an
+attempt or a failed tool does not satisfy the boundary. A successful configured progress
 tool satisfies the one-shot boundary for the rest of that turn. The default remains
 disabled so read-only tasks are not forced to mutate.
 

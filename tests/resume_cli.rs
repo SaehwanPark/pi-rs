@@ -72,6 +72,7 @@ fn write_config_at(root: &Path, base_url: &str) -> PathBuf {
     connect_timeout_ms: None,
     read_timeout_ms: None,
     request_timeout_ms: None,
+    openai_compat: Default::default(),
   });
   let path = root.join("config.json");
   fs::write(

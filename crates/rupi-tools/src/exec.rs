@@ -77,6 +77,7 @@ impl Tool for ExecTool {
   fn arguments_schema(&self) -> serde_json::Value {
     json!({
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "command": { "type": "string", "description": EXEC_COMMAND_DESCRIPTION },
         "cwd": { "type": "string", "description": "Working directory, relative to the workspace." },

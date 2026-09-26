@@ -10,9 +10,9 @@
 //!
 //! - **One model at a time.** Exactly one epoch is active; a change of model is an
 //!   epoch transition with a recorded reason, never an implicit swap.
-//! - **A request is re-issued only while nothing has been streamed.** Once output
-//!   reaches the user it is committed content; restarting would duplicate a
-//!   half-answer, which is worse than a visible failure.
+//! - Ordinary request retries require that nothing was streamed. The one bounded
+//!   output-limit recovery is an explicit exception: failed deltas stay out of
+//!   future model context and tools from the incomplete response never execute.
 //! - **Every tool call reaches a terminal lifecycle state**, including calls that
 //!   were interrupted or refused. A tool call with no terminal event is a bug here.
 //! - **Context is never silently truncated.** An oversized request is refused, and
@@ -34,9 +34,9 @@ use rupi_core::{
   ModelEpochStarted, ModelFailover, ModelFailure, ModelFailureKind, ModelProvider, ModelRef,
   ModelRequest, ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta,
   ReasoningProvenance, ReductionReason, Role, SessionEndReason, SessionEnded, SessionId,
-  SessionStarted, SinkError, ThinkingLevel, ToolCallBlock, ToolCompleted, ToolExecutionState,
-  ToolFailed, ToolOutcome, ToolProgress, ToolRequested, ToolResultBlock, ToolStarted, ToolUnknown,
-  TraceId, TurnCompleted, TurnId, TurnStatus, UserMessage,
+  SessionStarted, SinkError, ThinkingLevel, ToolCallBlock, ToolChoice, ToolCompleted,
+  ToolExecutionState, ToolFailed, ToolOutcome, ToolProgress, ToolRequested, ToolResultBlock,
+  ToolStarted, ToolUnknown, TraceId, TurnCompleted, TurnId, TurnStatus, UserMessage,
 };
 use rupi_tools::{Approval, ApprovalGate, Executed, ToolRegistry};
 
@@ -453,6 +453,8 @@ pub struct TurnLoop<'a> {
   /// an error would let a caller catch the error and issue a provider request
   /// against history whose side effects are still uncertain.
   recovery_blocked: bool,
+  /// Active model windows for which threshold-normalization diagnostics were emitted.
+  reported_context_adjustments: BTreeSet<(String, u64)>,
   context_epoch: u32,
   /// Leading checkpoint capsule messages protected from ordinary compaction.
   checkpoint_floor: usize,
@@ -523,6 +525,7 @@ impl<'a> TurnLoop<'a> {
       resumed: false,
       interrupted_tools: Vec::new(),
       recovery_blocked: false,
+      reported_context_adjustments: BTreeSet::new(),
       context_epoch: 0,
       checkpoint_floor: 0,
       checkpoint_cited_from: None,
@@ -1120,11 +1123,12 @@ impl<'a> TurnLoop<'a> {
     // caller's side they cost the same. Keep one request in reserve for an
     // explicit no-tool completion assessment whenever the configured budget allows
     // it; a budget of one remains a useful single ordinary request.
-    let normal_request_limit = if self.max_requests > 1 {
+    let mut normal_request_limit = if self.max_requests > 1 {
       self.max_requests - 1
     } else {
       self.max_requests
     };
+    let mut truncation_recovery_used = false;
     while self.requests.load(Ordering::SeqCst) < normal_request_limit {
       if cancel.is_cancelled() {
         return self.finish(report, TurnStatus::Cancelled, clock, Some(turn_id.clone()));
@@ -1147,9 +1151,40 @@ impl<'a> TurnLoop<'a> {
             )?;
             return self.finish_failure(report, failure, clock, turn_id.clone());
           }
-          match self.recover_context_overflow(&turn_id, &mut turn_history_start)? {
+          match self.recover_prior_context(&turn_id, &mut turn_history_start)? {
             true => {
               overflow_recovery_used = true;
+              continue;
+            }
+            false => return self.finish_failure(report, failure, clock, turn_id.clone()),
+          }
+        }
+        Err(TurnFailure::OutputTruncated {
+          failure,
+          actual_output_tokens,
+          requested_output_tokens,
+        }) => {
+          if truncation_recovery_used {
+            self.diagnostic(
+              Some(turn_id.clone()),
+              DiagnosticLevel::Warn,
+              "output-limit recovery was already used for this turn; leaving the incomplete response failed",
+            )?;
+            return self.finish_failure(report, failure, clock, turn_id.clone());
+          }
+          match self.recover_prior_context(&turn_id, &mut turn_history_start)? {
+            true => {
+              truncation_recovery_used = true;
+              // Prefer the bounded retry to an extra no-tool assessment of a
+              // response that the provider explicitly marked incomplete.
+              normal_request_limit = self.max_requests;
+              self.diagnostic(
+                Some(turn_id.clone()),
+                DiagnosticLevel::Info,
+                format!(
+                  "output-limit response used {actual_output_tokens} of {requested_output_tokens} requested tokens; prior context compacted and one same-model retry is allowed",
+                ),
+              )?;
               continue;
             }
             false => return self.finish_failure(report, failure, clock, turn_id.clone()),
@@ -1164,13 +1199,23 @@ impl<'a> TurnLoop<'a> {
         }
         Err(TurnFailure::Sink(error)) => return Err(TurnError::from(error)),
       };
+      let rejected_completion = self.progress_boundary_active && response.calls.is_empty();
       let RecordedResponse {
         assistant_event_id,
         calls,
         rejected_calls,
-      } = self.record_response(response, &mut report)?;
+      } = self.record_response(response, &mut report, !rejected_completion)?;
 
       if calls.is_empty() {
+        if rejected_completion {
+          self.append_progress_retry_instruction(&turn_id)?;
+          self.diagnostic(
+            Some(turn_id.clone()),
+            DiagnosticLevel::Warn,
+            "progress boundary rejected a text-only completion; a configured progress tool must succeed before the turn can complete",
+          )?;
+          continue;
+        }
         // The model answered instead of asking: the turn is over.
         return self.finish(report, TurnStatus::Completed, clock, Some(turn_id.clone()));
       }
@@ -1182,6 +1227,7 @@ impl<'a> TurnLoop<'a> {
           &calls,
           progress,
           "finalization mode does not execute tools",
+          true,
         )?;
         report.budget_exhausted = true;
         self.diagnostic(
@@ -1214,6 +1260,21 @@ impl<'a> TurnLoop<'a> {
       self.observe_progress(&turn_id, progress_succeeded)?;
     }
 
+    if self.progress_boundary_active {
+      report.budget_exhausted = true;
+      self.diagnostic(
+        Some(turn_id.clone()),
+        DiagnosticLevel::Warn,
+        "request budget exhausted while the required progress boundary remained unsatisfied; the session can be resumed",
+      )?;
+      return self.finish(
+        report,
+        TurnStatus::BudgetExhausted,
+        clock,
+        Some(turn_id.clone()),
+      );
+    }
+
     if self.max_requests > 1 && self.requests.load(Ordering::SeqCst) < self.max_requests {
       if cancel.is_cancelled() {
         report.requests = self.requests.load(Ordering::SeqCst);
@@ -1234,7 +1295,11 @@ impl<'a> TurnLoop<'a> {
           report.requests = self.requests.load(Ordering::SeqCst);
           return self.finish(report, TurnStatus::Cancelled, clock, Some(turn_id.clone()));
         }
-        Err(TurnFailure::ProviderOverflow(failure) | TurnFailure::Fatal(failure)) => {
+        Err(
+          TurnFailure::ProviderOverflow(failure)
+          | TurnFailure::Fatal(failure)
+          | TurnFailure::OutputTruncated { failure, .. },
+        ) => {
           report.requests = self.requests.load(Ordering::SeqCst);
           return self.finish_failure(report, failure, clock, turn_id.clone());
         }
@@ -1244,7 +1309,7 @@ impl<'a> TurnLoop<'a> {
         assistant_event_id,
         calls,
         ..
-      } = self.record_response(response, &mut report)?;
+      } = self.record_response(response, &mut report, true)?;
       report.budget_exhausted = true;
       if calls.is_empty() {
         self.diagnostic(
@@ -1266,6 +1331,7 @@ impl<'a> TurnLoop<'a> {
           &calls,
           progress,
           "request-budget finalization does not execute tools",
+          true,
         )?;
         self.diagnostic(
           Some(turn_id.clone()),
@@ -1547,10 +1613,11 @@ impl<'a> TurnLoop<'a> {
     Err(TurnError::Unavailable(failure))
   }
 
-  /// Prepare one bounded local recovery candidate after an uncommitted provider
-  /// overflow. The live message vector is not changed until the candidate has
-  /// been assembled with the same request shape used for production requests.
-  fn recover_context_overflow(
+  /// Prepare one bounded local recovery candidate by compacting only history
+  /// that predates this turn. The live message vector is not changed until the
+  /// candidate has been assembled with the same request shape used for production
+  /// requests.
+  fn recover_prior_context(
     &mut self,
     turn_id: &TurnId,
     turn_history_start: &mut usize,
@@ -1561,7 +1628,7 @@ impl<'a> TurnLoop<'a> {
       self.diagnostic(
         Some(turn_id.clone()),
         DiagnosticLevel::Warn,
-        "provider rejected the request for context overflow; current-turn content alone cannot be compacted safely",
+        "model response needs recovery, but current-turn content alone cannot be compacted safely",
       )?;
       return Ok(false);
     }
@@ -1569,7 +1636,7 @@ impl<'a> TurnLoop<'a> {
       self.diagnostic(
         Some(turn_id.clone()),
         DiagnosticLevel::Warn,
-        "provider rejected the request for context overflow; request budget cannot pay for a reissue",
+        "model response needs recovery, but the request budget cannot pay for a reissue",
       )?;
       return Ok(false);
     }
@@ -1584,7 +1651,7 @@ impl<'a> TurnLoop<'a> {
         self.diagnostic(
           Some(turn_id.clone()),
           DiagnosticLevel::Info,
-          "provider rejected the request for context overflow; existing compaction already bounded the context, retrying once",
+          "existing context compaction already bounded the request; retrying once",
         )?;
         return Ok(true);
       }
@@ -1630,7 +1697,7 @@ impl<'a> TurnLoop<'a> {
       self.diagnostic(
         Some(turn_id.clone()),
         DiagnosticLevel::Warn,
-        "provider rejected the request for context overflow; no bounded compacted request fits the active context window",
+        "no bounded compacted request fits the active context window; recovery is unavailable",
       )?;
       return Ok(false);
     };
@@ -1638,7 +1705,7 @@ impl<'a> TurnLoop<'a> {
     self.diagnostic(
       Some(turn_id.clone()),
       DiagnosticLevel::Info,
-      "provider rejected the request for context overflow; compacting prior history and retrying once",
+      "compacting prior history for one bounded model-request recovery",
     )?;
     let replaced = self.compact_prefix(turn_id, prefix_end, &summary)?;
     if replaced == 0 {
@@ -1821,9 +1888,8 @@ impl<'a> TurnLoop<'a> {
         Err(failure) => {
           // Output reached the user the moment it was emitted, so it is recorded on
           // the failure rather than inferred afterwards.
-          let mut failure = failure;
-          failure.partial_output_emitted |= committed;
-          failure
+          let partial_output_emitted = failure.partial_output_emitted || committed;
+          failure.with_partial_output(partial_output_emitted)
         }
       };
 
@@ -1874,6 +1940,9 @@ impl<'a> TurnLoop<'a> {
           &calls,
           progress,
           "model response did not complete; tool was not executed",
+          failed_usage
+            .as_ref()
+            .is_none_or(|usage| !usage.stopped_at_output_limit()),
         )
         .map_err(TurnFailure::from)?;
       self
@@ -1881,8 +1950,10 @@ impl<'a> TurnLoop<'a> {
           Some(turn_id.clone()),
           DiagnosticLevel::Warn,
           format!(
-            "model request failed ({}): {}",
-            failure.kind, failure.message
+            "model request failed ({}; replay safety {}): {}",
+            failure.kind,
+            failure.replay_safety.as_str(),
+            failure.message
           ),
         )
         .map_err(TurnFailure::from)?;
@@ -1892,6 +1963,21 @@ impl<'a> TurnLoop<'a> {
         // as an outage would be wrong twice over: it is not a fault, and recovery
         // must not run.
         return Err(TurnFailure::Cancelled);
+      }
+      let recoverable_output_truncation = failed_usage.as_ref().and_then(|usage| {
+        let requested = request.max_output_tokens?;
+        let actual = usage.output_tokens?;
+        (usage.stopped_at_output_limit() && actual < requested).then_some((actual, requested))
+      });
+      if let Some((actual_output_tokens, requested_output_tokens)) = recoverable_output_truncation {
+        // This special path stays on the current model and bypasses generic
+        // failover: the response is not projected into model context, and every
+        // decoded tool call was closed without execution above.
+        return Err(TurnFailure::OutputTruncated {
+          failure,
+          actual_output_tokens,
+          requested_output_tokens,
+        });
       }
       // Provider overflow is a distinct outcome. It is eligible for the outer
       // turn's one-shot local compaction only when this request committed no
@@ -1972,11 +2058,7 @@ impl<'a> TurnLoop<'a> {
     if cancel.is_cancelled() || matches!(failure.kind, ModelFailureKind::Cancelled) {
       return Ok(Action::Stop);
     }
-    let decision = self.failover.decide(
-      failure.kind,
-      failure.attempts,
-      failure.partial_output_emitted,
-    );
+    let decision = self.failover.decide(failure);
     match decision {
       Recovery::Retry {
         attempt: which,
@@ -2735,6 +2817,7 @@ impl<'a> TurnLoop<'a> {
     messages: Vec<Message>,
   ) -> ModelRequest {
     let capabilities = provider.capabilities();
+    let max_output_tokens = capabilities.max_output_tokens;
     let may_approve_mutations =
       self.interactive_tool_approval || self.tools.auto_approves_mutating();
     let tools = if self.tools_enabled && capabilities.tools {
@@ -2754,8 +2837,14 @@ impl<'a> TurnLoop<'a> {
     } else {
       Vec::new()
     };
+    let tool_choice = if self.progress_boundary_active && !tools.is_empty() {
+      ToolChoice::Required
+    } else {
+      ToolChoice::Auto
+    };
     let mut request = ModelRequest::new(provider.model().clone(), capabilities, messages)
       .with_tools(tools)
+      .with_tool_choice(tool_choice)
       .with_thinking(self.thinking);
     let mut system = self.system.clone().unwrap_or_default();
     if !system.is_empty() {
@@ -2763,6 +2852,7 @@ impl<'a> TurnLoop<'a> {
     }
     system.push_str(&tool_availability_prompt(&request.tools));
     request = request.with_system(system);
+    request.max_output_tokens = max_output_tokens;
     request
   }
 
@@ -2861,6 +2951,29 @@ impl<'a> TurnLoop<'a> {
     Ok(())
   }
 
+  /// Correct a response that tried to complete without satisfying the boundary.
+  fn append_progress_retry_instruction(&mut self, turn_id: &TurnId) -> Result<(), TurnError> {
+    let tools = if self.progress_tool_names.is_empty() {
+      "a permitted mutating tool".to_string()
+    } else {
+      self.progress_tool_names.join(", ")
+    };
+    let text = format!(
+      "Runtime progress boundary remains unsatisfied: your previous response did not make a successful progress-tool call. Call one of {tools} now; do not claim completion until the requested change has been attempted."
+    );
+    let message = Message::user(text.clone());
+    let envelope = self.emit_message(
+      Some(turn_id.clone()),
+      AgentEvent::UserMessage(UserMessage {
+        text,
+        attachments: 0,
+      }),
+      &message,
+    )?;
+    self.push_message(message, envelope.meta.seq);
+    Ok(())
+  }
+
   /// Put the boundary in the same model-visible history path as the existing
   /// request-budget finalization instruction. It is runtime-owned guidance, not
   /// a claim that the user wrote these words.
@@ -2914,6 +3027,19 @@ impl<'a> TurnLoop<'a> {
       state.at_safe_boundary = true;
       state
     };
+    if let Some(message) = self.context.configuration_warning(&state) {
+      let model_key = state
+        .model
+        .as_ref()
+        .map(ModelRef::as_key)
+        .unwrap_or_else(|| "<unknown>".into());
+      if self
+        .reported_context_adjustments
+        .insert((model_key, state.window))
+      {
+        self.diagnostic(Some(turn_id.clone()), DiagnosticLevel::Warn, message)?;
+      }
+    }
     let decision = self.context.evaluate(&state);
     match decision.action {
       // Refusal is the honest answer to a request that cannot fit. Truncating
@@ -3038,6 +3164,7 @@ impl<'a> TurnLoop<'a> {
     &mut self,
     response: Response,
     report: &mut TurnReport,
+    include_assistant_message: bool,
   ) -> Result<RecordedResponse, TurnError> {
     let Response {
       epoch,
@@ -3050,7 +3177,7 @@ impl<'a> TurnLoop<'a> {
     report.requests = self.requests.load(Ordering::SeqCst);
 
     let mut blocks = Vec::new();
-    if let Some(text) = text.filter(|text| !text.is_empty()) {
+    if include_assistant_message && let Some(text) = text.filter(|text| !text.is_empty()) {
       blocks.push(ContentBlock::text(text.clone()));
       report.text.push_str(&text);
     }
@@ -3102,6 +3229,7 @@ impl<'a> TurnLoop<'a> {
     calls: &[ToolCallBlock],
     progress: &mut dyn TurnProgress,
     reason: &str,
+    include_results_in_context: bool,
   ) -> Result<(), TurnError> {
     for call in calls {
       let read_only = self
@@ -3127,19 +3255,33 @@ impl<'a> TurnLoop<'a> {
           outcome.to_block(call.id.clone(), &call.name),
         )],
       );
-      let envelope = self.emit_message_with_parent(
-        Some(turn_id.clone()),
-        AgentEvent::ToolFailed(ToolFailed {
-          call_id: call.id.clone(),
-          name: call.name.clone(),
-          message: reason.to_string(),
-          duration_ms: 0,
-          status: None,
-        }),
-        &message,
-        Some(requested.meta.event_id),
-      )?;
-      self.push_message(message, envelope.meta.seq);
+      let failed = AgentEvent::ToolFailed(ToolFailed {
+        call_id: call.id.clone(),
+        name: call.name.clone(),
+        message: reason.to_string(),
+        duration_ms: 0,
+        status: None,
+      });
+      let envelope = if include_results_in_context {
+        self.emit_message_with_parent(
+          Some(turn_id.clone()),
+          failed,
+          &message,
+          Some(requested.meta.event_id),
+        )?
+      } else {
+        // A failed tool-shaped fragment from an incomplete model response is
+        // trace evidence, not an assistant/tool exchange to replay on resume.
+        self.emit_with_sink_parent(
+          Some(turn_id.clone()),
+          failed,
+          true,
+          Some(requested.meta.event_id),
+        )?
+      };
+      if include_results_in_context {
+        self.push_message(message, envelope.meta.seq);
+      }
       let executed = Executed {
         request: rupi_core::ToolRequest {
           call_id: call.id.clone(),
@@ -3179,6 +3321,7 @@ impl<'a> TurnLoop<'a> {
           &calls[index..],
           progress,
           "not executed: the turn was cancelled",
+          true,
         )?;
         break;
       }
@@ -3420,6 +3563,13 @@ enum TurnFailure {
   /// The provider rejected an otherwise uncommitted request for context size.
   /// The outer turn loop may compact only pre-turn history and reissue once.
   ProviderOverflow(ModelFailure),
+  /// A length stop used less than the request's explicit output ceiling. The
+  /// outer loop may compact pre-turn history and retry once on the same model.
+  OutputTruncated {
+    failure: ModelFailure,
+    actual_output_tokens: u64,
+    requested_output_tokens: u64,
+  },
   /// No model can serve the request.
   Fatal(ModelFailure),
   /// The trace could not be written.
@@ -3599,14 +3749,14 @@ fn completion_failure(
       FailurePhase::Normalizing,
       "provider stopped at its output limit before completing the response",
     );
-    failure.partial_output_emitted = committed;
+    failure = failure.with_partial_output(committed);
     failure.detail = usage.finish_reason.clone();
     return Some(failure);
   }
   if usage.is_certain() {
     return None;
   }
-  let mut failure = ModelFailure::new(
+  let failure = ModelFailure::new(
     if produced {
       ModelFailureKind::Semantic
     } else {
@@ -3615,8 +3765,7 @@ fn completion_failure(
     FailurePhase::Streaming,
     "the response stream ended without a definitive completion signal",
   );
-  failure.partial_output_emitted = committed;
-  Some(failure)
+  Some(failure.with_partial_output(committed))
 }
 
 /// Tool chunks are transient surface output in this slice. The canonical trace
@@ -4301,8 +4450,10 @@ mod tests {
     calls: Arc<Mutex<Vec<(ModelRequest, ThinkingLevel, bool)>>>,
     /// Return `Ok` with an uncertain boundary instead of a usage report.
     unfinished: bool,
-    /// Override the scripted response's provider finish reason.
+    /// Override every scripted response's provider finish reason.
     finish_reason: Option<String>,
+    /// Override the finish reason for one answered round.
+    finish_reason_at: BTreeMap<usize, String>,
     /// Supply provider usage independently of the scripted response content.
     completion_usage: Option<CompletionUsage>,
     /// Fail *every* request. `fail` is per-request-index and can run out, which
@@ -4329,6 +4480,7 @@ mod tests {
         calls: Arc::new(Mutex::new(Vec::new())),
         unfinished: false,
         finish_reason: None,
+        finish_reason_at: BTreeMap::new(),
         completion_usage: None,
         always: None,
         fail_after_stream: None,
@@ -4353,6 +4505,16 @@ mod tests {
 
     fn finishes_with(mut self, reason: &str) -> Self {
       self.finish_reason = Some(reason.into());
+      self
+    }
+
+    fn finishes_at(mut self, round: usize, reason: &str) -> Self {
+      self.finish_reason_at.insert(round, reason.into());
+      self
+    }
+
+    fn with_output_limit(mut self, limit: u64) -> Self {
+      self.capabilities.max_output_tokens = Some(limit);
       self
     }
 
@@ -4433,8 +4595,12 @@ mod tests {
       };
       if injects {
         if let Some(kind) = self.always {
-          let mut failure =
-            ModelFailure::new(kind, FailurePhase::WaitingForResponse, "provider is down");
+          let mut failure = ModelFailure::new(
+            kind,
+            FailurePhase::WaitingForResponse,
+            "provider returned an explicit unavailable response",
+          )
+          .with_replay_safety(rupi_core::RequestReplaySafety::Safe);
           failure.model = Some(self.model.clone());
           return Err(failure);
         }
@@ -4471,7 +4637,11 @@ mod tests {
         if let Some(usage) = &self.completion_usage {
           return Ok(usage.clone());
         }
-        if let Some(reason) = &self.finish_reason {
+        if let Some(reason) = self
+          .finish_reason_at
+          .get(&served)
+          .or(self.finish_reason.as_ref())
+        {
           usage.finish_reason = Some(reason.clone());
         }
         if let Some(kind) = self.fail_after_stream {
@@ -4500,6 +4670,7 @@ mod tests {
     copy.retry_after_ms = failure.retry_after_ms;
     copy.status = failure.status;
     copy.partial_output_emitted = failure.partial_output_emitted;
+    copy.replay_safety = failure.replay_safety;
     copy.attempts = failure.attempts;
     copy.model = failure.model.clone();
     copy
@@ -6519,6 +6690,7 @@ mod tests {
         .collect::<Vec<_>>(),
       vec!["write_probe"]
     );
+    assert_eq!(requests[1].tool_choice, ToolChoice::Required);
     assert!(
       requests[1]
         .system
@@ -6531,6 +6703,7 @@ mod tests {
       2,
       "a successful progress tool ends the one-shot boundary"
     );
+    assert_eq!(requests[2].tool_choice, ToolChoice::Auto);
     assert!(
       requests[2]
         .system
@@ -6553,6 +6726,127 @@ mod tests {
           .unwrap_or_default()
           .contains("progress boundary active")
     }));
+  }
+
+  #[test]
+  fn text_only_completion_cannot_bypass_the_progress_boundary() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![
+      Box::new(Spy(Arc::clone(&seen))),
+      Box::new(MutatingSpy {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        outcome: ToolOutcome::succeeded("mutated"),
+      }),
+    ]);
+    let provider = Scripted::new(
+      "text-progress-bypass",
+      vec![
+        tool_call("spy", serde_json::json!({})),
+        text("Done, fixed."),
+      ],
+    );
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_progress_boundary(Some(1), vec!["write_probe".into()])
+    .with_max_requests(3)
+    .run_turn(
+      "build the project",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .unwrap();
+
+    assert_eq!(report.status, TurnStatus::BudgetExhausted);
+    assert!(report.budget_exhausted);
+    assert!(
+      report.text.is_empty(),
+      "rejected completion is not final text"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].tool_choice, ToolChoice::Required);
+    assert_eq!(requests[1].tools.len(), 1);
+    assert_eq!(requests[1].tools[0].name, "write_probe");
+    assert_eq!(
+      trace.count("assistant_delta"),
+      1,
+      "trace retains rejected text"
+    );
+    assert!(
+      trace
+        .diagnostics()
+        .iter()
+        .any(|message| { message.contains("progress boundary rejected a text-only completion") })
+    );
+  }
+
+  #[test]
+  fn unknown_tool_cannot_satisfy_progress_or_enable_text_completion() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let write_seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![
+      Box::new(Spy(Arc::clone(&seen))),
+      Box::new(MutatingSpy {
+        seen: Arc::clone(&write_seen),
+        outcome: ToolOutcome::succeeded("mutated"),
+      }),
+    ]);
+    let provider = Scripted::new(
+      "unknown-progress-bypass",
+      vec![
+        tool_call("spy", serde_json::json!({})),
+        tool_call("unknown", serde_json::json!({})),
+        text("Done, fixed."),
+      ],
+    );
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_progress_boundary(Some(1), vec!["write_probe".into()])
+    .with_max_requests(4)
+    .run_turn(
+      "build the project",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .unwrap();
+
+    assert_eq!(report.status, TurnStatus::BudgetExhausted);
+    assert!(report.text.is_empty());
+    assert_eq!(write_seen.lock().unwrap().len(), 0);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(
+      requests[1..]
+        .iter()
+        .all(|request| { request.tool_choice == ToolChoice::Required })
+    );
+    assert_eq!(trace.count("tool_started"), 1, "only the initial read ran");
+    assert_eq!(trace.count("tool_failed"), 1, "unknown tool is rejected");
   }
 
   #[test]
@@ -6590,6 +6884,7 @@ mod tests {
       TraceId::new(),
     )
     .with_progress_boundary(Some(1), vec!["write_probe".into()])
+    .with_max_requests(5)
     .run_turn(
       "build the project",
       &CancelToken::new(),
@@ -6597,8 +6892,12 @@ mod tests {
     )
     .expect("a failed progress attempt should remain recoverable");
 
-    assert_eq!(report.status, TurnStatus::Completed);
-    assert_eq!(report.text, "done");
+    assert_eq!(report.status, TurnStatus::BudgetExhausted);
+    assert!(report.budget_exhausted);
+    assert!(
+      report.text.is_empty(),
+      "rejected completion is not final text"
+    );
     assert_eq!(read_seen.lock().unwrap().len(), 1);
     assert_eq!(write_seen.lock().unwrap().len(), 2);
     let requests = provider.requests();
@@ -6619,6 +6918,11 @@ mod tests {
         .collect::<Vec<_>>(),
       vec!["write_probe"],
       "failed progress must not restore the unrestricted tool set"
+    );
+    assert!(
+      requests[1..]
+        .iter()
+        .all(|request| { request.tool_choice == ToolChoice::Required })
     );
   }
 
@@ -6902,7 +7206,8 @@ mod tests {
         ModelFailureKind::Transport,
         FailurePhase::WaitingForResponse,
         "reset",
-      ),
+      )
+      .with_replay_safety(rupi_core::RequestReplaySafety::Safe),
     );
     let tools = registry_with(Vec::new());
     let mut trace = Recorder::default();
@@ -6933,6 +7238,49 @@ mod tests {
     assert_eq!(provider.levels().len(), 2);
     assert_eq!(report.epoch, 0, "a retry stays in the first epoch");
     assert!(trace.find("model_failover").is_none());
+  }
+
+  #[test]
+  fn ambiguous_post_boundary_failure_skips_the_quarantined_same_model_retry() {
+    let primary = Scripted::new("ambiguous", vec![text("must not be replayed")]).fails(
+      0,
+      ModelFailure::new(
+        ModelFailureKind::Timeout,
+        FailurePhase::WaitingForResponse,
+        "request may have reached the endpoint",
+      ),
+    );
+    let backup = Scripted::new("backup", vec![text("from backup")]);
+    let tools = registry_with(Vec::new());
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      primary.capabilities().context_window,
+    );
+
+    let report = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_backup(&backup)
+    .run_turn("hi", &CancelToken::new(), &mut SilentProgress)
+    .unwrap();
+
+    assert_eq!(report.text, "from backup");
+    assert_eq!(primary.requests().len(), 1);
+    assert_eq!(backup.requests().len(), 1);
+    assert_eq!(trace.count("model_retry"), 0);
+    assert_eq!(trace.count("model_failover"), 1);
+    assert!(
+      trace
+        .diagnostics()
+        .iter()
+        .any(|message| { message.contains("replay safety ambiguous_post_boundary") })
+    );
   }
 
   #[test]
@@ -6980,6 +7328,84 @@ mod tests {
       kinds.iter().filter(|k| *k == "model_epoch_started").count(),
       2
     );
+  }
+
+  #[test]
+  fn context_overrides_are_reclamped_and_reported_on_failover() {
+    let primary = Scripted::new("override-primary", vec![text("unused")])
+      .always_fails(ModelFailureKind::ProviderUnavailable);
+    let mut backup = Scripted::new("override-backup", vec![text("from backup")]);
+    backup.capabilities.context_window = 8_192;
+    let temp = rupi_store::TempDir::new("runtime-context-override-clamp");
+    let store = rupi_store::Store::open(temp.path(), rupi_store::WritePolicy::default())
+      .expect("store opens");
+    let session_id = SessionId::new();
+    let session = store
+      .begin(SessionHeader {
+        session_id: session_id.clone(),
+        version: rupi_core::session::SESSION_SCHEMA_VERSION,
+        started_at_ms: 1,
+        working_dir: "/workspace".into(),
+        model: primary.model().clone(),
+        parent_session: None,
+        branched_from_event: None,
+        imported_from: None,
+      })
+      .expect("session begins");
+    let tools = registry_with(Vec::new());
+    let mut trace = StoreTrace::new(session);
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      primary.capabilities().context_window,
+    )
+    .with_overrides(rupi_core::ContextOverrides {
+      warn_tokens: Some(9_000),
+      reduce_tokens: Some(10_000),
+      compact_tokens: Some(11_000),
+      checkpoint_tokens: Some(12_000),
+      recent_target_tokens: Some(10_000),
+    });
+
+    let report = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      session_id.clone(),
+      TraceId::new(),
+    )
+    .with_backup(&backup)
+    .with_failover(FailoverPolicy::default().with_max_attempts(1))
+    .run_turn(
+      "answer from the active model",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .expect("the backup answers after a valid failover");
+
+    assert_eq!(report.text, "from backup");
+    assert_eq!(primary.requests().len(), 1);
+    assert_eq!(backup.requests().len(), 1);
+    trace.flush().expect("flush durable diagnostic");
+    let trace_path = trace.session().trace_path().to_path_buf();
+    drop(trace);
+    let journal = rupi_store::TraceJournal::read(&trace_path).expect("read canonical trace");
+    let warnings = journal
+      .items
+      .iter()
+      .filter_map(|entry| match &entry.envelope.event {
+        AgentEvent::Diagnostic(diagnostic)
+          if diagnostic
+            .message
+            .contains("context overrides were clamped") =>
+        {
+          Some(diagnostic.message.as_str())
+        }
+        _ => None,
+      })
+      .collect::<Vec<_>>();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("active 8192-token window"));
   }
 
   #[test]
@@ -7528,6 +7954,238 @@ mod tests {
       .expect("failed request is closed in the trace");
     assert_eq!(completed["finish_reason"], "length");
     assert_eq!(completed["output_tokens"], 4);
+  }
+
+  #[test]
+  fn output_truncation_compacts_old_context_and_retries_once_without_projecting_failed_output() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![Box::new(Spy(Arc::clone(&seen)))]);
+    let first = tool_call("spy", serde_json::json!({"value": 1}))
+      .into_iter()
+      .chain(text("partial answer"))
+      .collect();
+    let provider = Scripted::new("recover-length", vec![first, text("completed answer")])
+      .finishes_at(0, "length");
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user(
+      "pre-turn history that can be compacted",
+    )])
+    .with_max_requests(2)
+    .run_turn(
+      "continue the task",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .expect("one bounded retry should complete within the configured request budget");
+
+    assert_eq!(report.status, TurnStatus::Completed);
+    assert_eq!(report.requests, 2);
+    assert_eq!(report.text, "completed answer");
+    assert!(
+      seen.lock().unwrap().is_empty(),
+      "the truncated tool call never ran"
+    );
+    assert_eq!(trace.count("tool_started"), 0);
+    assert_eq!(
+      trace.count("tool_failed"),
+      1,
+      "the call still has a terminal trace event"
+    );
+    assert_eq!(
+      trace.count("model_retry"),
+      0,
+      "this is not generic failover retry"
+    );
+    assert_eq!(trace.count("context_compaction_completed"), 1);
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+      requests[0].model, requests[1].model,
+      "recovery stays on the same model"
+    );
+    assert_eq!(requests[0].max_output_tokens, Some(8_192));
+    assert!(
+      requests[1]
+        .messages
+        .iter()
+        .all(|message| message.role != Role::Tool)
+    );
+    assert!(requests[1].messages.iter().all(|message| {
+      message.content.iter().all(|block| {
+        block
+          .plain_text()
+          .is_none_or(|text| !text.contains("partial answer"))
+      })
+    }));
+  }
+
+  #[test]
+  fn output_truncation_does_not_persist_failed_tool_projection_for_resume() {
+    let temp = rupi_store::TempDir::new("runtime-resume-length-recovery");
+    let store = rupi_store::Store::open(temp.path(), rupi_store::WritePolicy::default())
+      .expect("store opens");
+    let session_id = SessionId::new();
+    let model = ModelRef::new("test", "durable-length");
+    let session = store
+      .begin(SessionHeader {
+        session_id: session_id.clone(),
+        version: rupi_core::session::SESSION_SCHEMA_VERSION,
+        started_at_ms: 1,
+        working_dir: "/workspace".into(),
+        model,
+        parent_session: None,
+        branched_from_event: None,
+        imported_from: None,
+      })
+      .expect("session begins");
+    let first_truncated = tool_call("spy", serde_json::json!({"value": 1}))
+      .into_iter()
+      .chain(text("partial answer"))
+      .collect();
+    let provider = Scripted::new(
+      "durable-length",
+      vec![
+        text("earlier answer"),
+        first_truncated,
+        text("final answer"),
+      ],
+    )
+    .finishes_at(1, "length");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![Box::new(Spy(Arc::clone(&seen)))]);
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = StoreTrace::new(session);
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      session_id.clone(),
+      TraceId::new(),
+    );
+    runtime
+      .run_turn("earlier request", &CancelToken::new(), &mut SilentProgress)
+      .expect("earlier turn completes");
+    let report = runtime
+      .run_turn(
+        "continue after truncation",
+        &CancelToken::new(),
+        &mut SilentProgress,
+      )
+      .expect("bounded recovery completes");
+    assert_eq!(report.text, "final answer");
+    assert!(seen.lock().unwrap().is_empty());
+    drop(runtime);
+    trace.flush().expect("flush durable state");
+    drop(trace);
+
+    let restored = store
+      .restore(&session_id)
+      .expect("restore session projection");
+    assert!(restored.interrupted_tools.is_empty());
+    assert!(
+      restored
+        .messages
+        .iter()
+        .all(|message| message.message.role != Role::Tool)
+    );
+    assert!(
+      restored
+        .messages
+        .iter()
+        .all(|message| !message.message.text().contains("partial answer"))
+    );
+    assert!(
+      restored
+        .messages
+        .iter()
+        .any(|message| message.message.text().contains("final answer"))
+    );
+  }
+
+  #[test]
+  fn output_truncation_at_the_requested_ceiling_is_not_retried() {
+    let provider = Scripted::new("full-limit", vec![text("partial")])
+      .with_output_limit(4)
+      .finishes_with("length");
+    let tools = registry_with(Vec::new());
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user("older context exists")])
+    .run_turn(
+      "finish the bounded task",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .expect_err("using the actual output ceiling is not recoverable by repetition");
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::Semantic));
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(trace.count("model_request_started"), 1);
+    assert_eq!(trace.count("model_retry"), 0);
+    assert_eq!(trace.count("context_compaction_completed"), 0);
+  }
+
+  #[test]
+  fn output_truncation_recovery_is_one_shot() {
+    let provider = Scripted::new(
+      "repeat-length",
+      vec![
+        text("first partial"),
+        text("second partial"),
+        text("should not run"),
+      ],
+    )
+    .finishes_with("length");
+    let tools = registry_with(Vec::new());
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user("pre-turn history")])
+    .run_turn("continue", &CancelToken::new(), &mut SilentProgress)
+    .expect_err("a second output-limit response must terminate the bounded recovery");
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::Semantic));
+    assert_eq!(provider.requests().len(), 2);
+    assert_eq!(trace.count("model_request_started"), 2);
+    assert_eq!(trace.count("model_retry"), 0);
   }
 
   #[test]
@@ -9016,9 +9674,15 @@ mod tests {
     let mut provider = Scripted::new("pressured", vec![text("ok")]);
     provider.capabilities.context_window = PRESSURED_WINDOW;
     let tools = registry_with(Vec::new());
-    let mut policy =
-      rupi_core::ProfilePolicy::new(rupi_core::ContextProfile::Balanced, PRESSURED_WINDOW);
-    policy.thresholds.checkpoint_tokens = 1_000;
+    let policy =
+      rupi_core::ProfilePolicy::new(rupi_core::ContextProfile::Balanced, PRESSURED_WINDOW)
+        .with_overrides(rupi_core::ContextOverrides {
+          warn_tokens: Some(100),
+          reduce_tokens: Some(200),
+          compact_tokens: Some(500),
+          checkpoint_tokens: Some(1_000),
+          recent_target_tokens: Some(250),
+        });
     let mut trace = Recorder::default();
 
     TurnLoop::new(
@@ -9061,9 +9725,15 @@ mod tests {
     let mut provider = Scripted::new("pressured", vec![text("ok")]);
     provider.capabilities.context_window = PRESSURED_WINDOW;
     let tools = registry_with(Vec::new());
-    let mut policy =
-      rupi_core::ProfilePolicy::new(rupi_core::ContextProfile::Balanced, PRESSURED_WINDOW);
-    policy.thresholds.checkpoint_tokens = 1_000;
+    let policy =
+      rupi_core::ProfilePolicy::new(rupi_core::ContextProfile::Balanced, PRESSURED_WINDOW)
+        .with_overrides(rupi_core::ContextOverrides {
+          warn_tokens: Some(100),
+          reduce_tokens: Some(200),
+          compact_tokens: Some(500),
+          checkpoint_tokens: Some(1_000),
+          recent_target_tokens: Some(250),
+        });
     let mut trace = Recorder::default();
 
     TurnLoop::new(
