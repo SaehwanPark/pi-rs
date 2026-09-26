@@ -68,6 +68,7 @@ impl Tool for GrepTool {
   fn arguments_schema(&self) -> serde_json::Value {
     json!({
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "pattern": { "type": "string", "description": "Literal text, or a glob when glob=true." },
         "path": { "type": "string", "description": "Directory or file to search. Defaults to the workspace root." },

@@ -45,6 +45,7 @@ impl Tool for ReadTool {
   fn arguments_schema(&self) -> serde_json::Value {
     json!({
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "path": { "type": "string", "description": "File to read, relative to the workspace." },
         "offset": { "type": "integer", "description": "1-based first line. Defaults to 1." },

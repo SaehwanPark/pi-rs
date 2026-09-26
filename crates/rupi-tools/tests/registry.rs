@@ -314,6 +314,97 @@ fn malformed_arguments_are_refused_before_execution() {
 }
 
 #[test]
+fn supplied_optional_arguments_and_nested_items_are_validated_before_start() {
+  let dir = fixture();
+  let reg = approved(&dir);
+  let invalid = [
+    (
+      "exec",
+      json!({"command": "echo should-not-run", "cwd": 123}),
+    ),
+    (
+      "exec",
+      json!({"command": "echo should-not-run", "timeout_ms": false}),
+    ),
+    ("process", json!({"program": "echo", "cwd": 123})),
+    ("process", json!({"program": "echo", "args": ["valid", 42]})),
+    ("read", json!({"path": "README.md", "offset": "1"})),
+    ("grep", json!({"pattern": "Title", "ignore_case": "yes"})),
+    ("read", json!({"path": "README.md", "unexpected": true})),
+  ];
+
+  for (name, arguments) in invalid {
+    let mut sink = Sink::new();
+    let mut starts = 0;
+    let result = reg
+      .execute_observed(
+        &request(name, arguments),
+        &mut sink,
+        &CancelToken::new(),
+        &mut || {
+          starts += 1;
+          Ok(())
+        },
+      )
+      .unwrap();
+    assert!(result.outcome.is_error, "{name}: {:?}", result.outcome);
+    assert!(!result.started, "{name} must not cross the start boundary");
+    assert_eq!(starts, 0, "{name} must be rejected before ToolStarted");
+  }
+  assert!(!dir.path().join("should-not-run").exists());
+}
+
+#[test]
+fn nested_object_rules_and_enum_values_are_validated() {
+  struct StructuredTool;
+  impl rupi_core::Tool for StructuredTool {
+    fn metadata(&self) -> ToolMetadata {
+      ToolMetadata::read_only("structured", "exercise nested schema validation")
+    }
+    fn arguments_schema(&self) -> Value {
+      json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "options": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "mode": { "type": "string", "enum": ["fast", "safe"] }
+            },
+            "required": ["mode"]
+          }
+        },
+        "required": ["options"]
+      })
+    }
+    fn execute(
+      &self,
+      _request: &ToolRequest,
+      _progress: &mut dyn ToolProgress,
+    ) -> Result<ToolOutcome, rupi_core::ToolError> {
+      Ok(ToolOutcome::succeeded("ran"))
+    }
+  }
+
+  let dir = fixture();
+  let mut reg = registry(&dir);
+  reg.register(Box::new(StructuredTool));
+
+  for arguments in [
+    json!({"options": {"mode": "unsafe"}}),
+    json!({"options": {"mode": "safe", "extra": true}}),
+  ] {
+    let result = run(&reg, "structured", arguments);
+    assert!(result.outcome.is_error, "{:?}", result.outcome);
+    assert!(!result.started);
+  }
+  let valid = run(&reg, "structured", json!({"options": {"mode": "safe"}}));
+  assert_eq!(valid.outcome.text, "ran");
+  assert!(valid.started);
+}
+
+#[test]
 fn a_mutating_success_after_cancellation_is_not_believed() {
   // The core safety rule: cancellation observed after a mutating tool claims
   // success forces Unknown, because the effect may be half-applied.

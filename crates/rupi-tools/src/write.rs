@@ -47,6 +47,7 @@ impl Tool for WriteTool {
   fn arguments_schema(&self) -> serde_json::Value {
     json!({
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "path": { "type": "string", "description": "File to write, relative to the workspace." },
         "contents": { "type": "string", "description": "Exact file contents." }

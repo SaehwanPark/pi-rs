@@ -143,10 +143,36 @@ impl Executed {
   }
 }
 
+struct RegisteredTool {
+  tool: Arc<dyn Tool>,
+  metadata: ToolMetadata,
+  schema: Arc<Value>,
+}
+
+impl RegisteredTool {
+  fn new(tool: Arc<dyn Tool>) -> Self {
+    let metadata = tool.metadata();
+    let schema = Arc::new(tool.arguments_schema());
+    Self {
+      tool,
+      metadata,
+      schema,
+    }
+  }
+
+  fn spec(&self) -> rupi_core::ToolSpec {
+    rupi_core::ToolSpec {
+      name: self.metadata.name.clone(),
+      description: self.metadata.description.clone(),
+      parameters: self.schema.as_ref().clone(),
+    }
+  }
+}
+
 /// The set of tools the runtime provides.
 pub struct ToolRegistry {
   runtime: Runtime,
-  tools: RwLock<BTreeMap<String, Arc<dyn Tool>>>,
+  tools: RwLock<BTreeMap<String, RegisteredTool>>,
   allow: Vec<String>,
   deny: Vec<String>,
   /// How a mutating call is answered when the caller does not supply a gate.
@@ -216,8 +242,9 @@ impl ToolRegistry {
   /// built-in without the runtime needing a second resolution rule.
   pub fn register(&mut self, tool: Box<dyn Tool>) -> &mut Self {
     let tool: Arc<dyn Tool> = tool.into();
-    let name = tool.metadata().name;
-    self.tools.write().unwrap().insert(name, tool);
+    let registered = RegisteredTool::new(tool);
+    let name = registered.metadata.name.clone();
+    self.tools.write().unwrap().insert(name, registered);
     self
   }
 
@@ -227,8 +254,9 @@ impl ToolRegistry {
   /// without requiring exclusive ownership of the registry.
   pub fn register_shared(&self, tool: Box<dyn Tool>) {
     let tool: Arc<dyn Tool> = tool.into();
-    let name = tool.metadata().name;
-    self.tools.write().unwrap().insert(name, tool);
+    let registered = RegisteredTool::new(tool);
+    let name = registered.metadata.name.clone();
+    self.tools.write().unwrap().insert(name, registered);
   }
 
   /// Unregister a tool by name via a shared reference.
@@ -314,7 +342,7 @@ impl ToolRegistry {
       .unwrap()
       .iter()
       .filter(|(name, _)| self.is_allowed(name))
-      .map(|(_, tool)| spec_of(tool.as_ref()))
+      .map(|(_, tool)| tool.spec())
       .collect()
   }
 
@@ -326,7 +354,7 @@ impl ToolRegistry {
       .unwrap()
       .iter()
       .filter(|(name, _)| self.is_allowed(name))
-      .map(|(_, tool)| tool.metadata())
+      .map(|(_, tool)| tool.metadata.clone())
       .collect()
   }
 
@@ -336,7 +364,7 @@ impl ToolRegistry {
       .read()
       .unwrap()
       .get(name)
-      .map(|tool| tool.metadata())
+      .map(|tool| tool.metadata.clone())
   }
 
   /// Whether any permitted tool can change state.
@@ -346,7 +374,7 @@ impl ToolRegistry {
       .read()
       .unwrap()
       .iter()
-      .any(|(name, tool)| self.is_allowed(name) && !tool.metadata().read_only)
+      .any(|(name, tool)| self.is_allowed(name) && !tool.metadata.read_only)
   }
 
   /// Reconcile an uncertain or interrupted tool call against environment state.
@@ -376,13 +404,13 @@ impl ToolRegistry {
       let Some(tool) = tools.get(&request.name) else {
         return Err(ToolError::new(format!("unknown tool '{}'", request.name)));
       };
-      if expected_read_only.is_some_and(|expected| tool.metadata().read_only != expected) {
+      if expected_read_only.is_some_and(|expected| tool.metadata.read_only != expected) {
         return Err(ToolError::new(format!(
           "tool '{}' risk metadata changed since the interrupted request",
           request.name
         )));
       }
-      Arc::clone(tool)
+      Arc::clone(&tool.tool)
     };
     tool.reconcile(request)
   }
@@ -503,7 +531,11 @@ impl ToolRegistry {
           unknown_tool(&request.name, &self.allowed_names()),
         ));
       };
-      (Arc::clone(tool), tool.metadata(), tool.arguments_schema())
+      (
+        Arc::clone(&tool.tool),
+        tool.metadata.clone(),
+        Arc::clone(&tool.schema),
+      )
     };
     if !self.is_allowed(&metadata.name) {
       return Ok(Executed::refused(
@@ -632,15 +664,6 @@ fn coerce_state(
   }
 }
 
-fn spec_of(tool: &dyn Tool) -> rupi_core::ToolSpec {
-  let metadata = tool.metadata();
-  rupi_core::ToolSpec {
-    name: metadata.name,
-    description: metadata.description,
-    parameters: tool.arguments_schema(),
-  }
-}
-
 fn unknown_tool(name: &str, available: &[String]) -> String {
   format!(
     "unknown tool '{name}'; available: {}",
@@ -652,54 +675,96 @@ fn unknown_tool(name: &str, available: &[String]) -> String {
   )
 }
 
-/// Cheap argument validation, so a malformed call costs nothing.
+/// Validate the JSON Schema subset used at the tool execution boundary.
 ///
-/// The provider already saw the schema; this only rejects the shapes that would
-/// make a tool panic or silently do nothing, because those are the cases where
-/// an early, clear refusal beats a tool's own error text.
+/// This deliberately avoids compiling a general-purpose validator on the
+/// invocation path. Required fields, supplied property types, enums, nested
+/// objects/arrays, and `additionalProperties` are enforced recursively; other
+/// JSON Schema keywords remain provider guidance, not a runtime guarantee.
 fn validate_arguments(
   metadata: &ToolMetadata,
   arguments: &Value,
   schema: &Value,
 ) -> Result<(), String> {
-  let Value::Object(map) = arguments else {
+  if !arguments.is_object() {
     return Err(format!(
       "'{}' arguments must be a JSON object",
       metadata.name
     ));
-  };
-  let Some(required) = schema.get("required").and_then(|v| v.as_array()) else {
-    return Ok(());
-  };
-  let properties = schema.get("properties").and_then(|v| v.as_object());
-  for key in required {
-    let Some(name) = key.as_str() else { continue };
-    let Some(value) = map.get(name) else {
-      return Err(format!(
-        "'{}' is missing required argument '{name}'",
-        metadata.name
-      ));
+  }
+  validate_schema_value(&metadata.name, "arguments", arguments, schema)
+}
+
+fn validate_schema_value(
+  tool_name: &str,
+  path: &str,
+  value: &Value,
+  schema: &Value,
+) -> Result<(), String> {
+  if let Some(kind) = schema.get("type").and_then(Value::as_str) {
+    let matches = match kind {
+      "null" => value.is_null(),
+      "boolean" => value.is_boolean(),
+      "object" => value.is_object(),
+      "array" => value.is_array(),
+      "number" => value.is_number(),
+      "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+      "string" => value.is_string(),
+      _ => true,
     };
-    if let Some(kind) = properties
-      .and_then(|p| p.get(name))
-      .and_then(|p| p.get("type"))
-      .and_then(|t| t.as_str())
-    {
-      let matches = match kind {
-        "string" => value.is_string(),
-        "integer" => value.is_i64() || value.is_u64(),
-        "number" => value.is_number(),
-        "boolean" => value.is_boolean(),
-        "array" => value.is_array(),
-        "object" => value.is_object(),
-        _ => true,
-      };
-      if !matches {
-        return Err(format!(
-          "'{}' argument '{name}' must be {kind}",
-          metadata.name
-        ));
+    if !matches {
+      return Err(format!("'{tool_name}' argument '{path}' must be {kind}"));
+    }
+  }
+
+  if let Some(choices) = schema.get("enum").and_then(Value::as_array)
+    && !choices.contains(value)
+  {
+    return Err(format!(
+      "'{tool_name}' argument '{path}' is not an allowed value"
+    ));
+  }
+
+  if let Some(object) = value.as_object() {
+    let properties = schema.get("properties").and_then(Value::as_object);
+    if let Some(required) = schema.get("required").and_then(Value::as_array) {
+      for key in required.iter().filter_map(Value::as_str) {
+        if !object.contains_key(key) {
+          let missing = if path == "arguments" {
+            key.to_string()
+          } else {
+            format!("{path}.{key}")
+          };
+          return Err(format!(
+            "'{tool_name}' is missing required argument '{missing}'"
+          ));
+        }
       }
+    }
+
+    for (key, child) in object {
+      let child_path = format!("{path}.{key}");
+      if let Some(child_schema) = properties.and_then(|properties| properties.get(key)) {
+        validate_schema_value(tool_name, &child_path, child, child_schema)?;
+      } else {
+        match schema.get("additionalProperties") {
+          Some(Value::Bool(false)) => {
+            return Err(format!(
+              "'{tool_name}' does not accept argument '{child_path}'"
+            ));
+          }
+          Some(additional_schema @ Value::Object(_)) => {
+            validate_schema_value(tool_name, &child_path, child, additional_schema)?;
+          }
+          _ => {}
+        }
+      }
+    }
+  }
+
+  if let (Some(items), Some(array)) = (schema.get("items"), value.as_array()) {
+    for (index, item) in array.iter().enumerate() {
+      validate_schema_value(tool_name, &format!("{path}[{index}]"), item, items)?;
     }
   }
   Ok(())

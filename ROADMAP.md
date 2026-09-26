@@ -908,6 +908,25 @@ budgets. The recommended live model comparison cases 01, 02, 04, and 06 were not
 configured endpoint at `127.0.0.1:8000` was offline, and the documented 88-GB model checkpoint
 exceeds this host's approximately 64-GB physical memory. This does not establish Pi parity.
 
+### In-progress audit follow-up — Round 4
+
+`audits/pi-benchmark-audit/round04.md` identifies seven runtime/provider gaps. Work is tracked
+on the Round-4 PR and remains incomplete until each behavior has regression evidence:
+
+- [-] Validate every supplied tool argument against the registered schema; reject extra fields
+      on built-ins before preflight, approval, or execution.
+- [ ] Enforce the progress boundary as a runtime postcondition, not only prompt/tool filtering.
+- [ ] Make same-model retry eligibility depend on request replay safety as well as failure kind.
+- [ ] Expose OpenAI-compatible dialect configuration through `ModelEndpoint`.
+- [ ] Add capability-gated preferred/required constrained tool sampling.
+- [ ] Add one bounded recovery attempt for eligible output truncation.
+- [ ] Apply context overrides consistently across active windows and adaptive policy.
+- [ ] Keep P2 tokenizer-estimator calibration and model-readable reduced-output recovery tracked;
+      these are outside the Round-4 blocking slice and must not be presented as implemented.
+
+The local-model behavior comparisons remain contingent on an available endpoint/model; deterministic
+fault-injection tests are the required gate for the runtime contracts in this slice.
+
 ### P2 — Later / deliberately deferred
 
 - [x] Windows CI matrix (hosted CI covers Ubuntu, macOS, and Windows; benchmark execution remains non-Windows only).
