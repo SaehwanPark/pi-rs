@@ -434,7 +434,7 @@ impl Decoder {
         singleton_fallback.expect("guard checked singleton fallback")
       }
       (None, None) => {
-        let existing_slots: Vec<_> = self.tools.keys().copied().collect();
+        let existing_slots = self.open_keyed_tool_slots();
         let slot = self.new_tool_slot()?;
         if !existing_slots.is_empty() {
           let reason = "tool-call fragments could not be safely correlated by index or id";
@@ -519,14 +519,27 @@ impl Decoder {
   /// provider identity remains open and unconflicted. An uncorrelated fragment
   /// cannot establish its own identity, and two open calls remain ambiguous.
   fn unique_keyed_open_slot(&self) -> Option<u64> {
-    let indexed_slots: std::collections::BTreeSet<_> =
-      self.tool_indices.values().copied().collect();
-    let mut candidates = self.tools.iter().filter_map(|(slot, builder)| {
-      let has_provider_key = builder.id.is_some() || indexed_slots.contains(slot);
-      (has_provider_key && builder.correlation_error.is_none()).then_some(*slot)
-    });
+    let mut candidates = self.open_keyed_tool_slots().into_iter();
     let only = candidates.next()?;
     candidates.next().is_none().then_some(only)
+  }
+
+  fn open_keyed_tool_slots(&self) -> Vec<u64> {
+    let indexed_slots: std::collections::BTreeSet<_> =
+      self.tool_indices.values().copied().collect();
+    self
+      .tools
+      .iter()
+      .filter_map(|(slot, builder)| {
+        let has_provider_key = builder.id.is_some() || indexed_slots.contains(slot);
+        let arguments_complete = matches!(
+          serde_json::from_str::<Value>(builder.arguments.trim()),
+          Ok(Value::Object(_))
+        );
+        (has_provider_key && builder.correlation_error.is_none() && !arguments_complete)
+          .then_some(*slot)
+      })
+      .collect()
   }
 }
 
@@ -1091,8 +1104,8 @@ mod tests {
     for fragment in [
       chunk(json!({
         "tool_calls": [
-          {"index": 0, "id": "read-id", "function": {"name": "read", "arguments": r#"{"path":"a.rs"}"#}},
-          {"index": 1, "id": "grep-id", "function": {"name": "grep", "arguments": r#"{"query":"TODO"}"#}}
+          {"index": 0, "id": "read-id", "function": {"name": "read", "arguments": r#"{"path":"a.rs"#}},
+          {"index": 1, "id": "grep-id", "function": {"name": "grep", "arguments": r#"{"query":"TODO"#}}
         ]
       })),
       chunk(json!({
@@ -1110,6 +1123,36 @@ mod tests {
       ProviderEvent::ToolCallRejected { reason, .. }
         if reason.contains("could not be safely correlated")
     )));
+  }
+
+  #[test]
+  fn a_missing_key_does_not_extend_a_completed_tool_call() {
+    let mut collector = Collector::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
+    for fragment in [
+      chunk(json!({
+        "tool_calls": [{
+          "index": 0,
+          "id": "read-id",
+          "function": {"name": "read", "arguments": "{}"}
+        }]
+      })),
+      chunk(json!({
+        "tool_calls": [{"function": {"name": "write", "arguments": "{}"}}]
+      })),
+    ] {
+      decoder.chunk(&fragment, &mut collector).unwrap();
+    }
+    decoder
+      .finish(StreamEnd::DoneSentinel, &mut collector)
+      .unwrap();
+
+    assert_eq!(collector.events().len(), 2);
+    assert!(matches!(collector.events()[0], ProviderEvent::ToolCall(_)));
+    assert!(matches!(
+      collector.events()[1],
+      ProviderEvent::ToolCallRejected { ref name, .. } if name == "write"
+    ));
   }
 
   #[test]
