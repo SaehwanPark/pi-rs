@@ -408,7 +408,10 @@ Requirements:
 - protocol negotiation where practical;
 - graceful support for selected older protocol versions;
 - no assumption that every server supports the latest optional extensions;
-- stable internal tool/resource normalization.
+- stable internal tool/resource normalization;
+- dynamically discovered manager tools pass a provider-safe name and bounded schema/metadata
+  admission layer before model exposure. Unsafe or over-budget catalogs fail closed; this is a
+  deliberate robustness boundary, not a promise to expose arbitrary server metadata verbatim.
 
 `rkb-rs` is integrated through the independent `rupi-rkb` adapter. The adapter
 recognizes the verified `rkb mcp` stdio contract, marks its retrieval tools read-only,

@@ -883,6 +883,31 @@ on this Windows host; recorded startup cold/warm means were 122.40/6.34 ms. The 
 recommended model comparison cases 01, 02, 04, and 06 were not rerun because the configured
 local OpenAI-compatible server at `127.0.0.1:8000` was not running.
 
+### Completed audit follow-up — Round 3 (PR #122)
+
+All four findings in `audits/pi-benchmark-audit/round03.md` are implemented with regression
+coverage. The changed runtime, provider, and MCP boundaries passed full workspace verification
+and the applicable context/startup benchmarks.
+
+- [x] Make context policy use the current request estimate and rebudget failover against the
+      backup's assembled prompt, retained messages, and exposed tools.
+- [x] Settle every committed assistant tool-call batch with model-visible terminal results,
+      including cancellation and no-tool finalization.
+- [x] Correlate an unkeyed provider fragment only with one open, unconflicted keyed call;
+      fail closed on ambiguity and leave completed calls untouched.
+- [x] Admit MCP tools through provider-safe name validation and bounded schema/description,
+      per-server, and aggregate capability budgets.
+- [x] Complete source review, documentation reconciliation, full checks, and available
+      performance-budget verification.
+
+Evidence: `cargo fmt --all --check`, `cargo check -p rupi-core --all-features`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and
+`cargo doc --workspace --no-deps` passed. `bench/startup.sh --json bench/results/startup-ci.json`
+passed (cold 125.25 ms; warm mean 6.82 ms); `bench/context_prefill.sh` passed all five
+budgets. The recommended live model comparison cases 01, 02, 04, and 06 were not rerun: the
+configured endpoint at `127.0.0.1:8000` was offline, and the documented 88-GB model checkpoint
+exceeds this host's approximately 64-GB physical memory. This does not establish Pi parity.
+
 ### P2 — Later / deliberately deferred
 
 - [x] Windows CI matrix (hosted CI covers Ubuntu, macOS, and Windows; benchmark execution remains non-Windows only).

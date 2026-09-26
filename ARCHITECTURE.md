@@ -315,8 +315,15 @@ fragment correlation emits `ProviderEvent::ToolCallRejected` with a stable call 
 runtime records the request and a terminal failed result, returns that result to the same
 model for correction, and never dispatches the rejected call. Missing provider IDs are
 replaced with internal IDs when a provider index still identifies the call. A fragment
-without either a provider index or ID is rejected and receives an internal ID only for
-failed-lifecycle reporting. No argument repair is executed as a tool request.
+without either key may attach only when exactly one explicitly keyed call without a prior
+correlation conflict is open. Otherwise it remains rejected and receives
+an internal ID only for failed-lifecycle reporting; ambiguous builders are not guessed. No
+argument repair is executed as a tool request.
+
+Once an assistant tool-call message is committed, every call receives exactly one
+model-visible terminal tool result before another provider request is allowed. Cancellation
+or finalization marks calls proven not to have started as `Failed`; uncertain side-effect
+boundaries remain `Unknown`.
 
 Mutating tool operations must not be blindly replayed after an uncertain failure boundary.
 
@@ -352,10 +359,13 @@ The context engine owns model-visible working memory.
 It consumes canonical session/trace state and produces a bounded working set.
 
 Before policy evaluation, request sizing includes the assembled system prompt, messages, and
-currently exposed tool schemas. The active provider's context window controls threshold
-evaluation after failover; adaptive latency observations are scoped to model identity.
-Same-turn compaction validates every tool lifecycle in the proposed prefix and stops before
-any unresolved or `Unknown` result.
+currently exposed tool schemas. Provider-reported usage describes the request just sent; it
+never substitutes for the estimate of the request being assembled. The active provider's
+context window controls threshold evaluation after failover; adaptive latency observations
+are scoped to model identity. Backup rebudgeting assembles that provider's system prompt,
+retained messages, and exposed tools before committing the epoch transition. Same-turn
+compaction validates every tool lifecycle in the proposed prefix and stops before any
+unresolved or `Unknown` result.
 
 Conceptual action enum:
 
@@ -521,7 +531,12 @@ Rules:
   headers cannot be overridden;
 - long-lived server push remains deferred; one-shot HTTP calls run behind a per-request
   local relay authenticated by a per-attempt nonce, so cancellation closes and joins the
-  in-flight worker without reposting; configured HTTP proxy routes are preserved.
+  in-flight worker without reposting; configured HTTP proxy routes are preserved;
+- discovery passes through a bounded admission layer before registry/model exposure:
+  provider-safe configured/tool name parts, descriptions up to 4 KiB, schemas up to 16 KiB,
+  depth 32 and 4,096 nodes, 64 tools per server and 128 active tools overall, with per-server
+  and aggregate metadata budgets. Empty schemas normalize to `{"type":"object"}`; invalid or
+  over-budget catalogs fail closed instead of entering prompts.
 
 ## 15. MCP server / worker mode
 

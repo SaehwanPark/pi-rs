@@ -3382,9 +3382,9 @@ impl<'a> TurnLoop<'a> {
         duration_ms,
         status: outcome.status,
       }),
-      // Uncertain, refused, and never-started calls all need a terminal event, and
-      // `tool_unknown` is the only honest one for any of them: the runtime does not
-      // know, and must not pick between success and failure.
+      // Any state still unresolved at this boundary is honestly unknown. Proven
+      // no-start cancellations are normalized to `Failed` before this mapper;
+      // only uncertainty after a possible execution boundary remains `Unknown`.
       ToolExecutionState::Unknown | ToolExecutionState::Requested | ToolExecutionState::Started => {
         AgentEvent::ToolUnknown(ToolUnknown {
           call_id: call.id.clone(),
