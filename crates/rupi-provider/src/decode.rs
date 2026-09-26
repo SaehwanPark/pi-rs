@@ -591,9 +591,17 @@ pub fn http_failure(
 ) -> rupi_core::ModelFailure {
   let message = error_message(body);
   let kind = rupi_core::ModelFailure::classify_http(status, &message);
+  let replay_safety = if status == 429 || (500..=599).contains(&status) {
+    rupi_core::RequestReplaySafety::Safe
+  } else if phase == FailurePhase::PreRequest {
+    rupi_core::RequestReplaySafety::Safe
+  } else {
+    rupi_core::RequestReplaySafety::AmbiguousPostBoundary
+  };
   rupi_core::ModelFailure::new(kind, phase, summarize(&message))
     .with_status(status)
     .with_retry_after_ms(retry_after_ms(retry_after, body).unwrap_or(0))
+    .with_replay_safety(replay_safety)
     .with_detail(truncate(body, MAX_ERROR_BODY_BYTES / 4))
 }
 
@@ -619,8 +627,7 @@ pub fn stream_failure(error: &io::Error, emitted_output: bool) -> rupi_core::Mod
   ) {
     failure.kind = rupi_core::ModelFailureKind::Timeout;
   }
-  failure.partial_output_emitted = emitted_output;
-  failure
+  failure.with_partial_output(emitted_output)
 }
 
 /// The user-visible consequence of a cancel: not an availability failure.
@@ -1293,6 +1300,10 @@ mod tests {
     assert_eq!(failure.kind, ModelFailureKind::Transport);
     assert_eq!(failure.phase, FailurePhase::Streaming);
     assert!(failure.partial_output_emitted);
+    assert_eq!(
+      failure.replay_safety,
+      rupi_core::RequestReplaySafety::CommittedOutput
+    );
   }
 
   #[test]
@@ -1324,6 +1335,7 @@ mod tests {
     assert_eq!(failure.status, Some(429));
     assert_eq!(failure.retry_after_ms, Some(2_000));
     assert_eq!(failure.message, "Too many requests");
+    assert!(failure.safe_to_retry(), "an explicit 429 is replay-safe");
 
     assert_eq!(
       http_failure(
@@ -1335,9 +1347,11 @@ mod tests {
       .kind,
       ModelFailureKind::Authentication
     );
-    assert_eq!(
-      http_failure(500, "internal", None, FailurePhase::WaitingForResponse).kind,
-      ModelFailureKind::ProviderUnavailable
+    let unavailable = http_failure(500, "internal", None, FailurePhase::WaitingForResponse);
+    assert_eq!(unavailable.kind, ModelFailureKind::ProviderUnavailable);
+    assert!(
+      unavailable.safe_to_retry(),
+      "an explicit 5xx is replay-safe"
     );
   }
 

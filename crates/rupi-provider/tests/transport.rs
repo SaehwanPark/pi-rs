@@ -579,6 +579,10 @@ fn a_quiet_stream_expires_at_the_logical_idle_timeout() {
   let (result, _) = stream(&adapter, &request("quiet timeout"));
   let failure = result.expect_err("quiet response must time out");
   assert_eq!(failure.kind, ModelFailureKind::Timeout);
+  assert_eq!(
+    failure.replay_safety,
+    rupi_core::RequestReplaySafety::AmbiguousPostBoundary
+  );
   assert!(started.elapsed() < Duration::from_secs(5), "{failure:?}");
   server.join().expect("server");
   let second = adapter.stream(
@@ -619,6 +623,10 @@ fn total_request_deadline_is_distinct_from_idle_timeout() {
   let failure = result.expect_err("total request budget must expire");
   assert_eq!(failure.kind, ModelFailureKind::Timeout);
   assert_eq!(failure.phase, FailurePhase::WaitingForResponse);
+  assert_eq!(
+    failure.replay_safety,
+    rupi_core::RequestReplaySafety::AmbiguousPostBoundary
+  );
   assert!(failure.message.contains("total timeout"), "{failure:?}");
   let elapsed = started.elapsed();
   // The logical budget is 200 ms; allow bounded scheduling/teardown grace when

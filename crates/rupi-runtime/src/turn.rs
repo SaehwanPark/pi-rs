@@ -1846,8 +1846,8 @@ impl<'a> TurnLoop<'a> {
         Err(failure) => {
           // Output reached the user the moment it was emitted, so it is recorded on
           // the failure rather than inferred afterwards.
-          let mut failure = failure;
-          failure.partial_output_emitted |= committed;
+          let partial_output_emitted = failure.partial_output_emitted || committed;
+          let failure = failure.with_partial_output(partial_output_emitted);
           failure
         }
       };
@@ -1906,8 +1906,10 @@ impl<'a> TurnLoop<'a> {
           Some(turn_id.clone()),
           DiagnosticLevel::Warn,
           format!(
-            "model request failed ({}): {}",
-            failure.kind, failure.message
+            "model request failed ({}; replay safety {}): {}",
+            failure.kind,
+            failure.replay_safety.as_str(),
+            failure.message
           ),
         )
         .map_err(TurnFailure::from)?;
@@ -1997,11 +1999,7 @@ impl<'a> TurnLoop<'a> {
     if cancel.is_cancelled() || matches!(failure.kind, ModelFailureKind::Cancelled) {
       return Ok(Action::Stop);
     }
-    let decision = self.failover.decide(
-      failure.kind,
-      failure.attempts,
-      failure.partial_output_emitted,
-    );
+    let decision = self.failover.decide(failure);
     match decision {
       Recovery::Retry {
         attempt: which,
@@ -3654,14 +3652,14 @@ fn completion_failure(
       FailurePhase::Normalizing,
       "provider stopped at its output limit before completing the response",
     );
-    failure.partial_output_emitted = committed;
+    failure = failure.with_partial_output(committed);
     failure.detail = usage.finish_reason.clone();
     return Some(failure);
   }
   if usage.is_certain() {
     return None;
   }
-  let mut failure = ModelFailure::new(
+  let failure = ModelFailure::new(
     if produced {
       ModelFailureKind::Semantic
     } else {
@@ -3670,8 +3668,7 @@ fn completion_failure(
     FailurePhase::Streaming,
     "the response stream ended without a definitive completion signal",
   );
-  failure.partial_output_emitted = committed;
-  Some(failure)
+  Some(failure.with_partial_output(committed))
 }
 
 /// Tool chunks are transient surface output in this slice. The canonical trace
@@ -4488,8 +4485,12 @@ mod tests {
       };
       if injects {
         if let Some(kind) = self.always {
-          let mut failure =
-            ModelFailure::new(kind, FailurePhase::WaitingForResponse, "provider is down");
+          let mut failure = ModelFailure::new(
+            kind,
+            FailurePhase::WaitingForResponse,
+            "provider returned an explicit unavailable response",
+          )
+          .with_replay_safety(rupi_core::RequestReplaySafety::Safe);
           failure.model = Some(self.model.clone());
           return Err(failure);
         }
@@ -4555,6 +4556,7 @@ mod tests {
     copy.retry_after_ms = failure.retry_after_ms;
     copy.status = failure.status;
     copy.partial_output_emitted = failure.partial_output_emitted;
+    copy.replay_safety = failure.replay_safety;
     copy.attempts = failure.attempts;
     copy.model = failure.model.clone();
     copy
@@ -7090,7 +7092,8 @@ mod tests {
         ModelFailureKind::Transport,
         FailurePhase::WaitingForResponse,
         "reset",
-      ),
+      )
+      .with_replay_safety(rupi_core::RequestReplaySafety::Safe),
     );
     let tools = registry_with(Vec::new());
     let mut trace = Recorder::default();
@@ -7121,6 +7124,49 @@ mod tests {
     assert_eq!(provider.levels().len(), 2);
     assert_eq!(report.epoch, 0, "a retry stays in the first epoch");
     assert!(trace.find("model_failover").is_none());
+  }
+
+  #[test]
+  fn ambiguous_post_boundary_failure_skips_the_quarantined_same_model_retry() {
+    let primary = Scripted::new("ambiguous", vec![text("must not be replayed")]).fails(
+      0,
+      ModelFailure::new(
+        ModelFailureKind::Timeout,
+        FailurePhase::WaitingForResponse,
+        "request may have reached the endpoint",
+      ),
+    );
+    let backup = Scripted::new("backup", vec![text("from backup")]);
+    let tools = registry_with(Vec::new());
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      primary.capabilities().context_window,
+    );
+
+    let report = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_backup(&backup)
+    .run_turn("hi", &CancelToken::new(), &mut SilentProgress)
+    .unwrap();
+
+    assert_eq!(report.text, "from backup");
+    assert_eq!(primary.requests().len(), 1);
+    assert_eq!(backup.requests().len(), 1);
+    assert_eq!(trace.count("model_retry"), 0);
+    assert_eq!(trace.count("model_failover"), 1);
+    assert!(
+      trace
+        .diagnostics()
+        .iter()
+        .any(|message| { message.contains("replay safety ambiguous_post_boundary") })
+    );
   }
 
   #[test]

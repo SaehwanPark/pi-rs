@@ -490,10 +490,17 @@ backup's window was smaller.
 
 After failover, the backup remains active until the user explicitly changes model.
 
+Same-model retry requires both a retryable failure kind and `RequestReplaySafety::Safe`.
+A pre-dispatch connection failure and an explicit retry-safe HTTP response (429 or 5xx)
+may retry. When a POST may have reached the endpoint, skip the same-model retry and go
+directly to the configured failover decision; once output is committed, neither retry nor
+takeover may replay it. This prevents a quarantined adapter from consuming budget under a
+fake `ModelRetry` event.
+
 Interactive session control:
 - `/failover` triggers manual switch to backup model with `EpochReason::ManualSwitch`.
 - `/switch-back` triggers manual return to primary model with `EpochReason::ManualSwitchBack`.
-- Retries on qualifying availability failures apply exponential backoff (or server `retry-after`) and remain interruptible via `CancelToken`.
+- Safe retries on qualifying availability failures apply exponential backoff (or server `retry-after`) and remain interruptible via `CancelToken`.
 
 Do not auto-ping-pong.
 

@@ -920,7 +920,12 @@ on the Round-4 PR and remains incomplete until each behavior has regression evid
 - [-] Enforce the progress boundary as a runtime postcondition, not only prompt/tool filtering.
       Required tool choice is sent as a provider hint; rejected text-only completion is omitted
       from model-visible history and final report text, and unsatisfied budget ends incomplete.
-- [ ] Make same-model retry eligibility depend on request replay safety as well as failure kind.
+- [x] Make same-model retry eligibility depend on request replay safety as well as failure kind.
+      `ModelFailure` distinguishes safe dispatch, ambiguous POST boundaries, and committed output;
+      the runtime retries only safe requests. Explicit retry-safe HTTP responses and known
+      pre-dispatch failures retain retry behavior, while ambiguous timeouts go directly to
+      failover/stop. Provider and CLI regressions assert quarantine, request counts, and no fake
+      `ModelRetry` event.
 - [ ] Expose OpenAI-compatible dialect configuration through `ModelEndpoint`.
 - [ ] Add capability-gated preferred/required constrained tool sampling.
 - [ ] Add one bounded recovery attempt for eligible output truncation.

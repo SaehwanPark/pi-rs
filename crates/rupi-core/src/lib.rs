@@ -63,7 +63,9 @@ pub use event::{
   SessionEndReason, SessionEnded, SessionStarted, ToolCompleted, ToolFailed, ToolRequested,
   ToolStarted, ToolUnknown, TurnCompleted, TurnStatus, UserMessage, next_context_epoch,
 };
-pub use failure::{CompletionCertainty, FailurePhase, ModelFailure, ModelFailureKind};
+pub use failure::{
+  CompletionCertainty, FailurePhase, ModelFailure, ModelFailureKind, RequestReplaySafety,
+};
 pub use ids::{
   CheckpointId, EventId, EventSeq, SessionId, SpanId, ToolCallId, TraceId, TurnId, now_millis,
   uuidv7,

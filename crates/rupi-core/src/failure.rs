@@ -119,6 +119,31 @@ pub enum FailurePhase {
   Normalizing,
 }
 
+/// Whether a failed model request may be replayed against the same model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestReplaySafety {
+  /// The request is known not to have crossed a non-replayable boundary, or the
+  /// provider explicitly rejected it in a retry-safe way.
+  Safe,
+  /// The POST may have reached the provider, but no output was committed locally.
+  #[default]
+  AmbiguousPostBoundary,
+  /// Model output or a tool request has already been committed to the trace.
+  CommittedOutput,
+}
+
+impl RequestReplaySafety {
+  /// Stable machine label for diagnostics and trace consumers.
+  pub const fn as_str(self) -> &'static str {
+    match self {
+      Self::Safe => "safe",
+      Self::AmbiguousPostBoundary => "ambiguous_post_boundary",
+      Self::CommittedOutput => "committed_output",
+    }
+  }
+}
+
 /// A normalized provider failure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelFailure {
@@ -141,6 +166,9 @@ pub struct ModelFailure {
   /// runtime must continue rather than restart the request.
   #[serde(default)]
   pub partial_output_emitted: bool,
+  /// Request-level evidence for whether a same-model replay can duplicate work.
+  #[serde(default)]
+  pub replay_safety: RequestReplaySafety,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub model: Option<ModelRef>,
   /// Bounded, redaction-eligible provider detail kept for diagnosis. Never
@@ -159,6 +187,11 @@ impl ModelFailure {
       retry_after_ms: None,
       attempts: 0,
       partial_output_emitted: false,
+      replay_safety: if phase == FailurePhase::PreRequest {
+        RequestReplaySafety::Safe
+      } else {
+        RequestReplaySafety::AmbiguousPostBoundary
+      },
       model: None,
       detail: None,
     }
@@ -181,6 +214,18 @@ impl ModelFailure {
 
   pub fn with_partial_output(mut self, emitted: bool) -> Self {
     self.partial_output_emitted = emitted;
+    if emitted {
+      self.replay_safety = RequestReplaySafety::CommittedOutput;
+    }
+    self
+  }
+
+  pub fn with_replay_safety(mut self, safety: RequestReplaySafety) -> Self {
+    self.replay_safety = if self.partial_output_emitted {
+      RequestReplaySafety::CommittedOutput
+    } else {
+      safety
+    };
     self
   }
 
@@ -196,17 +241,18 @@ impl ModelFailure {
 
   /// Whether replaying the failed request is permitted.
   ///
-  /// This is the single rule the runtime should consult rather than
-  /// re-deriving it from scattered fields. Two conditions must hold: the
-  /// failure is an availability failure (or an explicit override says so), and
-  /// the caller has not already seen output.
+  /// The failure kind, explicit request-level replay evidence, and committed
+  /// output are separate conditions. The runtime must consult this decision
+  /// rather than infer dispatch certainty from the failure kind alone.
   ///
   /// The second condition is the one that is easy to get wrong: replaying after
   /// deltas were emitted duplicates visible text, and replaying past a tool
   /// boundary risks repeating a mutation. A caller that has already surfaced
   /// output must fail the turn, or fail over, instead of silently retrying.
   pub fn safe_to_retry(&self) -> bool {
-    self.kind.is_retryable() && !self.partial_output_emitted
+    self.kind.is_retryable()
+      && self.replay_safety == RequestReplaySafety::Safe
+      && !self.partial_output_emitted
   }
 
   /// Map an HTTP status plus a short provider message to a failure kind.
@@ -349,9 +395,8 @@ mod tests {
 
   #[test]
   fn a_mid_turn_failure_keeps_phase_and_partial_output_separate_from_kind() {
-    // The three facts answer three different questions: `kind` is whether the
-    // provider is at fault and worth retrying; `phase` is where the boundary
-    // sits; `partial_output_emitted` is whether the user already saw something.
+    // Failure class, phase, replay certainty, and user-visible output are
+    // distinct facts: none of them can be reconstructed from another.
     let interrupted = ModelFailure::new(
       ModelFailureKind::Transport,
       FailurePhase::Streaming,
@@ -368,14 +413,32 @@ mod tests {
 
     let before_request = ModelFailure::new(
       ModelFailureKind::Transport,
-      FailurePhase::WaitingForResponse,
-      "connection refused",
+      FailurePhase::PreRequest,
+      "connection refused before dispatch",
     );
     assert!(
       before_request.safe_to_retry(),
       "nothing was sent, so retry is safe"
     );
+    assert_eq!(before_request.replay_safety, RequestReplaySafety::Safe);
     assert!(!before_request.partial_output_emitted);
+
+    let ambiguous = ModelFailure::new(
+      ModelFailureKind::Timeout,
+      FailurePhase::WaitingForResponse,
+      "POST may have reached the endpoint",
+    );
+    assert_eq!(
+      ambiguous.replay_safety,
+      RequestReplaySafety::AmbiguousPostBoundary
+    );
+    assert!(!ambiguous.safe_to_retry());
+    assert!(
+      ambiguous
+        .clone()
+        .with_replay_safety(RequestReplaySafety::Safe)
+        .safe_to_retry()
+    );
 
     // A model that answered badly is not an availability failure, and a
     // cancelled turn is never retried.
@@ -435,6 +498,20 @@ mod tests {
     assert!(
       encoded.contains("\"partial_output_emitted\":true"),
       "{encoded}"
+    );
+
+    let mut legacy = serde_json::to_value(ModelFailure::new(
+      ModelFailureKind::Transport,
+      FailurePhase::WaitingForResponse,
+      "legacy failure",
+    ))
+    .unwrap();
+    legacy.as_object_mut().unwrap().remove("replay_safety");
+    let decoded: ModelFailure = serde_json::from_value(legacy).unwrap();
+    assert_eq!(
+      decoded.replay_safety,
+      RequestReplaySafety::AmbiguousPostBoundary,
+      "old serialized failures must default conservatively"
     );
   }
 }

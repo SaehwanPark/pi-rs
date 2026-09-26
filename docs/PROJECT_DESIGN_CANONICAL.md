@@ -1099,7 +1099,11 @@ fails ----+
 backup model
 ```
 
-Retry should precede failover.
+Retry should precede failover only when replay is proven safe. A retryable failure kind
+alone is insufficient: each `ModelFailure` carries `RequestReplaySafety` with `Safe`,
+`AmbiguousPostBoundary`, or `CommittedOutput`. A known pre-dispatch failure or an explicit
+retry-safe HTTP response may retry; an ambiguous POST skips same-model retry and moves
+directly to the configured failover decision. Committed output is never replayed.
 
 ### Eligible automatic failover cases
 
