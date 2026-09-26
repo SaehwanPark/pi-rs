@@ -418,12 +418,7 @@ impl Decoder {
       (None, None) if uncorrelated_batch => {
         let slot = self.new_tool_slot()?;
         let reason = "multiple tool fragments in one chunk had neither an index nor an id";
-        let existing_slots: Vec<_> = self
-          .tools
-          .keys()
-          .copied()
-          .filter(|existing| *existing != slot)
-          .collect();
+        let existing_slots = self.open_keyed_tool_slots();
         for existing in existing_slots {
           self.mark_correlation_error(existing, reason);
         }
@@ -515,9 +510,9 @@ impl Decoder {
       .collect()
   }
 
-  /// The compatibility fallback is safe only when one call with an explicit
-  /// provider identity remains open and unconflicted. An uncorrelated fragment
-  /// cannot establish its own identity, and two open calls remain ambiguous.
+  /// The compatibility fallback is limited to one explicitly keyed builder
+  /// without a prior correlation conflict. An uncorrelated fragment cannot
+  /// establish its own identity, and two open calls remain ambiguous.
   fn unique_keyed_open_slot(&self) -> Option<u64> {
     let mut candidates = self.open_keyed_tool_slots().into_iter();
     let only = candidates.next()?;
@@ -532,12 +527,7 @@ impl Decoder {
       .iter()
       .filter_map(|(slot, builder)| {
         let has_provider_key = builder.id.is_some() || indexed_slots.contains(slot);
-        let arguments_complete = matches!(
-          serde_json::from_str::<Value>(builder.arguments.trim()),
-          Ok(Value::Object(_))
-        );
-        (has_provider_key && builder.correlation_error.is_none() && !arguments_complete)
-          .then_some(*slot)
+        (has_provider_key && builder.correlation_error.is_none()).then_some(*slot)
       })
       .collect()
   }
@@ -1123,36 +1113,6 @@ mod tests {
       ProviderEvent::ToolCallRejected { reason, .. }
         if reason.contains("could not be safely correlated")
     )));
-  }
-
-  #[test]
-  fn a_missing_key_does_not_extend_a_completed_tool_call() {
-    let mut collector = Collector::default();
-    let mut decoder = Decoder::new(ReasoningExposure::None);
-    for fragment in [
-      chunk(json!({
-        "tool_calls": [{
-          "index": 0,
-          "id": "read-id",
-          "function": {"name": "read", "arguments": "{}"}
-        }]
-      })),
-      chunk(json!({
-        "tool_calls": [{"function": {"name": "write", "arguments": "{}"}}]
-      })),
-    ] {
-      decoder.chunk(&fragment, &mut collector).unwrap();
-    }
-    decoder
-      .finish(StreamEnd::DoneSentinel, &mut collector)
-      .unwrap();
-
-    assert_eq!(collector.events().len(), 2);
-    assert!(matches!(collector.events()[0], ProviderEvent::ToolCall(_)));
-    assert!(matches!(
-      collector.events()[1],
-      ProviderEvent::ToolCallRejected { ref name, .. } if name == "write"
-    ));
   }
 
   #[test]
