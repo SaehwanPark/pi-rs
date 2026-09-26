@@ -98,9 +98,9 @@ pub enum ReductionReason {
 
 /// What measured context looks like right now.
 ///
-/// `measured_tokens` is preferred over `estimated_tokens`; when a provider
-/// reports usage, the measurement wins, and estimates are only used before the
-/// first response of a session.
+/// `measured_tokens` may replace the estimate only when it measures this exact
+/// current request. Provider usage from a completed request describes its prior
+/// prompt and must never be reused as the size of a subsequently changed context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextState {
   pub window: u64,

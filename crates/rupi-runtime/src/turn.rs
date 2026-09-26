@@ -463,8 +463,6 @@ pub struct TurnLoop<'a> {
   /// cooldown. `None` until the first eviction; a loop that has never compacted
   /// has waited longer than any cooldown.
   last_compaction: Option<Instant>,
-  /// Last provider-reported input tokens, preferred over any estimate.
-  measured_input_tokens: Option<u64>,
   /// Envelopes this loop produced. Journal positions come from the trace, and
   /// compaction needs them: the epoch names the canonical range it replaces,
   /// and a loop that cannot cite positions cites none.
@@ -529,7 +527,6 @@ impl<'a> TurnLoop<'a> {
       checkpoint_floor: 0,
       checkpoint_cited_from: None,
       last_compaction: None,
-      measured_input_tokens: None,
       envelopes: Vec::new(),
       history: None,
       compaction_strategy: CompactionStrategy::default(),
@@ -1404,15 +1401,6 @@ impl<'a> TurnLoop<'a> {
     self.emit_with_sink_parent(turn_id, event, false, parent_event_id)
   }
 
-  fn emit_without_message_with_parent(
-    &mut self,
-    turn_id: Option<TurnId>,
-    event: AgentEvent,
-    parent_event_id: Option<rupi_core::EventId>,
-  ) -> Result<EventEnvelope, TurnError> {
-    self.emit_with_sink_parent(turn_id, event, true, parent_event_id)
-  }
-
   fn emit_with_sink(
     &mut self,
     turn_id: Option<TurnId>,
@@ -1789,10 +1777,6 @@ impl<'a> TurnLoop<'a> {
               failure
             }
             None => {
-              // Context pressure follows the logical prompt footprint, not only
-              // newly evaluated tokens. Cache hits are cheap but still occupy the
-              // provider's context window and must remain visible to the policy.
-              self.measured_input_tokens = usage.logical_prompt_tokens.or(usage.input_tokens);
               let tool_calls = u32::try_from(calls.len()).map_err(|_| {
                 TurnFailure::Sink(SinkError("tool-call count exceeds durable limit".into()))
               })?;
@@ -2041,7 +2025,7 @@ impl<'a> TurnLoop<'a> {
           .iter()
           .any(|gap| matches!(gap, CapabilityGap::ContextWindow { .. }));
         let dropped = if narrow {
-          self.rebudget(turn_id.clone(), turn_history_start)?
+          self.rebudget(backup, turn_id.clone(), turn_history_start)?
         } else {
           0
         };
@@ -2112,26 +2096,20 @@ impl<'a> TurnLoop<'a> {
   /// a rebudget and performing one.
   fn rebudget(
     &mut self,
+    backup: &'a dyn ModelProvider,
     turn_id: TurnId,
     turn_history_start: &mut usize,
   ) -> Result<u32, TurnError> {
-    let target = self
-      .failover
-      .backup_capabilities
-      .as_ref()
-      .map(|caps| caps.context_window.saturating_sub(1_024))
-      .unwrap_or(4_096);
-    let checkpoint = self.checkpoint_floor.min(self.messages.len());
-    let turn_start = (*turn_history_start).min(self.messages.len());
-    let had_evictable_history = turn_start.max(checkpoint) > checkpoint;
-    let dropped = self.evict_oldest(target, &turn_id, turn_history_start)?;
-    // `safe_eviction_boundary` may refuse every candidate when the oldest
-    // retained unit is an incomplete tool lifecycle. Do not switch epochs and
-    // send a request that is known to exceed the backup budget in that case;
-    // a smaller model cannot repair an invalid history by receiving it.
-    if had_evictable_history && estimate_messages(&self.messages) > target {
+    let target = overflow_recovery_target(backup.capabilities().context_window);
+    let dropped = self.evict_oldest_for(backup, target, &turn_id, turn_history_start)?;
+    // Validate the exact backup request, including its system guidance and the
+    // tools that its capabilities and the current execution policy will expose.
+    // This also refuses a request that cannot fit even when there is no
+    // evictable history; switching epochs must not knowingly send an oversized
+    // prompt.
+    if self.estimate_request_for(backup, self.messages.clone()) > target {
       return Err(TurnError::Sink(format!(
-        "cannot safely rebudget history below the backup context target of {target} tokens"
+        "cannot safely rebudget the complete backup request below its context target of {target} tokens"
       )));
     }
     Ok(dropped)
@@ -2151,8 +2129,19 @@ impl<'a> TurnLoop<'a> {
     turn_id: &TurnId,
     turn_history_start: &mut usize,
   ) -> Result<u32, TurnError> {
+    let provider = self.provider();
+    self.evict_oldest_for(provider, target, turn_id, turn_history_start)
+  }
+
+  fn evict_oldest_for(
+    &mut self,
+    provider: &dyn ModelProvider,
+    target: u64,
+    turn_id: &TurnId,
+    turn_history_start: &mut usize,
+  ) -> Result<u32, TurnError> {
     self.normalize_message_seqs();
-    let before = estimate_messages(&self.messages);
+    let before = self.estimate_request_for(provider, self.messages.clone());
     let turn_start = (*turn_history_start).min(self.messages.len());
     // The current-turn suffix and a restored checkpoint capsule are both
     // non-evictable. The latter is a durable barrier, not ordinary history.
@@ -2162,7 +2151,7 @@ impl<'a> TurnLoop<'a> {
     let max_drop = evictable_end.saturating_sub(evictable_start);
     let mut desired = 0usize;
     while desired < max_drop
-      && estimate_after_eviction(&self.messages, evictable_start, desired) > target
+      && self.estimate_request_after_eviction(provider, evictable_start, desired) > target
     {
       desired += 1;
     }
@@ -2181,7 +2170,7 @@ impl<'a> TurnLoop<'a> {
       })
       .unwrap_or(0);
     if dropped > 0 {
-      let visible = estimate_after_eviction(&self.messages, evictable_start, dropped);
+      let visible = self.estimate_request_after_eviction(provider, evictable_start, dropped);
       let dropped_count = u32::try_from(dropped)
         .map_err(|_| TurnError::Sink("eviction message count exceeds durable limit".into()))?;
       let retained_count = u32::try_from(self.messages.len().saturating_sub(dropped))
@@ -2732,10 +2721,20 @@ impl<'a> TurnLoop<'a> {
     Ok(removed)
   }
 
-  /// Assemble the exact provider request shape without consulting or mutating
-  /// context policy. Emergency overflow recovery uses this same constructor.
+  /// Assemble the active provider's exact request shape without consulting or
+  /// mutating context policy. Emergency overflow recovery uses this constructor.
   fn assemble_request(&self, messages: Vec<Message>) -> ModelRequest {
-    let capabilities = self.provider().capabilities();
+    self.assemble_request_for(self.provider(), messages)
+  }
+
+  /// Assemble a request as a particular attached model would receive it. The
+  /// failover rebudget gate uses this before changing the active epoch.
+  fn assemble_request_for(
+    &self,
+    provider: &dyn ModelProvider,
+    messages: Vec<Message>,
+  ) -> ModelRequest {
+    let capabilities = provider.capabilities();
     let may_approve_mutations =
       self.interactive_tool_approval || self.tools.auto_approves_mutating();
     let tools = if self.tools_enabled && capabilities.tools {
@@ -2755,7 +2754,7 @@ impl<'a> TurnLoop<'a> {
     } else {
       Vec::new()
     };
-    let mut request = ModelRequest::new(self.active_model(), capabilities, messages)
+    let mut request = ModelRequest::new(provider.model().clone(), capabilities, messages)
       .with_tools(tools)
       .with_thinking(self.thinking);
     let mut system = self.system.clone().unwrap_or_default();
@@ -2765,6 +2764,24 @@ impl<'a> TurnLoop<'a> {
     system.push_str(&tool_availability_prompt(&request.tools));
     request = request.with_system(system);
     request
+  }
+
+  fn estimate_request_for(&self, provider: &dyn ModelProvider, messages: Vec<Message>) -> u64 {
+    estimate_tokens(&self.assemble_request_for(provider, messages))
+  }
+
+  fn estimate_request_after_eviction(
+    &self,
+    provider: &dyn ModelProvider,
+    start: usize,
+    dropped: usize,
+  ) -> u64 {
+    let mut messages = self.messages.clone();
+    let end = start.saturating_add(dropped).min(messages.len());
+    if start < end {
+      messages.drain(start..end);
+    }
+    self.estimate_request_for(provider, messages)
   }
 
   /// Whether a tool remains available after the opt-in progress boundary has
@@ -2882,7 +2899,9 @@ impl<'a> TurnLoop<'a> {
       let mut state = ContextState::zero(capabilities.context_window);
       state.model = Some(self.active_model());
       state.context_epoch = self.context_epoch;
-      state.measured_tokens = self.measured_input_tokens;
+      // Provider usage describes the preceding request, not this assembled one.
+      // Use the current estimate until an exact measurement for this request is
+      // available; never substitute a stale value from another prompt or model.
       state.estimated_tokens = estimated_tokens;
       state.recent_tokens =
         estimate_messages(&self.messages[(*turn_history_start).min(self.messages.len())..]);
@@ -3101,7 +3120,14 @@ impl<'a> TurnLoop<'a> {
         }),
         Some(assistant_event_id.clone()),
       )?;
-      self.emit_without_message_with_parent(
+      let outcome = ToolOutcome::failed(reason.to_string());
+      let message = Message::new(
+        Role::Tool,
+        vec![ContentBlock::ToolResult(
+          outcome.to_block(call.id.clone(), &call.name),
+        )],
+      );
+      let envelope = self.emit_message_with_parent(
         Some(turn_id.clone()),
         AgentEvent::ToolFailed(ToolFailed {
           call_id: call.id.clone(),
@@ -3110,8 +3136,24 @@ impl<'a> TurnLoop<'a> {
           duration_ms: 0,
           status: None,
         }),
+        &message,
         Some(requested.meta.event_id),
       )?;
+      self.push_message(message, envelope.meta.seq);
+      let executed = Executed {
+        request: rupi_core::ToolRequest {
+          call_id: call.id.clone(),
+          name: call.name.clone(),
+          arguments: call.arguments.clone(),
+        },
+        outcome,
+        state: ToolExecutionState::Failed,
+        started: false,
+        refusal: Some(reason.to_string()),
+        full_output: None,
+        cancelled: false,
+      };
+      progress.on_tool_finished(call, &executed);
     }
     Ok(())
   }
@@ -3127,7 +3169,19 @@ impl<'a> TurnLoop<'a> {
     progress: &mut dyn TurnProgress,
   ) -> Result<bool, TurnError> {
     let mut progress_succeeded = false;
-    for call in calls {
+    for (index, call) in calls.iter().enumerate() {
+      if cancel.is_cancelled() {
+        // The assistant batch is already committed. Close the entire remaining
+        // tail before allowing another provider request or session continuation.
+        self.record_unexecuted_calls(
+          turn_id.clone(),
+          assistant_event_id.clone(),
+          &calls[index..],
+          progress,
+          "not executed: the turn was cancelled",
+        )?;
+        break;
+      }
       let metadata = self.tools.metadata_for(&call.name);
       let read_only = metadata
         .as_ref()
@@ -3144,34 +3198,6 @@ impl<'a> TurnLoop<'a> {
         }),
         Some(assistant_event_id.clone()),
       )?;
-
-      if cancel.is_cancelled() {
-        // A call the model asked for but that never ran is still recorded: it is
-        // part of what the model decided.
-        let block = ToolResultBlock {
-          id: call.id.clone(),
-          name: call.name.clone(),
-          state: ToolExecutionState::Requested,
-          text: "not executed: the turn was cancelled".to_string(),
-          is_error: true,
-          reduced: false,
-        };
-        let message = Message::new(Role::Tool, vec![ContentBlock::ToolResult(block)]);
-        let envelope = self.emit_message_with_parent(
-          Some(turn_id.clone()),
-          AgentEvent::ToolFailed(ToolFailed {
-            call_id: call.id.clone(),
-            name: call.name.clone(),
-            message: "cancelled before execution".to_string(),
-            duration_ms: 0,
-            status: None,
-          }),
-          &message,
-          Some(requested.meta.event_id.clone()),
-        )?;
-        self.push_message(message, envelope.meta.seq);
-        break;
-      }
 
       if let Some(parse_reason) = rejected_calls.get(call.id.as_str()) {
         let reason = format!(
@@ -3264,18 +3290,27 @@ impl<'a> TurnLoop<'a> {
         )?;
         (executed, elapsed_ms(clock), started_event_id)
       };
+      let (mut execution, duration_ms, started_event_id) = executed;
+      // The registry can observe cancellation in the small race between our batch
+      // check and dispatch. It proves this call never started, so close it as a
+      // terminal failure rather than leaving an open Requested lifecycle.
+      if execution.state == ToolExecutionState::Requested && !execution.started {
+        execution.state = ToolExecutionState::Failed;
+        execution.outcome.state = ToolExecutionState::Failed;
+        execution.outcome.is_error = true;
+      }
       let (block, seq) = self.record_tool_outcome(
         turn_id.clone(),
         call,
-        &executed.0,
-        executed.1,
+        &execution,
+        duration_ms,
         read_only,
-        executed.2.or(Some(requested.meta.event_id.clone())),
+        started_event_id.or(Some(requested.meta.event_id.clone())),
       )?;
-      if self.call_makes_progress(call) && executed.0.state == ToolExecutionState::Succeeded {
+      if self.call_makes_progress(call) && execution.state == ToolExecutionState::Succeeded {
         progress_succeeded = true;
       }
-      progress.on_tool_finished(call, &executed.0);
+      progress.on_tool_finished(call, &execution);
       self.push_message(
         Message::new(Role::Tool, vec![ContentBlock::ToolResult(block)]),
         seq,
@@ -3601,11 +3636,12 @@ fn elapsed_ms(clock: Instant) -> u64 {
   clock.elapsed().as_millis() as u64
 }
 
-/// Rough token estimate for one request, used only until a measurement exists.
+/// Rough token estimate for the request about to be sent.
 ///
 /// The estimate deliberately includes the complete tool schema because a request
 /// can fit by message bytes alone while still exceeding the provider window once
-/// exposed tools are serialized.
+/// exposed tools are serialized. A previous request's usage is not a measurement
+/// of this request and must not replace this estimate.
 fn estimate_tokens(request: &ModelRequest) -> u64 {
   let mut bytes = request
     .system
@@ -3647,9 +3683,9 @@ fn tool_availability_prompt(tools: &[rupi_core::ToolSpec]) -> String {
   )
 }
 
-/// Leave explicit headroom after a provider has proved the advertised window
-/// estimate was optimistic. The same assembled request is measured before this
-/// target is accepted, so system text, tools, and message ordering all count.
+/// Leave ten percent of the provider's advertised window as estimation headroom.
+/// The assembled request, including system text and exposed tools, is measured
+/// before this target is accepted.
 fn overflow_recovery_target(window: u64) -> u64 {
   window.saturating_mul(9) / 10
 }
@@ -3666,16 +3702,6 @@ pub fn truncate_utf8_to_bytes(text: &str, max_bytes: usize) -> &str {
 /// Rough token estimate for history alone.
 fn estimate_messages(messages: &[Message]) -> u64 {
   let bytes: usize = messages.iter().map(estimate_message_bytes).sum();
-  (bytes / 4).max(1) as u64
-}
-
-fn estimate_after_eviction(messages: &[Message], start: usize, dropped: usize) -> u64 {
-  let end = start.saturating_add(dropped).min(messages.len());
-  let bytes: usize = messages[..start]
-    .iter()
-    .chain(messages[end..].iter())
-    .map(estimate_message_bytes)
-    .sum();
   (bytes / 4).max(1) as u64
 }
 
@@ -4814,6 +4840,36 @@ mod tests {
     }
   }
 
+  struct CancelFirstCall;
+
+  impl Tool for CancelFirstCall {
+    fn metadata(&self) -> ToolMetadata {
+      ToolMetadata::read_only("cancel_first", "cancels the turn after this call")
+    }
+
+    fn arguments_schema(&self) -> serde_json::Value {
+      serde_json::json!({"type":"object"})
+    }
+
+    fn execute(
+      &self,
+      _request: &ToolRequest,
+      _progress: &mut dyn rupi_core::ToolProgress,
+    ) -> Result<ToolOutcome, rupi_core::ToolError> {
+      Ok(ToolOutcome::succeeded("cancelled"))
+    }
+
+    fn execute_with_context(
+      &self,
+      _request: &ToolRequest,
+      _progress: &mut dyn rupi_core::ToolProgress,
+      context: &rupi_core::ToolExecutionContext,
+    ) -> Result<ToolOutcome, rupi_core::ToolError> {
+      context.cancel_token().cancel();
+      Ok(ToolOutcome::succeeded("cancelled"))
+    }
+  }
+
   /// A tool that represents the requested mutation for the progress-boundary
   /// test without touching the host filesystem.
   #[derive(Clone)]
@@ -5128,6 +5184,107 @@ mod tests {
     );
     assert!(!request.tools.is_empty());
     assert!(request.system.is_some());
+  }
+
+  struct RecordingProfilePolicy {
+    profile: rupi_core::ProfilePolicy,
+    observations: Arc<Mutex<Vec<(ContextState, rupi_core::ContextDecision)>>>,
+  }
+
+  impl ContextPolicy for RecordingProfilePolicy {
+    fn evaluate(&self, state: &ContextState) -> rupi_core::ContextDecision {
+      let decision = self.profile.evaluate(state);
+      self
+        .observations
+        .lock()
+        .unwrap()
+        .push((state.clone(), decision.clone()));
+      decision
+    }
+
+    fn name(&self) -> &'static str {
+      self.profile.name()
+    }
+  }
+
+  struct ExpandedResultTool(String);
+
+  impl Tool for ExpandedResultTool {
+    fn metadata(&self) -> ToolMetadata {
+      ToolMetadata::read_only("expand", "returns a bounded fixture result")
+    }
+
+    fn arguments_schema(&self) -> serde_json::Value {
+      serde_json::json!({"type":"object"})
+    }
+
+    fn execute(
+      &self,
+      _request: &ToolRequest,
+      _progress: &mut dyn rupi_core::ToolProgress,
+    ) -> Result<ToolOutcome, rupi_core::ToolError> {
+      Ok(ToolOutcome::succeeded(self.0.clone()))
+    }
+  }
+
+  #[test]
+  fn context_policy_uses_the_current_request_after_a_large_tool_result() {
+    let mut provider = Scripted::new(
+      "current-context-sizing",
+      vec![tool_call("expand", serde_json::json!({})), text("done")],
+    );
+    provider.capabilities.context_window = 32_000;
+    let mut usage = rupi_core::CompletionUsage::unknown();
+    usage.input_tokens = Some(8_000);
+    usage.logical_prompt_tokens = Some(8_000);
+    let provider = provider.with_usage(usage);
+
+    let tool_policy = rupi_core::ToolPolicy {
+      auto_approve_mutating: true,
+      max_output_bytes: 160_000,
+      ..Default::default()
+    };
+    let mut tools = ToolRegistry::new(Workspace::new(std::env::temp_dir()).expect("temp dir"))
+      .with_policy(&tool_policy);
+    tools.register(Box::new(ExpandedResultTool("x".repeat(100_000))));
+
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let policy = RecordingProfilePolicy {
+      profile: rupi_core::ProfilePolicy::new(rupi_core::ContextProfile::Balanced, 32_000),
+      observations: Arc::clone(&observations),
+    };
+    let mut trace = Recorder::default();
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn("expand context", &CancelToken::new(), &mut SilentProgress)
+    .expect("turn completes after reducing the completed tool cycle");
+
+    assert_eq!(report.status, TurnStatus::Completed);
+    let observations = observations.lock().unwrap();
+    assert!(observations.len() >= 2);
+    let (second_state, second_decision) = &observations[1];
+    assert_eq!(second_state.measured_tokens, None);
+    assert!(second_state.estimated_tokens > 24_000);
+    assert!(matches!(
+      &second_decision.action,
+      ContextAction::Compact { .. }
+    ));
+    assert!(
+      trace
+        .kinds()
+        .iter()
+        .any(|kind| kind == "context_compaction_started")
+    );
+    assert!(
+      estimate_tokens(&provider.requests()[1]) < second_state.estimated_tokens,
+      "the measured current request is reduced before dispatch"
+    );
   }
 
   #[test]
@@ -5656,12 +5813,15 @@ mod tests {
       .restore(&session_id)
       .expect("the finished session restores immediately");
     assert!(restored.interrupted_tools.is_empty());
-    assert_eq!(restored.messages.len(), 1);
-    assert!(
+    assert_eq!(restored.messages.len(), 2);
+    assert_eq!(
       restored
         .messages
         .iter()
-        .all(|message| message.message.role != Role::Tool)
+        .filter(|message| message.message.role == Role::Tool)
+        .count(),
+      1,
+      "the known-unexecuted call has a durable failed result"
     );
 
     let journal = rupi_store::TraceJournal::read(&trace_path).unwrap();
@@ -7032,7 +7192,7 @@ mod tests {
     let primary =
       Scripted::new("primary", Vec::new()).always_fails(ModelFailureKind::ProviderUnavailable);
     let mut backup = Scripted::new("backup", vec![text("from a small window")]);
-    backup.capabilities.context_window = 1_024;
+    backup.capabilities.context_window = 2_048;
     let tools = registry_with(Vec::new());
     let mut trace = Recorder::default();
     let policy = rupi_core::ProfilePolicy::new(
@@ -7105,7 +7265,7 @@ mod tests {
     ]);
     let mut turn_start = 2;
     let error = runtime
-      .rebudget(TurnId::new(), &mut turn_start)
+      .rebudget(&backup, TurnId::new(), &mut turn_start)
       .expect_err("an incomplete tool unit cannot be crossed to fit the backup");
 
     assert!(
@@ -7119,14 +7279,53 @@ mod tests {
   }
 
   #[test]
+  fn backup_rebudget_accounts_for_system_prompt_and_exposed_tool_schemas() {
+    let primary =
+      Scripted::new("primary", Vec::new()).always_fails(ModelFailureKind::ProviderUnavailable);
+    let mut backup = Scripted::new("backup", vec![text("must not run")]);
+    backup.capabilities.context_window = 1_100;
+    let tools = registry_with(vec![Box::new(SizedTool {
+      description: "description ".repeat(200),
+      schema: serde_json::json!({"type":"object","description":"schema ".repeat(200)}),
+    })]);
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      primary.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &primary,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_backup(&backup)
+    .with_system("system ".repeat(200))
+    .with_messages(vec![Message::user("small current request")]);
+    let mut turn_start = 0;
+
+    let error = runtime
+      .rebudget(&backup, TurnId::new(), &mut turn_start)
+      .expect_err("fixed request overhead does not fit the backup target");
+    assert!(
+      matches!(error, TurnError::Sink(ref message) if message.contains("complete backup request")),
+      "unexpected error: {error:?}"
+    );
+    assert!(backup.requests().is_empty(), "the backup is not contacted");
+    drop(runtime);
+  }
+
+  #[test]
   fn a_narrower_backup_drops_older_turns_before_it_takes_over() {
     // The other side of the same line: with real history in flight, takeover into a
     // small window shortens it, says so, and records what was given up.
     let primary =
       Scripted::new("primary", Vec::new()).always_fails(ModelFailureKind::ProviderUnavailable);
     let mut backup = Scripted::new("backup", vec![text("from a small window")]);
-    // Target is the window less a kilotoken, so this backup can hold the newest turn
-    // and little else.
+    // The backup keeps ten percent headroom, so it can hold the newest turn and
+    // little else.
     backup.capabilities.context_window = 1_100;
     let history = vec![
       Message::user("a".repeat(20_000)),
@@ -7446,6 +7645,79 @@ mod tests {
   }
 
   #[test]
+  fn cancellation_settles_the_entire_assistant_tool_batch_before_resume() {
+    let cancel = CancelToken::new();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![
+      Box::new(CancelFirstCall),
+      Box::new(Spy(Arc::clone(&seen))),
+    ]);
+    let mut batch = Vec::new();
+    batch.extend(tool_call("cancel_first", serde_json::json!({})));
+    batch.extend(tool_call("spy", serde_json::json!({"item": 2})));
+    batch.extend(tool_call("spy", serde_json::json!({"item": 3})));
+    let provider = Scripted::new("cancelled-batch", vec![batch, text("resumed")]);
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    );
+
+    let interrupted = runtime
+      .run_turn("start", &cancel, &mut SilentProgress)
+      .expect("cancellation is a durable turn result");
+    assert_eq!(interrupted.status, TurnStatus::Cancelled);
+    assert_eq!(seen.lock().unwrap().len(), 0, "the batch tail never runs");
+
+    let resumed = runtime
+      .run_turn("continue", &CancelToken::new(), &mut SilentProgress)
+      .expect("a later turn receives protocol-valid history");
+    assert_eq!(resumed.status, TurnStatus::Completed);
+    let request = provider.requests().pop().expect("resume request exists");
+    let calls: BTreeSet<_> = request
+      .messages
+      .iter()
+      .filter(|message| message.role == Role::Assistant)
+      .flat_map(Message::tool_calls)
+      .map(|call| call.id.to_string())
+      .collect();
+    let results: Vec<_> = request
+      .messages
+      .iter()
+      .filter(|message| message.role == Role::Tool)
+      .flat_map(|message| &message.content)
+      .filter_map(|block| match block {
+        ContentBlock::ToolResult(result) => Some(result),
+        _ => None,
+      })
+      .collect();
+    let result_ids: BTreeSet<_> = results.iter().map(|result| result.id.to_string()).collect();
+    assert_eq!(
+      calls, result_ids,
+      "every committed call has one visible result"
+    );
+    assert_eq!(results.len(), 3);
+    assert_eq!(
+      results
+        .iter()
+        .filter(|result| result.state == ToolExecutionState::Failed)
+        .count(),
+      2
+    );
+    drop(runtime);
+    assert_eq!(trace.count("tool_completed"), 1);
+    assert_eq!(trace.count("tool_failed"), 2);
+  }
+
+  #[test]
   fn a_cancelled_turn_reports_cancelled_and_runs_no_tools() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let spy = Box::new(Spy(Arc::clone(&seen)));
@@ -7576,16 +7848,17 @@ mod tests {
       rupi_core::ContextProfile::Balanced,
       provider.capabilities().context_window,
     );
-    let report = TurnLoop::new(
+    let mut runtime = TurnLoop::new(
       &provider,
       &tools,
       &policy,
       &mut trace,
       SessionId::new(),
       TraceId::new(),
-    )
-    .run_finalization("assess", &CancelToken::new(), &mut SilentProgress)
-    .expect("unexpected tool call is closed as an incomplete assessment");
+    );
+    let report = runtime
+      .run_finalization("assess", &CancelToken::new(), &mut SilentProgress)
+      .expect("unexpected tool call is closed as an incomplete assessment");
 
     assert_eq!(report.status, TurnStatus::BudgetExhausted);
     assert!(report.budget_exhausted);
@@ -7593,6 +7866,16 @@ mod tests {
       seen.lock().unwrap().is_empty(),
       "finalization executed a tool"
     );
+    assert_eq!(
+      runtime
+        .messages()
+        .iter()
+        .filter(|message| message.role == Role::Tool)
+        .count(),
+      1,
+      "a finalization tool request still gets a model-visible terminal result"
+    );
+    drop(runtime);
     assert_eq!(trace.count("tool_failed"), 1);
   }
 
@@ -7632,12 +7915,12 @@ mod tests {
     .run_turn("go", &CancelToken::new(), &mut SilentProgress)
     .expect("turn completes");
 
-    // 16 000 estimated tokens over a 5 000-token target drops the 11 oldest of
-    // the 17 messages: the five newest old turns and the live prompt remain.
+    // The exact request estimate includes the system guidance, so one more old
+    // turn is removed than a message-only estimate would require.
     let request = &provider.requests()[0];
-    assert_eq!(request.messages.len(), 6, "evicted to the recent target");
-    assert!(request.messages[0].text().starts_with('l'));
-    assert_eq!(request.messages[5].text(), "go");
+    assert_eq!(request.messages.len(), 5, "evicted to the recent target");
+    assert!(request.messages[0].text().starts_with('m'));
+    assert_eq!(request.messages[4].text(), "go");
 
     let kinds = trace.kinds();
     let reduced = kinds
@@ -7923,7 +8206,7 @@ mod tests {
     runtime
       .run_turn("question 2", &CancelToken::new(), &mut SilentProgress)
       .expect("second turn");
-    let target = estimate_messages(&runtime.messages()[2..]);
+    let target = estimate_tokens(&runtime.assemble_request(runtime.messages()[2..].to_vec()));
     let mut turn_start = runtime.messages().len();
     let removed = runtime
       .evict_oldest(target, &TurnId::new(), &mut turn_start)
