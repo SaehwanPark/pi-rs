@@ -10,9 +10,9 @@
 //!
 //! - **One model at a time.** Exactly one epoch is active; a change of model is an
 //!   epoch transition with a recorded reason, never an implicit swap.
-//! - **A request is re-issued only while nothing has been streamed.** Once output
-//!   reaches the user it is committed content; restarting would duplicate a
-//!   half-answer, which is worse than a visible failure.
+//! - Ordinary request retries require that nothing was streamed. The one bounded
+//!   output-limit recovery is an explicit exception: failed deltas stay out of
+//!   future model context and tools from the incomplete response never execute.
 //! - **Every tool call reaches a terminal lifecycle state**, including calls that
 //!   were interrupted or refused. A tool call with no terminal event is a bug here.
 //! - **Context is never silently truncated.** An oversized request is refused, and
@@ -1120,11 +1120,12 @@ impl<'a> TurnLoop<'a> {
     // caller's side they cost the same. Keep one request in reserve for an
     // explicit no-tool completion assessment whenever the configured budget allows
     // it; a budget of one remains a useful single ordinary request.
-    let normal_request_limit = if self.max_requests > 1 {
+    let mut normal_request_limit = if self.max_requests > 1 {
       self.max_requests - 1
     } else {
       self.max_requests
     };
+    let mut truncation_recovery_used = false;
     while self.requests.load(Ordering::SeqCst) < normal_request_limit {
       if cancel.is_cancelled() {
         return self.finish(report, TurnStatus::Cancelled, clock, Some(turn_id.clone()));
@@ -1147,9 +1148,40 @@ impl<'a> TurnLoop<'a> {
             )?;
             return self.finish_failure(report, failure, clock, turn_id.clone());
           }
-          match self.recover_context_overflow(&turn_id, &mut turn_history_start)? {
+          match self.recover_prior_context(&turn_id, &mut turn_history_start)? {
             true => {
               overflow_recovery_used = true;
+              continue;
+            }
+            false => return self.finish_failure(report, failure, clock, turn_id.clone()),
+          }
+        }
+        Err(TurnFailure::OutputTruncated {
+          failure,
+          actual_output_tokens,
+          requested_output_tokens,
+        }) => {
+          if truncation_recovery_used {
+            self.diagnostic(
+              Some(turn_id.clone()),
+              DiagnosticLevel::Warn,
+              "output-limit recovery was already used for this turn; leaving the incomplete response failed",
+            )?;
+            return self.finish_failure(report, failure, clock, turn_id.clone());
+          }
+          match self.recover_prior_context(&turn_id, &mut turn_history_start)? {
+            true => {
+              truncation_recovery_used = true;
+              // Prefer the bounded retry to an extra no-tool assessment of a
+              // response that the provider explicitly marked incomplete.
+              normal_request_limit = self.max_requests;
+              self.diagnostic(
+                Some(turn_id.clone()),
+                DiagnosticLevel::Info,
+                format!(
+                  "output-limit response used {actual_output_tokens} of {requested_output_tokens} requested tokens; prior context compacted and one same-model retry is allowed",
+                ),
+              )?;
               continue;
             }
             false => return self.finish_failure(report, failure, clock, turn_id.clone()),
@@ -1192,6 +1224,7 @@ impl<'a> TurnLoop<'a> {
           &calls,
           progress,
           "finalization mode does not execute tools",
+          true,
         )?;
         report.budget_exhausted = true;
         self.diagnostic(
@@ -1259,7 +1292,11 @@ impl<'a> TurnLoop<'a> {
           report.requests = self.requests.load(Ordering::SeqCst);
           return self.finish(report, TurnStatus::Cancelled, clock, Some(turn_id.clone()));
         }
-        Err(TurnFailure::ProviderOverflow(failure) | TurnFailure::Fatal(failure)) => {
+        Err(
+          TurnFailure::ProviderOverflow(failure)
+          | TurnFailure::Fatal(failure)
+          | TurnFailure::OutputTruncated { failure, .. },
+        ) => {
           report.requests = self.requests.load(Ordering::SeqCst);
           return self.finish_failure(report, failure, clock, turn_id.clone());
         }
@@ -1291,6 +1328,7 @@ impl<'a> TurnLoop<'a> {
           &calls,
           progress,
           "request-budget finalization does not execute tools",
+          true,
         )?;
         self.diagnostic(
           Some(turn_id.clone()),
@@ -1572,10 +1610,11 @@ impl<'a> TurnLoop<'a> {
     Err(TurnError::Unavailable(failure))
   }
 
-  /// Prepare one bounded local recovery candidate after an uncommitted provider
-  /// overflow. The live message vector is not changed until the candidate has
-  /// been assembled with the same request shape used for production requests.
-  fn recover_context_overflow(
+  /// Prepare one bounded local recovery candidate by compacting only history
+  /// that predates this turn. The live message vector is not changed until the
+  /// candidate has been assembled with the same request shape used for production
+  /// requests.
+  fn recover_prior_context(
     &mut self,
     turn_id: &TurnId,
     turn_history_start: &mut usize,
@@ -1586,7 +1625,7 @@ impl<'a> TurnLoop<'a> {
       self.diagnostic(
         Some(turn_id.clone()),
         DiagnosticLevel::Warn,
-        "provider rejected the request for context overflow; current-turn content alone cannot be compacted safely",
+        "model response needs recovery, but current-turn content alone cannot be compacted safely",
       )?;
       return Ok(false);
     }
@@ -1594,7 +1633,7 @@ impl<'a> TurnLoop<'a> {
       self.diagnostic(
         Some(turn_id.clone()),
         DiagnosticLevel::Warn,
-        "provider rejected the request for context overflow; request budget cannot pay for a reissue",
+        "model response needs recovery, but the request budget cannot pay for a reissue",
       )?;
       return Ok(false);
     }
@@ -1609,7 +1648,7 @@ impl<'a> TurnLoop<'a> {
         self.diagnostic(
           Some(turn_id.clone()),
           DiagnosticLevel::Info,
-          "provider rejected the request for context overflow; existing compaction already bounded the context, retrying once",
+          "existing context compaction already bounded the request; retrying once",
         )?;
         return Ok(true);
       }
@@ -1655,7 +1694,7 @@ impl<'a> TurnLoop<'a> {
       self.diagnostic(
         Some(turn_id.clone()),
         DiagnosticLevel::Warn,
-        "provider rejected the request for context overflow; no bounded compacted request fits the active context window",
+        "no bounded compacted request fits the active context window; recovery is unavailable",
       )?;
       return Ok(false);
     };
@@ -1663,7 +1702,7 @@ impl<'a> TurnLoop<'a> {
     self.diagnostic(
       Some(turn_id.clone()),
       DiagnosticLevel::Info,
-      "provider rejected the request for context overflow; compacting prior history and retrying once",
+      "compacting prior history for one bounded model-request recovery",
     )?;
     let replaced = self.compact_prefix(turn_id, prefix_end, &summary)?;
     if replaced == 0 {
@@ -1847,8 +1886,7 @@ impl<'a> TurnLoop<'a> {
           // Output reached the user the moment it was emitted, so it is recorded on
           // the failure rather than inferred afterwards.
           let partial_output_emitted = failure.partial_output_emitted || committed;
-          let failure = failure.with_partial_output(partial_output_emitted);
-          failure
+          failure.with_partial_output(partial_output_emitted)
         }
       };
 
@@ -1899,6 +1937,9 @@ impl<'a> TurnLoop<'a> {
           &calls,
           progress,
           "model response did not complete; tool was not executed",
+          failed_usage
+            .as_ref()
+            .is_none_or(|usage| !usage.stopped_at_output_limit()),
         )
         .map_err(TurnFailure::from)?;
       self
@@ -1919,6 +1960,21 @@ impl<'a> TurnLoop<'a> {
         // as an outage would be wrong twice over: it is not a fault, and recovery
         // must not run.
         return Err(TurnFailure::Cancelled);
+      }
+      let recoverable_output_truncation = failed_usage.as_ref().and_then(|usage| {
+        let requested = request.max_output_tokens?;
+        let actual = usage.output_tokens?;
+        (usage.stopped_at_output_limit() && actual < requested).then_some((actual, requested))
+      });
+      if let Some((actual_output_tokens, requested_output_tokens)) = recoverable_output_truncation {
+        // This special path stays on the current model and bypasses generic
+        // failover: the response is not projected into model context, and every
+        // decoded tool call was closed without execution above.
+        return Err(TurnFailure::OutputTruncated {
+          failure,
+          actual_output_tokens,
+          requested_output_tokens,
+        });
       }
       // Provider overflow is a distinct outcome. It is eligible for the outer
       // turn's one-shot local compaction only when this request committed no
@@ -2758,6 +2814,7 @@ impl<'a> TurnLoop<'a> {
     messages: Vec<Message>,
   ) -> ModelRequest {
     let capabilities = provider.capabilities();
+    let max_output_tokens = capabilities.max_output_tokens;
     let may_approve_mutations =
       self.interactive_tool_approval || self.tools.auto_approves_mutating();
     let tools = if self.tools_enabled && capabilities.tools {
@@ -2792,6 +2849,7 @@ impl<'a> TurnLoop<'a> {
     }
     system.push_str(&tool_availability_prompt(&request.tools));
     request = request.with_system(system);
+    request.max_output_tokens = max_output_tokens;
     request
   }
 
@@ -3155,6 +3213,7 @@ impl<'a> TurnLoop<'a> {
     calls: &[ToolCallBlock],
     progress: &mut dyn TurnProgress,
     reason: &str,
+    include_results_in_context: bool,
   ) -> Result<(), TurnError> {
     for call in calls {
       let read_only = self
@@ -3180,19 +3239,33 @@ impl<'a> TurnLoop<'a> {
           outcome.to_block(call.id.clone(), &call.name),
         )],
       );
-      let envelope = self.emit_message_with_parent(
-        Some(turn_id.clone()),
-        AgentEvent::ToolFailed(ToolFailed {
-          call_id: call.id.clone(),
-          name: call.name.clone(),
-          message: reason.to_string(),
-          duration_ms: 0,
-          status: None,
-        }),
-        &message,
-        Some(requested.meta.event_id),
-      )?;
-      self.push_message(message, envelope.meta.seq);
+      let failed = AgentEvent::ToolFailed(ToolFailed {
+        call_id: call.id.clone(),
+        name: call.name.clone(),
+        message: reason.to_string(),
+        duration_ms: 0,
+        status: None,
+      });
+      let envelope = if include_results_in_context {
+        self.emit_message_with_parent(
+          Some(turn_id.clone()),
+          failed,
+          &message,
+          Some(requested.meta.event_id),
+        )?
+      } else {
+        // A failed tool-shaped fragment from an incomplete model response is
+        // trace evidence, not an assistant/tool exchange to replay on resume.
+        self.emit_with_sink_parent(
+          Some(turn_id.clone()),
+          failed,
+          true,
+          Some(requested.meta.event_id),
+        )?
+      };
+      if include_results_in_context {
+        self.push_message(message, envelope.meta.seq);
+      }
       let executed = Executed {
         request: rupi_core::ToolRequest {
           call_id: call.id.clone(),
@@ -3232,6 +3305,7 @@ impl<'a> TurnLoop<'a> {
           &calls[index..],
           progress,
           "not executed: the turn was cancelled",
+          true,
         )?;
         break;
       }
@@ -3473,6 +3547,13 @@ enum TurnFailure {
   /// The provider rejected an otherwise uncommitted request for context size.
   /// The outer turn loop may compact only pre-turn history and reissue once.
   ProviderOverflow(ModelFailure),
+  /// A length stop used less than the request's explicit output ceiling. The
+  /// outer loop may compact pre-turn history and retry once on the same model.
+  OutputTruncated {
+    failure: ModelFailure,
+    actual_output_tokens: u64,
+    requested_output_tokens: u64,
+  },
   /// No model can serve the request.
   Fatal(ModelFailure),
   /// The trace could not be written.
@@ -4353,8 +4434,10 @@ mod tests {
     calls: Arc<Mutex<Vec<(ModelRequest, ThinkingLevel, bool)>>>,
     /// Return `Ok` with an uncertain boundary instead of a usage report.
     unfinished: bool,
-    /// Override the scripted response's provider finish reason.
+    /// Override every scripted response's provider finish reason.
     finish_reason: Option<String>,
+    /// Override the finish reason for one answered round.
+    finish_reason_at: BTreeMap<usize, String>,
     /// Supply provider usage independently of the scripted response content.
     completion_usage: Option<CompletionUsage>,
     /// Fail *every* request. `fail` is per-request-index and can run out, which
@@ -4381,6 +4464,7 @@ mod tests {
         calls: Arc::new(Mutex::new(Vec::new())),
         unfinished: false,
         finish_reason: None,
+        finish_reason_at: BTreeMap::new(),
         completion_usage: None,
         always: None,
         fail_after_stream: None,
@@ -4405,6 +4489,16 @@ mod tests {
 
     fn finishes_with(mut self, reason: &str) -> Self {
       self.finish_reason = Some(reason.into());
+      self
+    }
+
+    fn finishes_at(mut self, round: usize, reason: &str) -> Self {
+      self.finish_reason_at.insert(round, reason.into());
+      self
+    }
+
+    fn with_output_limit(mut self, limit: u64) -> Self {
+      self.capabilities.max_output_tokens = Some(limit);
       self
     }
 
@@ -4527,7 +4621,11 @@ mod tests {
         if let Some(usage) = &self.completion_usage {
           return Ok(usage.clone());
         }
-        if let Some(reason) = &self.finish_reason {
+        if let Some(reason) = self
+          .finish_reason_at
+          .get(&served)
+          .or(self.finish_reason.as_ref())
+        {
           usage.finish_reason = Some(reason.clone());
         }
         if let Some(kind) = self.fail_after_stream {
@@ -7762,6 +7860,238 @@ mod tests {
       .expect("failed request is closed in the trace");
     assert_eq!(completed["finish_reason"], "length");
     assert_eq!(completed["output_tokens"], 4);
+  }
+
+  #[test]
+  fn output_truncation_compacts_old_context_and_retries_once_without_projecting_failed_output() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![Box::new(Spy(Arc::clone(&seen)))]);
+    let first = tool_call("spy", serde_json::json!({"value": 1}))
+      .into_iter()
+      .chain(text("partial answer"))
+      .collect();
+    let provider = Scripted::new("recover-length", vec![first, text("completed answer")])
+      .finishes_at(0, "length");
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user(
+      "pre-turn history that can be compacted",
+    )])
+    .with_max_requests(2)
+    .run_turn(
+      "continue the task",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .expect("one bounded retry should complete within the configured request budget");
+
+    assert_eq!(report.status, TurnStatus::Completed);
+    assert_eq!(report.requests, 2);
+    assert_eq!(report.text, "completed answer");
+    assert!(
+      seen.lock().unwrap().is_empty(),
+      "the truncated tool call never ran"
+    );
+    assert_eq!(trace.count("tool_started"), 0);
+    assert_eq!(
+      trace.count("tool_failed"),
+      1,
+      "the call still has a terminal trace event"
+    );
+    assert_eq!(
+      trace.count("model_retry"),
+      0,
+      "this is not generic failover retry"
+    );
+    assert_eq!(trace.count("context_compaction_completed"), 1);
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+      requests[0].model, requests[1].model,
+      "recovery stays on the same model"
+    );
+    assert_eq!(requests[0].max_output_tokens, Some(8_192));
+    assert!(
+      requests[1]
+        .messages
+        .iter()
+        .all(|message| message.role != Role::Tool)
+    );
+    assert!(requests[1].messages.iter().all(|message| {
+      message.content.iter().all(|block| {
+        block
+          .plain_text()
+          .is_none_or(|text| !text.contains("partial answer"))
+      })
+    }));
+  }
+
+  #[test]
+  fn output_truncation_does_not_persist_failed_tool_projection_for_resume() {
+    let temp = rupi_store::TempDir::new("runtime-resume-length-recovery");
+    let store = rupi_store::Store::open(temp.path(), rupi_store::WritePolicy::default())
+      .expect("store opens");
+    let session_id = SessionId::new();
+    let model = ModelRef::new("test", "durable-length");
+    let session = store
+      .begin(SessionHeader {
+        session_id: session_id.clone(),
+        version: rupi_core::session::SESSION_SCHEMA_VERSION,
+        started_at_ms: 1,
+        working_dir: "/workspace".into(),
+        model,
+        parent_session: None,
+        branched_from_event: None,
+        imported_from: None,
+      })
+      .expect("session begins");
+    let first_truncated = tool_call("spy", serde_json::json!({"value": 1}))
+      .into_iter()
+      .chain(text("partial answer"))
+      .collect();
+    let provider = Scripted::new(
+      "durable-length",
+      vec![
+        text("earlier answer"),
+        first_truncated,
+        text("final answer"),
+      ],
+    )
+    .finishes_at(1, "length");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![Box::new(Spy(Arc::clone(&seen)))]);
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = StoreTrace::new(session);
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      session_id.clone(),
+      TraceId::new(),
+    );
+    runtime
+      .run_turn("earlier request", &CancelToken::new(), &mut SilentProgress)
+      .expect("earlier turn completes");
+    let report = runtime
+      .run_turn(
+        "continue after truncation",
+        &CancelToken::new(),
+        &mut SilentProgress,
+      )
+      .expect("bounded recovery completes");
+    assert_eq!(report.text, "final answer");
+    assert!(seen.lock().unwrap().is_empty());
+    drop(runtime);
+    trace.flush().expect("flush durable state");
+    drop(trace);
+
+    let restored = store
+      .restore(&session_id)
+      .expect("restore session projection");
+    assert!(restored.interrupted_tools.is_empty());
+    assert!(
+      restored
+        .messages
+        .iter()
+        .all(|message| message.message.role != Role::Tool)
+    );
+    assert!(
+      restored
+        .messages
+        .iter()
+        .all(|message| !message.message.text().contains("partial answer"))
+    );
+    assert!(
+      restored
+        .messages
+        .iter()
+        .any(|message| message.message.text().contains("final answer"))
+    );
+  }
+
+  #[test]
+  fn output_truncation_at_the_requested_ceiling_is_not_retried() {
+    let provider = Scripted::new("full-limit", vec![text("partial")])
+      .with_output_limit(4)
+      .finishes_with("length");
+    let tools = registry_with(Vec::new());
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user("older context exists")])
+    .run_turn(
+      "finish the bounded task",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .expect_err("using the actual output ceiling is not recoverable by repetition");
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::Semantic));
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(trace.count("model_request_started"), 1);
+    assert_eq!(trace.count("model_retry"), 0);
+    assert_eq!(trace.count("context_compaction_completed"), 0);
+  }
+
+  #[test]
+  fn output_truncation_recovery_is_one_shot() {
+    let provider = Scripted::new(
+      "repeat-length",
+      vec![
+        text("first partial"),
+        text("second partial"),
+        text("should not run"),
+      ],
+    )
+    .finishes_with("length");
+    let tools = registry_with(Vec::new());
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user("pre-turn history")])
+    .run_turn("continue", &CancelToken::new(), &mut SilentProgress)
+    .expect_err("a second output-limit response must terminate the bounded recovery");
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::Semantic));
+    assert_eq!(provider.requests().len(), 2);
+    assert_eq!(trace.count("model_request_started"), 2);
+    assert_eq!(trace.count("model_retry"), 0);
   }
 
   #[test]

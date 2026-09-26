@@ -935,7 +935,12 @@ on the Round-4 PR and remains incomplete until each behavior has regression evid
       supported strict-schema subset, falls back for preferences, and refuses unsupported or
       unnormalizable `Require` requests before dispatch. Runtime argument validation remains
       authoritative; registry, mapper, and wire regressions cover the contract.
-- [ ] Add one bounded recovery attempt for eligible output truncation.
+- [x] Add one bounded recovery attempt for eligible output truncation.
+      The runtime compares reported output usage with the explicit effective request
+      ceiling, compacts only pre-turn history, and retries once on the same model. Failed
+      deltas and never-executed tool calls remain trace evidence but are omitted from the
+      next request/session projection. Tests cover below-ceiling recovery, full-ceiling
+      rejection, no side effects, same-model behavior, one-shot bounds, and request budget.
 - [ ] Apply context overrides consistently across active windows and adaptive policy.
 - [ ] Keep P2 tokenizer-estimator calibration and model-readable reduced-output recovery tracked;
       these are outside the Round-4 blocking slice and must not be presented as implemented.

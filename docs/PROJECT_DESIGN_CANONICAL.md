@@ -1103,7 +1103,15 @@ Retry should precede failover only when replay is proven safe. A retryable failu
 alone is insufficient: each `ModelFailure` carries `RequestReplaySafety` with `Safe`,
 `AmbiguousPostBoundary`, or `CommittedOutput`. A known pre-dispatch failure or an explicit
 retry-safe HTTP response may retry; an ambiguous POST skips same-model retry and moves
-directly to the configured failover decision. Committed output is never replayed.
+directly to the configured failover decision. Committed output is not eligible for generic
+retries or failover replay.
+
+An explicit output-limit completion (`length` or `max_tokens`) has one narrow exception:
+when reported output usage is known and strictly below the request's explicit output
+ceiling, and pre-turn history can be safely compacted, the runtime may retry once on the
+same model. The failed deltas and unexecuted tool calls remain canonical trace evidence
+but are omitted from model-visible projections; no call from the incomplete response is
+executed. Full-ceiling, unmeasured, or uncompactable cases remain incomplete.
 
 ### Eligible automatic failover cases
 

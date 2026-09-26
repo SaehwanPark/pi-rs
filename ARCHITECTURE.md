@@ -420,6 +420,15 @@ All current-turn messages remain verbatim and in order. A second refusal, an ove
 after committed output, or a candidate that cannot fit is terminal. Context overflow
 never activates model failover.
 
+An observed output-limit stop is a separate, bounded recovery case. The runtime permits
+one same-model retry only when reported output usage is strictly below the request's
+explicit output ceiling and older, pre-turn history can be compacted. The incomplete
+attempt remains in the canonical trace, but its deltas and never-executed tool calls are
+not projected into the next request or resumed model context. A response that used its
+full ceiling, has no measurable output usage/ceiling, or has no safely compactable prior
+history remains incomplete; the output-limit path never invokes failover or executes
+calls from the truncated response.
+
 ### Structured capsules
 
 Prefer typed semantic state over free-form summaries.
@@ -505,9 +514,10 @@ After failover, the backup remains active until the user explicitly changes mode
 Same-model retry requires both a retryable failure kind and `RequestReplaySafety::Safe`.
 A pre-dispatch connection failure and an explicit retry-safe HTTP response (429 or 5xx)
 may retry. When a POST may have reached the endpoint, skip the same-model retry and go
-directly to the configured failover decision; once output is committed, neither retry nor
-takeover may replay it. This prevents a quarantined adapter from consuming budget under a
-fake `ModelRetry` event.
+directly to the configured failover decision. Committed output does not qualify for generic
+retry or failover replay; the separately classified, one-shot output-limit recovery above
+is the only exception and stays on the same model. This prevents a quarantined adapter
+from consuming budget under a fake `ModelRetry` event.
 
 Interactive session control:
 - `/failover` triggers manual switch to backup model with `EpochReason::ManualSwitch`.

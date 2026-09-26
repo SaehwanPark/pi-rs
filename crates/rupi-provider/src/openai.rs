@@ -676,7 +676,12 @@ impl ModelProvider for OpenAiCompat {
   }
 
   fn capabilities(&self) -> ModelCapabilities {
-    self.config.capabilities.clone()
+    let mut capabilities = self.config.capabilities.clone();
+    capabilities.max_output_tokens = self
+      .config
+      .max_output_tokens
+      .or(capabilities.max_output_tokens);
+    capabilities
   }
 
   fn reset_after_abandonment(&self) {
@@ -752,6 +757,17 @@ mod tests {
       "the adapter's default model is part of its identity"
     );
     assert_eq!(opened.capabilities().context_window, 4_096);
+  }
+
+  #[test]
+  fn configured_output_ceiling_is_exposed_to_runtime_requests() {
+    let provider = OpenAiCompat::new(ProviderConfig {
+      max_output_tokens: Some(1_024),
+      ..ProviderConfig::local("local", "model", "http://127.0.0.1/v1", 4_096)
+    })
+    .unwrap();
+
+    assert_eq!(provider.capabilities().max_output_tokens, Some(1_024));
   }
 
   #[test]

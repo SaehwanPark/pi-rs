@@ -4210,6 +4210,14 @@ fn recover_projection_record(
       })))
     }
     AgentEvent::ModelRequestCompleted(completed) => {
+      if matches!(
+        completed.finish_reason.as_deref(),
+        Some("length" | "max_tokens")
+      ) {
+        // Output-limited attempts stay in the canonical trace, but neither their
+        // partial text nor their unexecuted calls enter the resumable projection.
+        return Ok(None);
+      }
       if completed.finish_reason.as_deref() == Some("abandoned") {
         return Ok(None);
       }
