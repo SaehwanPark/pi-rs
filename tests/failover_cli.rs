@@ -559,7 +559,7 @@ fn a_smaller_backup_takes_over_and_names_the_window_it_lost() {
   // switch therefore happens, and the transcript says what it cost.
   let scene =
     takeover_with_narrow_backup(vec![text_response("served by the small standby")], |caps| {
-      caps.context_window = 1_024;
+      caps.context_window = 8_192;
     });
   let output = run(&scene.config, &scene.workspace, "go");
   let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -568,7 +568,7 @@ fn a_smaller_backup_takes_over_and_names_the_window_it_lost() {
   assert_eq!(stdout, "served by the small standby\n");
   assert!(stderr.contains("[failover]"), "{stderr}");
   assert!(
-    stderr.contains("context window 1024 < required 32768"),
+    stderr.contains("context window 8192 < required 32768"),
     "the cost of the switch is on the line: {stderr}"
   );
   // And only what actually happened is claimed. One turn was in flight, so there was
