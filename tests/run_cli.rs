@@ -24,6 +24,16 @@ use fake_provider::{FakeServer, sse, status_response, text_response};
 
 /// A response that asks for a tool, optionally after some reasoning, then ends the
 /// stream. The adapter joins the fragments into one call when the stream ends.
+fn truncated_text_response(text: &str) -> String {
+  sse(&[
+    serde_json::json!({"choices": [{"delta": {"content": text}}]}),
+    serde_json::json!({
+      "choices": [{"delta": {}, "finish_reason": "length"}],
+      "usage": {"prompt_tokens": 20, "completion_tokens": 4}
+    }),
+  ])
+}
+
 fn tool_response(id: &str, name: &str, arguments: &str, reasoning: Option<&str>) -> String {
   let mut events = Vec::new();
   if let Some(reasoning) = reasoning {
@@ -100,6 +110,31 @@ fn run(config: &Path, cwd: &Path, prompt: &str) -> Output {
     .args(["--prompt", prompt])
     .output()
     .expect("run rupi")
+}
+
+#[test]
+fn streamed_partial_answer_is_not_followed_by_an_output_limit_retry() {
+  let temp = TempDir::new().unwrap();
+  let workspace = temp.path().join("workspace");
+  fs::create_dir(&workspace).unwrap();
+  let server = FakeServer::answer(vec![truncated_text_response("partial answer")]);
+  let config = write_config(temp.path(), &server.base_url(), true);
+
+  let output = run(&config, &workspace, "answer the question");
+
+  assert!(!output.status.success());
+  assert_eq!(String::from_utf8_lossy(&output.stdout), "partial answer");
+  assert_eq!(
+    server.requests().len(),
+    1,
+    "no second request can fix stdout"
+  );
+  assert!(
+    String::from_utf8_lossy(&output.stderr)
+      .contains("partial assistant output was already streamed"),
+    "{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
 }
 
 #[test]

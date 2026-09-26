@@ -908,16 +908,17 @@ budgets. The recommended live model comparison cases 01, 02, 04, and 06 were not
 configured endpoint at `127.0.0.1:8000` was offline, and the documented 88-GB model checkpoint
 exceeds this host's approximately 64-GB physical memory. This does not establish Pi parity.
 
-### In-progress audit follow-up — Round 4
+### Completed audit follow-up — Round 4 (PR #123)
 
-`audits/pi-benchmark-audit/round04.md` identifies seven runtime/provider gaps. Work is tracked
-on the Round-4 PR and remains incomplete until each behavior has regression evidence:
+`audits/pi-benchmark-audit/round04.md` identified seven runtime/provider gaps. The Round-4
+implementation is merged and regression-covered; Round 5 records new boundary cases, not
+unfinished Round-4 requirements:
 
 - [x] Validate every supplied tool argument against the registered schema; reject extra fields
       on built-ins before preflight, approval, or execution (`crates/rupi-tools/src/registry.rs`;
       registry regressions cover optional fields, nested arrays/objects, enums, extra properties,
       and the pre-`ToolStarted` boundary).
-- [-] Enforce the progress boundary as a runtime postcondition, not only prompt/tool filtering.
+- [x] Enforce the progress boundary as a runtime postcondition, not only prompt/tool filtering.
       Required tool choice is sent as a provider hint; rejected text-only completion is omitted
       from model-visible history and final report text, and unsatisfied budget ends incomplete.
 - [x] Make same-model retry eligibility depend on request replay safety as well as failure kind.
@@ -946,11 +947,33 @@ on the Round-4 PR and remains incomplete until each behavior has regression evid
       normalized ordering is enforced, and adjustments emit one durable warning per model
       window. Adaptive knees apply afterward as caps that can only lower those thresholds.
       Core, adaptive-policy, failover, and durable-diagnostic regressions cover precedence.
-- [ ] Keep P2 tokenizer-estimator calibration and model-readable reduced-output recovery tracked;
-      these are outside the Round-4 blocking slice and must not be presented as implemented.
+- [x] Keep P2 tokenizer-estimator calibration and model-readable reduced-output recovery tracked;
+      these are outside the Round-4 blocking slice and remain deferred.
 
 The local-model behavior comparisons remain contingent on an available endpoint/model; deterministic
 fault-injection tests are the required gate for the runtime contracts in this slice.
+
+### In-progress audit follow-up — Round 5
+
+`audits/pi-benchmark-audit/round05.md` identifies seven runtime/provider boundary gaps. This
+slice is tracked on the Round-5 draft PR; each behavior remains open until its regression
+coverage and verification evidence are complete:
+
+- [ ] Do not retry a truncated response after reasoning or assistant text has escaped to the
+      live surface; keep failed-attempt context projection and tool non-execution guarantees.
+- [ ] Budget the assembled prompt plus desired output against the active context window, expose
+      desired/effective output limits consistently to runtime recovery and the wire mapper, and
+      apply the same accounting to backup rebudgeting.
+- [ ] Preserve exposed reasoning and provenance in successfully completed assistant messages;
+      keep replay endpoint-opt-in and failed attempts trace-only.
+- [ ] Bound aggregate response text, reasoning, tool count, fragmented arguments, and stream event
+      accumulation in both the adapter decoder and runtime collector.
+- [ ] Default generic endpoint reasoning exposure conservatively and reject native-reasoning replay
+      unless the endpoint explicitly declares native exposure.
+- [ ] Fail fast with a durable diagnostic if the activated progress boundary has no effective,
+      executable progress tool under current model, policy, and approval constraints.
+- [ ] Keep token-estimator calibration and model-readable reduced-payload recovery explicitly
+      deferred; do not imply they are implemented.
 
 ### P2 — Later / deliberately deferred
 

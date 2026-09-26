@@ -11,8 +11,9 @@
 //! - **One model at a time.** Exactly one epoch is active; a change of model is an
 //!   epoch transition with a recorded reason, never an implicit swap.
 //! - Ordinary request retries require that nothing was streamed. The one bounded
-//!   output-limit recovery is an explicit exception: failed deltas stay out of
-//!   future model context and tools from the incomplete response never execute.
+//!   output-limit recovery is allowed only when no assistant output escaped to an
+//!   irreversible live surface; failed deltas stay out of future model context and
+//!   tools from the incomplete response never execute.
 //! - **Every tool call reaches a terminal lifecycle state**, including calls that
 //!   were interrupted or refused. A tool call with no terminal event is a bug here.
 //! - **Context is never silently truncated.** An oversized request is refused, and
@@ -114,6 +115,12 @@ pub trait TurnProgress: Send {
   }
   fn on_reasoning(&mut self, _text: &str, _provenance: ReasoningProvenance) {}
   fn on_text_delta(&mut self, _text: &str) {}
+  /// Whether assistant deltas are immediately committed to a non-transactional
+  /// surface such as stdout. Conservative by default; buffered/headless surfaces
+  /// may opt out when they can discard an incomplete attempt.
+  fn output_is_irreversible(&self) -> bool {
+    true
+  }
   fn on_tool_requested(&mut self, _call: &ToolCallBlock) {}
   /// Answer a mutating-tool approval request on a surface that can ask a person.
   ///
@@ -132,7 +139,11 @@ pub trait TurnProgress: Send {
 
 /// A sink that records nothing, for headless runs and tests.
 pub struct SilentProgress;
-impl TurnProgress for SilentProgress {}
+impl TurnProgress for SilentProgress {
+  fn output_is_irreversible(&self) -> bool {
+    false
+  }
+}
 
 /// Durable sink for the canonical event stream.
 ///
@@ -1163,7 +1174,16 @@ impl<'a> TurnLoop<'a> {
           failure,
           actual_output_tokens,
           requested_output_tokens,
+          surface_output_emitted,
         }) => {
+          if surface_output_emitted {
+            self.diagnostic(
+              Some(turn_id.clone()),
+              DiagnosticLevel::Warn,
+              "output-limit recovery was skipped because partial assistant output was already streamed to the surface",
+            )?;
+            return self.finish_failure(report, failure, clock, turn_id.clone());
+          }
           if truncation_recovery_used {
             self.diagnostic(
               Some(turn_id.clone()),
@@ -1815,6 +1835,7 @@ impl<'a> TurnLoop<'a> {
         calls,
         rejected_calls,
         committed,
+        surface_output_emitted,
         reasoning_provenance: provenance,
         sink_error,
         first_delta_ms,
@@ -1972,11 +1993,13 @@ impl<'a> TurnLoop<'a> {
       if let Some((actual_output_tokens, requested_output_tokens)) = recoverable_output_truncation {
         // This special path stays on the current model and bypasses generic
         // failover: the response is not projected into model context, and every
-        // decoded tool call was closed without execution above.
+        // decoded tool call was closed without execution above. The outer loop
+        // permits recovery only when no partial answer escaped to the surface.
         return Err(TurnFailure::OutputTruncated {
           failure,
           actual_output_tokens,
           requested_output_tokens,
+          surface_output_emitted,
         });
       }
       // Provider overflow is a distinct outcome. It is eligible for the outer
@@ -3569,6 +3592,7 @@ enum TurnFailure {
     failure: ModelFailure,
     actual_output_tokens: u64,
     requested_output_tokens: u64,
+    surface_output_emitted: bool,
   },
   /// No model can serve the request.
   Fatal(ModelFailure),
@@ -3626,6 +3650,9 @@ struct Collector<'a> {
   calls: Vec<ToolCallBlock>,
   rejected_calls: BTreeMap<String, String>,
   committed: bool,
+  /// Reasoning or assistant text has already been handed to the live surface;
+  /// output-limit recovery cannot retract it from plain stdout or the TUI.
+  surface_output_emitted: bool,
   reasoning_index: u32,
   text_index: u32,
   reasoning_provenance: Option<ReasoningProvenance>,
@@ -3651,6 +3678,7 @@ impl<'a> Collector<'a> {
       calls: Vec::new(),
       rejected_calls: BTreeMap::new(),
       committed: false,
+      surface_output_emitted: false,
       reasoning_index: 0,
       text_index: 0,
       reasoning_provenance: None,
@@ -3699,6 +3727,7 @@ impl rupi_core::ProviderEventSink for Collector<'_> {
           self.reasoning_index = self.reasoning_index.saturating_add(1);
           self.reasoning_provenance = Some(*provenance);
           self.committed = true;
+          self.surface_output_emitted |= !text.is_empty() && self.progress.output_is_irreversible();
           self.progress.on_reasoning(text, *provenance);
         }
       }
@@ -3710,6 +3739,7 @@ impl rupi_core::ProviderEventSink for Collector<'_> {
         if traced.is_some() {
           self.text_index = self.text_index.saturating_add(1);
           self.committed = true;
+          self.surface_output_emitted |= !text.is_empty() && self.progress.output_is_irreversible();
           self.text.push_str(text);
           self.progress.on_text_delta(text);
         }
