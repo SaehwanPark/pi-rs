@@ -9,6 +9,9 @@ pub const LATEST_PROTOCOL_VERSION: &str = "2024-11-05";
 /// Supported MCP protocol versions for negotiation, newest first.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2024-10-07"];
 
+/// Maximum capability count admitted from one server before metadata reaches the runtime.
+pub(crate) const MAX_MCP_TOOLS_PER_SERVER: usize = 64;
+
 /// JSON-RPC 2.0 Request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcRequest {

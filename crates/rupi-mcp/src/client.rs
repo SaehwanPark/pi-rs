@@ -10,15 +10,14 @@ use rupi_core::ToolExecutionContext;
 use serde_json::{Value, json};
 
 const MAX_TOOL_LIST_PAGES: usize = 1_024;
-const MAX_TOOLS: usize = 4_096;
 const MAX_CURSOR_BYTES: usize = 8 * 1024;
 
 use crate::{
   error::McpError,
   protocol::{
     CallToolParams, CallToolResult, ClientCapabilities, ClientInfo, InitializeParams,
-    InitializeResult, LATEST_PROTOCOL_VERSION, ListToolsResult, McpToolDefinition,
-    ServerCapabilities, ServerInfo, negotiate_protocol_version,
+    InitializeResult, LATEST_PROTOCOL_VERSION, ListToolsResult, MAX_MCP_TOOLS_PER_SERVER,
+    McpToolDefinition, ServerCapabilities, ServerInfo, negotiate_protocol_version,
   },
   transport::McpTransport,
 };
@@ -98,9 +97,9 @@ impl McpClient {
       let page: ListToolsResult = serde_json::from_value(res_val)
         .map_err(|e| McpError::Protocol(format!("invalid tools/list response: {e}")))?;
 
-      if all_tools.len().saturating_add(page.tools.len()) > MAX_TOOLS {
+      if all_tools.len().saturating_add(page.tools.len()) > MAX_MCP_TOOLS_PER_SERVER {
         return Err(McpError::Protocol(format!(
-          "MCP tools/list exceeded {MAX_TOOLS} tools"
+          "MCP tools/list exceeded the {MAX_MCP_TOOLS_PER_SERVER}-tool server limit"
         )));
       }
       all_tools.extend(page.tools);
@@ -200,6 +199,21 @@ mod tests {
     let client = McpClient::new(mock);
     let error = client.list_tools().unwrap_err();
     assert!(format!("{error}").contains("repeated cursor"));
+  }
+
+  #[test]
+  fn tool_catalog_count_is_bounded_before_manager_admission() {
+    let mock = Arc::new(MockTransport::new());
+    let tools: Vec<_> = (0..=MAX_MCP_TOOLS_PER_SERVER)
+      .map(|index| json!({"name": format!("tool_{index}"), "inputSchema": {"type":"object"}}))
+      .collect();
+    mock.on("tools/list", json!({"tools": tools}));
+    let client = McpClient::new(mock);
+
+    let error = client
+      .list_tools()
+      .expect_err("oversized catalogs are refused while being discovered");
+    assert!(error.to_string().contains("server limit"));
   }
 
   #[test]

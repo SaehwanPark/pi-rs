@@ -862,6 +862,14 @@ response-SSE, session-id propagation, bounded bodies, and JSON-RPC id validation
 HTTP calls use bounded, cancellation-aware local relays with fail-closed interruption;
 long-lived server push remains an optional future capability.
 
+Discovered tools pass an admission boundary before entering the registry or a model
+request. Configured-server and server-supplied name parts must be provider-safe; tool
+descriptions are bounded to 4 KiB, schemas to 16 KiB, depth 32, and 4,096 nodes. Catalogs
+are limited to 64 tools per server and 128 active tools overall, with per-server and global
+metadata budgets. An omitted root schema type normalizes to `object`; invalid or over-budget
+catalogs fail closed and are not partially exposed. These limits bound the active metadata
+surface; selective activation within large catalogs remains future work.
+
 Conceptually:
 
 ```rust
