@@ -138,6 +138,40 @@ fn streamed_partial_answer_is_not_followed_by_an_output_limit_retry() {
 }
 
 #[test]
+fn endpoint_only_output_ceiling_is_budgeted_and_matches_the_wire_request() {
+  let temp = TempDir::new().unwrap();
+  let workspace = temp.path().join("workspace");
+  fs::create_dir(&workspace).unwrap();
+  let server = FakeServer::answer(vec![text_response("budgeted answer")]);
+  let config_path = write_config(temp.path(), &server.base_url(), true);
+  let mut config = RuntimeConfig::parse(&fs::read_to_string(&config_path).unwrap()).unwrap();
+  let endpoint = &mut config.endpoints[0];
+  endpoint.capabilities.context_window = 8_192;
+  endpoint.capabilities.max_output_tokens = None;
+  endpoint.max_output_tokens = Some(4_096);
+  fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+  let prompt = "x".repeat(12_000);
+
+  let output = run(&config_path, &workspace, &prompt);
+
+  assert!(
+    output.status.success(),
+    "{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  let requests = server.requests();
+  assert_eq!(requests.len(), 1);
+  let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+  let effective = body["max_tokens"].as_u64().expect("exact wire ceiling");
+  assert!((256..4_096).contains(&effective), "{effective}");
+  assert!(
+    String::from_utf8_lossy(&output.stderr).contains("output budget reduced from 4096"),
+    "{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+}
+
+#[test]
 fn one_turn_streams_and_persists_tools_messages_and_trace() {
   let temp = TempDir::new().unwrap();
   let workspace = temp.path().join("workspace");

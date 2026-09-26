@@ -953,27 +953,41 @@ unfinished Round-4 requirements:
 The local-model behavior comparisons remain contingent on an available endpoint/model; deterministic
 fault-injection tests are the required gate for the runtime contracts in this slice.
 
-### In-progress audit follow-up — Round 5
+### Completed audit follow-up — Round 5 (PR #125)
 
-`audits/pi-benchmark-audit/round05.md` identifies seven runtime/provider boundary gaps. This
-slice is tracked on the Round-5 draft PR; each behavior remains open until its regression
-coverage and verification evidence are complete:
+`audits/pi-benchmark-audit/round05.md` identified seven runtime/provider boundary gaps. The
+Round-5 implementation is regression-covered and verified:
 
-- [ ] Do not retry a truncated response after reasoning or assistant text has escaped to the
-      live surface; keep failed-attempt context projection and tool non-execution guarantees.
-- [ ] Budget the assembled prompt plus desired output against the active context window, expose
-      desired/effective output limits consistently to runtime recovery and the wire mapper, and
-      apply the same accounting to backup rebudgeting.
-- [ ] Preserve exposed reasoning and provenance in successfully completed assistant messages;
-      keep replay endpoint-opt-in and failed attempts trace-only.
-- [ ] Bound aggregate response text, reasoning, tool count, fragmented arguments, and stream event
-      accumulation in both the adapter decoder and runtime collector.
-- [ ] Default generic endpoint reasoning exposure conservatively and reject native-reasoning replay
-      unless the endpoint explicitly declares native exposure.
-- [ ] Fail fast with a durable diagnostic if the activated progress boundary has no effective,
-      executable progress tool under current model, policy, and approval constraints.
-- [ ] Keep token-estimator calibration and model-readable reduced-payload recovery explicitly
-      deferred; do not imply they are implemented.
+- [x] Output-limit recovery is blocked after reasoning or assistant text reaches an irreversible
+      live surface. Headless/buffered surfaces retain the one-shot recovery path; incomplete output
+      and never-executed tool calls remain out of the next model context.
+- [x] Request budgeting includes the assembled prompt and exposed tools, keeps desired and
+      effective output ceilings distinct, applies the effective limit exactly on the wire, and
+      leaves a safety reserve. Endpoint-only output ceilings are visible to runtime/recovery.
+      When a useful clamp is impossible, only safe pre-turn history is reduced before refusing;
+      backup rebudgeting uses the same accounting.
+- [x] Successfully completed assistant messages persist exposed reasoning in order with original
+      provenance. Truncated/failed attempts remain trace-only, and only endpoint-opted-in native
+      reasoning is replayed.
+- [x] Generic local/remote endpoint constructors default reasoning exposure to `None`; config and
+      provider validation reject reasoning replay without an explicit native-exposure declaration.
+- [x] Adapter decoding and the runtime collector bound aggregate text/reasoning/events/tool calls,
+      tool identities, and per-call/aggregate argument bytes before accumulation or execution.
+      Regressions exercise 2,000 tiny SSE events, 2,000 tool calls, oversized fragmented arguments,
+      and stream-wide text/reasoning limits.
+- [x] Progress boundaries fail with a durable diagnostic before another provider request if no
+      executable progress tool remains under model, tool-policy, or live approval constraints.
+      Availability is rechecked after activation, including after a capability-changing failover.
+- [x] Token-estimator calibration and model-readable reduced-output recovery remain deferred; no
+      completion claim is made for either item.
+
+Evidence: `cargo fmt --all --check`, `cargo check -p rupi-core --all-features`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and
+`cargo doc --workspace --no-deps` passed. `bash bench/startup.sh --json
+bench/results/startup-ci.json` passed (cold 120.06 ms; warm mean 5.75 ms), and
+`bash bench/context_prefill.sh` passed all five budgets. No local llama.cpp comparison was run;
+this Round-5 safety slice relies on deterministic fixtures, and weak-model performance remains a
+later empirical focus.
 
 ### P2 — Later / deliberately deferred
 

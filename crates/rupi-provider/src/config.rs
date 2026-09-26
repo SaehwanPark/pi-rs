@@ -297,6 +297,20 @@ impl ProviderConfig {
     if !self.capabilities.text {
       return Err(BuildError::MissingCapability(CapabilityGap::Text));
     }
+    if self
+      .max_output_tokens
+      .or(self.capabilities.max_output_tokens)
+      == Some(0)
+    {
+      return Err(BuildError::Invalid(
+        "max_output_tokens must be greater than zero",
+      ));
+    }
+    if self.preserve_reasoning && self.capabilities.exposed_reasoning != ReasoningExposure::Native {
+      return Err(BuildError::Invalid(
+        "preserve_reasoning requires exposed_reasoning=native",
+      ));
+    }
     if self.request_timeout_ms == Some(0) {
       return Err(BuildError::Invalid(
         "request_timeout_ms must be greater than zero",
@@ -486,6 +500,18 @@ mod tests {
   }
 
   #[test]
+  fn zero_output_ceiling_is_rejected() {
+    let mut broken = config();
+    broken.max_output_tokens = Some(0);
+    assert!(matches!(
+      broken.validate(),
+      Err(BuildError::Invalid(
+        "max_output_tokens must be greater than zero"
+      ))
+    ));
+  }
+
+  #[test]
   fn non_http_base_url_is_rejected_rather_than_mangled() {
     let mut broken = config();
     broken.base_url = "127.0.0.1:8080/v1".into();
@@ -520,6 +546,7 @@ mod tests {
   #[test]
   fn endpoint_dialect_options_reach_the_provider_adapter() {
     let mut endpoint = ModelEndpoint::local("local", "qwen", "http://127.0.0.1:8080/v1", 4_096);
+    endpoint.capabilities.exposed_reasoning = ReasoningExposure::Native;
     endpoint.openai_compat = rupi_core::OpenAiCompatOptions {
       stream: Some(false),
       stream_usage: Some(false),

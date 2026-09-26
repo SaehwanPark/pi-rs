@@ -162,6 +162,26 @@ support. A required constraint refuses before dispatch when unsupported or not s
 normalizable; the registry's pre-execution argument validator remains authoritative. Header
 values are redacted from config serialization and debug output.
 
+Generic local and remote endpoint constructors conservatively declare
+`ReasoningExposure::None`; native exposure must be configured from endpoint evidence. Enabling
+reasoning replay requires that explicit native declaration. Successfully completed assistant
+messages retain exposed reasoning chunks with their original provenance, independently of the
+endpoint's opt-in replay policy; only native chunks are eligible for replay.
+
+When an endpoint declares an output ceiling, each request keeps that desired value separate
+from its exact effective wire ceiling. After assembling the system prompt, messages, and tools,
+the runtime estimates prompt tokens, reserves a safety margin, clamps to a useful output
+allowance, and evicts only safe pre-turn history when more headroom is needed. If a useful
+request still cannot fit, it refuses before dispatch. With no declared ceiling, the runtime does
+not invent an untracked wire limit. The provider's capability snapshot includes endpoint output
+overrides, and the wire mapper sends only the ceiling recorded in `ModelRequest`.
+
+Provider decoders and the runtime collector enforce finite per-response text, reasoning, event,
+tool-count, tool-identity, and tool-argument limits. Fragmented tool arguments are bounded before
+append; no partial or oversized call is executable. Exceeding visible-text limits yields an
+incomplete protocol response, and the runtime never automatically retries it after irreversible
+assistant output has reached the live surface.
+
 ## 6. Event model
 
 Important runtime behavior must emit typed events.
@@ -365,8 +385,11 @@ as `BudgetExhausted`, never `Completed`. With no allowlist, all permitted mutati
 are exposed. The normal `Requested`/`Started`/`Succeeded`/`Failed`/`Unknown` lifecycle still
 decides what actually happened. A successful configured progress tool satisfies the
 one-shot boundary for the rest of that turn, and callers must verify the workspace
-independently. The default is disabled so read-only questions and inspection workflows
-remain unchanged.
+independently. When activating the boundary and before each later request, the runtime resolves
+the effective executable mutating-tool set using the active model's tool support, registry policy,
+and current approval availability. An empty set emits a durable error diagnostic and fails before
+another provider request, including after a failover changes capabilities. The default is disabled
+so read-only questions and inspection workflows remain unchanged.
 
 ## 10. Context engine
 
@@ -374,14 +397,18 @@ The context engine owns model-visible working memory.
 
 It consumes canonical session/trace state and produces a bounded working set.
 
-Before policy evaluation, request sizing includes the assembled system prompt, messages, and
-currently exposed tool schemas. Provider-reported usage describes the request just sent; it
-never substitutes for the estimate of the request being assembled. The active provider's
-context window controls threshold evaluation after failover; adaptive latency observations
-are scoped to model identity. Backup rebudgeting assembles that provider's system prompt,
-retained messages, and exposed tools before committing the epoch transition. Same-turn
-compaction validates every tool lifecycle in the proposed prefix and stops before any
-unresolved or `Unknown` result.
+Before policy evaluation, request sizing includes the assembled system prompt, messages,
+and currently exposed tool schemas. With a configured output ceiling, the estimate also includes
+the effective output allowance; a safety reserve is deducted while resolving that ceiling but is
+not itself a model token. Provider-reported usage describes the request
+just sent; it never substitutes for the
+estimate of the request being assembled. If a configured output ceiling cannot be clamped to
+the minimum useful allowance, the runtime first evicts only safe pre-turn history and refuses
+if that cannot create headroom. The active provider's context window controls threshold
+evaluation after failover; adaptive latency observations are scoped to model identity. Backup
+rebudgeting assembles that provider's system prompt, retained messages, exposed tools, and output
+budget before committing the epoch transition. Same-turn compaction validates every tool
+lifecycle in the proposed prefix and stops before any unresolved or `Unknown` result.
 
 Conceptual action enum:
 
@@ -429,12 +456,13 @@ normalized static thresholds further, never raise them.
 
 An observed output-limit stop is a separate, bounded recovery case. The runtime permits
 one same-model retry only when reported output usage is strictly below the request's
-explicit output ceiling and older, pre-turn history can be compacted. The incomplete
-attempt remains in the canonical trace, but its deltas and never-executed tool calls are
-not projected into the next request or resumed model context. A response that used its
-full ceiling, has no measurable output usage/ceiling, or has no safely compactable prior
-history remains incomplete; the output-limit path never invokes failover or executes
-calls from the truncated response.
+explicit output ceiling, older pre-turn history can be compacted, and no assistant text or
+reasoning has escaped to an irreversible live surface. The incomplete attempt remains in
+the canonical trace, but its deltas and never-executed tool calls are not projected into
+the next request or resumed model context. A response that used its full ceiling, has no
+measurable output usage/ceiling, has visible output on a non-transactional surface, or has
+no safely compactable prior history remains incomplete; the output-limit path never
+invokes failover or executes calls from the truncated response.
 
 ### Structured capsules
 

@@ -60,11 +60,7 @@ pub fn request_body(config: &ProviderConfig, request: &ModelRequest) -> Value {
     };
   }
 
-  if let Some(limit) = request
-    .max_output_tokens
-    .or(config.max_output_tokens)
-    .or(request.capabilities.max_output_tokens)
-  {
+  if let Some(limit) = request.max_output_tokens {
     body[match config.max_tokens_field {
       MaxTokensField::MaxTokens => "max_tokens",
       MaxTokensField::MaxCompletionTokens => "max_completion_tokens",
@@ -575,10 +571,15 @@ mod tests {
   }
 
   #[test]
-  fn capability_ceiling_is_used_when_nothing_else_sets_a_limit() {
+  fn wire_mapper_uses_only_the_effective_request_ceiling() {
     let mut req = request(vec![Message::user("x")]);
     req.capabilities.max_output_tokens = Some(1_024);
-    assert_eq!(request_body(&config(), &req)["max_tokens"], 1_024);
+    assert!(
+      request_body(&config(), &req).get("max_tokens").is_none(),
+      "the mapper must not add an untracked capability-side limit"
+    );
+    req.max_output_tokens = Some(512);
+    assert_eq!(request_body(&config(), &req)["max_tokens"], 512);
   }
 
   #[test]

@@ -24,6 +24,23 @@ use crate::{
   provenance::ReasoningProvenance,
 };
 
+/// Maximum normalized assistant text retained from one model response.
+pub const MAX_RESPONSE_TEXT_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum exposed reasoning retained from one model response.
+pub const MAX_RESPONSE_REASONING_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum normalized provider events accepted for one response.
+pub const MAX_RESPONSE_EVENTS: usize = 65_536;
+/// Maximum tool calls accepted from one response.
+pub const MAX_RESPONSE_TOOL_CALLS: usize = 128;
+/// Maximum UTF-8 bytes in one normalized tool name.
+pub const MAX_TOOL_NAME_BYTES: usize = 256;
+/// Maximum UTF-8 bytes in one provider tool-call identifier.
+pub const MAX_TOOL_ID_BYTES: usize = 256;
+/// Maximum argument JSON bytes retained for one tool call.
+pub const MAX_TOOL_ARGUMENT_BYTES_PER_CALL: usize = 1024 * 1024;
+/// Maximum argument JSON bytes retained across all calls in one response.
+pub const MAX_TOOL_ARGUMENT_BYTES_TOTAL: usize = 8 * 1024 * 1024;
+
 /// Cooperative cancellation shared between the UI and an in-flight request.
 ///
 /// Cancellation is a request, not a guarantee: an adapter checks it between
@@ -143,6 +160,9 @@ pub struct ModelRequest {
   pub messages: Vec<Message>,
   pub tools: Vec<ToolSpec>,
   pub tool_choice: ToolChoice,
+  /// Output ceiling requested by the endpoint configuration before context budgeting.
+  pub desired_output_tokens: Option<u64>,
+  /// Effective ceiling for this request; this is the exact value sent on the wire.
   pub max_output_tokens: Option<u64>,
   pub temperature: Option<f32>,
   pub thinking: ThinkingLevel,
@@ -151,6 +171,7 @@ pub struct ModelRequest {
 
 impl ModelRequest {
   pub fn new(model: ModelRef, capabilities: ModelCapabilities, messages: Vec<Message>) -> Self {
+    let desired_output_tokens = capabilities.max_output_tokens;
     Self {
       model,
       capabilities,
@@ -158,7 +179,8 @@ impl ModelRequest {
       messages,
       tools: Vec::new(),
       tool_choice: ToolChoice::Auto,
-      max_output_tokens: None,
+      desired_output_tokens,
+      max_output_tokens: desired_output_tokens,
       temperature: None,
       thinking: ThinkingLevel::default(),
       stop: Vec::new(),
@@ -182,6 +204,13 @@ impl ModelRequest {
 
   pub fn with_thinking(mut self, level: ThinkingLevel) -> Self {
     self.thinking = level;
+    self
+  }
+
+  /// Set the configured output desire and the context-budgeted wire ceiling.
+  pub fn with_output_budget(mut self, desired: Option<u64>, effective: Option<u64>) -> Self {
+    self.desired_output_tokens = desired;
+    self.max_output_tokens = effective;
     self
   }
 
@@ -537,6 +566,25 @@ mod tests {
     );
     assert_eq!(usage.finish_reason.as_deref(), Some("stop"));
     assert!(!usage.stopped_at_output_limit());
+  }
+
+  #[test]
+  fn request_keeps_desired_and_effective_output_ceilings_separate() {
+    let capabilities = ModelCapabilities {
+      max_output_tokens: Some(1_024),
+      ..ModelCapabilities::text_only(8_000)
+    };
+    let request = ModelRequest::new(
+      ModelRef::new("test", "model"),
+      capabilities,
+      vec![Message::user("hello")],
+    );
+    assert_eq!(request.desired_output_tokens, Some(1_024));
+    assert_eq!(request.max_output_tokens, Some(1_024));
+
+    let request = request.with_output_budget(Some(1_024), Some(512));
+    assert_eq!(request.desired_output_tokens, Some(1_024));
+    assert_eq!(request.max_output_tokens, Some(512));
   }
 
   #[test]

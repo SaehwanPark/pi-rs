@@ -779,6 +779,10 @@ impl TurnProgress for CliProgress<'_> {
     save(&mut self.io_error, self.surface.reasoning(text, provenance));
   }
 
+  fn mutating_approval_available(&self) -> bool {
+    self.interactive_approval && io::stdin().is_terminal()
+  }
+
   fn on_text_delta(&mut self, text: &str) {
     save(&mut self.io_error, self.surface.text_delta(text));
   }

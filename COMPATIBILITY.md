@@ -391,9 +391,15 @@ Provider normalization should preserve:
 
 - model capability metadata;
 - tool calls;
-- exposed reasoning;
+- exposed reasoning and its explicit provenance;
 - stream completion;
 - typed failures.
+
+Generic endpoint constructors declare no reasoning exposure by default. Native exposure must
+be configured from endpoint evidence; `preserve_reasoning` is valid only for explicitly native
+endpoints and remains opt-in. Completed assistant history persists exposed reasoning and
+provenance even when the endpoint elects not to replay it. Provider adapters and the runtime
+collector enforce aggregate response bounds so malformed streams cannot grow unbounded.
 
 ## 13. MCP compatibility
 
