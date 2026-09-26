@@ -367,6 +367,10 @@ impl Decoder {
     let index_slot = provider_index.and_then(|index| self.tool_indices.get(&index).copied());
     let id_slot = provider_id.and_then(|id| self.tool_ids.get(id).copied());
     let uncorrelated_slots = self.uncorrelated_tool_slots();
+    let singleton_fallback =
+      (provider_index.is_none() && provider_id.is_none() && !uncorrelated_batch)
+        .then(|| self.unique_keyed_open_slot())
+        .flatten();
 
     let slot = match (index_slot, id_slot) {
       (Some(index_slot), Some(id_slot)) if index_slot != id_slot => {
@@ -426,8 +430,8 @@ impl Decoder {
         self.mark_correlation_error(slot, reason);
         slot
       }
-      (None, None) if self.tools.len() == 1 && uncorrelated_slots.len() == 1 => {
-        uncorrelated_slots[0]
+      (None, None) if singleton_fallback.is_some() => {
+        singleton_fallback.expect("guard checked singleton fallback")
       }
       (None, None) => {
         let existing_slots: Vec<_> = self.tools.keys().copied().collect();
@@ -458,7 +462,7 @@ impl Decoder {
       self.tool_ids.entry(id.to_string()).or_insert(slot);
       self.tools.get_mut(&slot).expect("allocated tool slot").id = Some(id.to_string());
     }
-    if provider_index.is_none() && provider_id.is_none() {
+    if provider_index.is_none() && provider_id.is_none() && singleton_fallback.is_none() {
       self.mark_correlation_error(
         slot,
         "tool-call fragment had neither a provider index nor a provider id",
@@ -509,6 +513,20 @@ impl Decoder {
       .filter(|(slot, builder)| builder.id.is_none() && !indexed_slots.contains(slot))
       .map(|(slot, _)| *slot)
       .collect()
+  }
+
+  /// The compatibility fallback is safe only when one call with an explicit
+  /// provider identity remains open and unconflicted. An uncorrelated fragment
+  /// cannot establish its own identity, and two open calls remain ambiguous.
+  fn unique_keyed_open_slot(&self) -> Option<u64> {
+    let indexed_slots: std::collections::BTreeSet<_> =
+      self.tool_indices.values().copied().collect();
+    let mut candidates = self.tools.iter().filter_map(|(slot, builder)| {
+      let has_provider_key = builder.id.is_some() || indexed_slots.contains(slot);
+      (has_provider_key && builder.correlation_error.is_none()).then_some(*slot)
+    });
+    let only = candidates.next()?;
+    candidates.next().is_none().then_some(only)
   }
 }
 
@@ -1037,7 +1055,7 @@ mod tests {
   }
 
   #[test]
-  fn an_uncorrelated_fragment_cannot_extend_an_indexed_tool_call() {
+  fn an_uncorrelated_fragment_joins_the_only_unambiguous_open_call() {
     let mut collector = Collector::default();
     let mut decoder = Decoder::new(ReasoningExposure::None);
     for fragment in [
@@ -1057,7 +1075,36 @@ mod tests {
     decoder
       .finish(StreamEnd::DoneSentinel, &mut collector)
       .unwrap();
-    assert_eq!(collector.events().len(), 2);
+    assert_eq!(collector.events().len(), 1);
+    let ProviderEvent::ToolCall(call) = &collector.events()[0] else {
+      panic!("one uncorrelated fragment can extend the sole keyed open call");
+    };
+    assert_eq!(call.id.as_str(), "read-id");
+    assert_eq!(call.name, "read");
+    assert_eq!(call.arguments, json!({"path": "a.rs"}));
+  }
+
+  #[test]
+  fn a_missing_key_is_not_guessed_when_multiple_calls_are_open() {
+    let mut collector = Collector::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
+    for fragment in [
+      chunk(json!({
+        "tool_calls": [
+          {"index": 0, "id": "read-id", "function": {"name": "read", "arguments": r#"{"path":"a.rs"}"#}},
+          {"index": 1, "id": "grep-id", "function": {"name": "grep", "arguments": r#"{"query":"TODO"}"#}}
+        ]
+      })),
+      chunk(json!({
+        "tool_calls": [{"function": {"name": "write", "arguments": "{}"}}]
+      })),
+    ] {
+      decoder.chunk(&fragment, &mut collector).unwrap();
+    }
+    decoder
+      .finish(StreamEnd::DoneSentinel, &mut collector)
+      .unwrap();
+    assert_eq!(collector.events().len(), 3);
     assert!(collector.events().iter().all(|event| matches!(
       event,
       ProviderEvent::ToolCallRejected { reason, .. }
