@@ -65,6 +65,9 @@ pub struct OpenAiCompatOptions {
   /// How to explicitly disable reasoning for dialects that support it.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub thinking_disable: Option<OpenAiThinkingDisable>,
+  /// Whether this endpoint accepts the OpenAI-style per-function strict flag.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub strict_tool_schema: Option<OpenAiStrictToolSchemaSupport>,
   /// Replay only native reasoning blocks in assistant history when enabled.
   #[serde(default, skip_serializing_if = "is_false")]
   pub preserve_reasoning: bool,
@@ -88,6 +91,7 @@ impl fmt::Debug for OpenAiCompatOptions {
       .field("max_tokens_field", &self.max_tokens_field)
       .field("thinking_input", &self.thinking_input)
       .field("thinking_disable", &self.thinking_disable)
+      .field("strict_tool_schema", &self.strict_tool_schema)
       .field("preserve_reasoning", &self.preserve_reasoning)
       .field("header_names", &header_names)
       .finish()
@@ -116,6 +120,17 @@ pub enum OpenAiThinkingInput {
   ReasoningEffort,
   /// `chat_template_kwargs: { "thinking": bool }`, as llama.cpp builds expect.
   ChatTemplateThinking,
+}
+
+/// Whether the endpoint supports strict JSON-Schema tool sampling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiStrictToolSchemaSupport {
+  /// Do not send the strict extension.
+  #[default]
+  Unsupported,
+  /// The endpoint accepts strict function-tool definitions.
+  Supported,
 }
 
 /// How a dialect expresses explicitly disabled reasoning.
@@ -1002,6 +1017,7 @@ mod tests {
       max_tokens_field: Some(OpenAiMaxTokensField::MaxCompletionTokens),
       thinking_input: Some(OpenAiThinkingInput::ChatTemplateThinking),
       thinking_disable: Some(OpenAiThinkingDisable::ReasoningEffortNone),
+      strict_tool_schema: Some(OpenAiStrictToolSchemaSupport::Supported),
       preserve_reasoning: true,
       headers: BTreeMap::new(),
     };

@@ -14,7 +14,8 @@ use std::sync::{Arc, RwLock};
 
 use rupi_core::{
   CancelToken, ReplayDecision, Tool, ToolChunk, ToolError, ToolExecutionContext,
-  ToolExecutionState, ToolMetadata, ToolOutcome, ToolProgress, ToolRequest,
+  ToolExecutionState, ToolMetadata, ToolOutcome, ToolProgress, ToolRequest, ToolSamplingConstraint,
+  ToolSamplingStrictness,
 };
 use serde_json::Value;
 
@@ -147,16 +148,18 @@ struct RegisteredTool {
   tool: Arc<dyn Tool>,
   metadata: ToolMetadata,
   schema: Arc<Value>,
+  sampling_constraint: Option<ToolSamplingConstraint>,
 }
 
 impl RegisteredTool {
-  fn new(tool: Arc<dyn Tool>) -> Self {
+  fn new(tool: Arc<dyn Tool>, sampling_constraint: Option<ToolSamplingConstraint>) -> Self {
     let metadata = tool.metadata();
     let schema = Arc::new(tool.arguments_schema());
     Self {
       tool,
       metadata,
       schema,
+      sampling_constraint,
     }
   }
 
@@ -165,6 +168,7 @@ impl RegisteredTool {
       name: self.metadata.name.clone(),
       description: self.metadata.description.clone(),
       parameters: self.schema.as_ref().clone(),
+      sampling_constraint: self.sampling_constraint,
     }
   }
 }
@@ -241,8 +245,20 @@ impl ToolRegistry {
   /// Replacement is allowed on purpose: it is how an extension overrides a
   /// built-in without the runtime needing a second resolution rule.
   pub fn register(&mut self, tool: Box<dyn Tool>) -> &mut Self {
+    self.register_with_sampling_constraint(tool, None)
+  }
+
+  /// Register a tool with an explicit provider sampling preference.
+  ///
+  /// `Require` is fail-closed: an endpoint without strict schema support refuses
+  /// the model request before sending it.
+  pub fn register_with_sampling_constraint(
+    &mut self,
+    tool: Box<dyn Tool>,
+    sampling_constraint: Option<ToolSamplingConstraint>,
+  ) -> &mut Self {
     let tool: Arc<dyn Tool> = tool.into();
-    let registered = RegisteredTool::new(tool);
+    let registered = RegisteredTool::new(tool, sampling_constraint);
     let name = registered.metadata.name.clone();
     self.tools.write().unwrap().insert(name, registered);
     self
@@ -253,8 +269,17 @@ impl ToolRegistry {
   /// This enables dynamic mid-session tool registration (e.g. on-demand MCP activation)
   /// without requiring exclusive ownership of the registry.
   pub fn register_shared(&self, tool: Box<dyn Tool>) {
+    self.register_shared_with_sampling_constraint(tool, None);
+  }
+
+  /// Shared-registration equivalent of [`Self::register_with_sampling_constraint`].
+  pub fn register_shared_with_sampling_constraint(
+    &self,
+    tool: Box<dyn Tool>,
+    sampling_constraint: Option<ToolSamplingConstraint>,
+  ) {
     let tool: Arc<dyn Tool> = tool.into();
-    let registered = RegisteredTool::new(tool);
+    let registered = RegisteredTool::new(tool, sampling_constraint);
     let name = registered.metadata.name.clone();
     self.tools.write().unwrap().insert(name, registered);
   }
@@ -289,14 +314,23 @@ impl ToolRegistry {
   /// The built-in set is the whole point of registering tools instead of
   /// hard-coding a dispatch: adding a tool never touches the registry.
   pub fn with_builtins(mut self) -> Self {
-    self.register(Box::new(crate::ReadTool::new(self.runtime.clone())));
-    self.register(Box::new(crate::WriteTool::new(self.runtime.clone())));
-    self.register(Box::new(crate::AppendTool::new(self.runtime.clone())));
-    self.register(Box::new(crate::GrepTool::new(self.runtime.clone())));
-    self.register(Box::new(crate::EditTool::new(self.runtime.clone())));
-    self.register(Box::new(crate::ExecTool::new(self.runtime.clone())));
-    self.register(Box::new(crate::ProcessTool::new(self.runtime.clone())));
+    self.register_builtin(Box::new(crate::ReadTool::new(self.runtime.clone())));
+    self.register_builtin(Box::new(crate::WriteTool::new(self.runtime.clone())));
+    self.register_builtin(Box::new(crate::AppendTool::new(self.runtime.clone())));
+    self.register_builtin(Box::new(crate::GrepTool::new(self.runtime.clone())));
+    self.register_builtin(Box::new(crate::EditTool::new(self.runtime.clone())));
+    self.register_builtin(Box::new(crate::ExecTool::new(self.runtime.clone())));
+    self.register_builtin(Box::new(crate::ProcessTool::new(self.runtime.clone())));
     self
+  }
+
+  fn register_builtin(&mut self, tool: Box<dyn Tool>) {
+    self.register_with_sampling_constraint(
+      tool,
+      Some(ToolSamplingConstraint::JsonSchema {
+        strictness: ToolSamplingStrictness::Prefer,
+      }),
+    );
   }
 
   pub fn len(&self) -> usize {

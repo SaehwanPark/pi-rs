@@ -130,13 +130,17 @@ reasoning replay can use:
   "max_tokens_field": "max_tokens",
   "thinking_input": "reasoning_effort",
   "thinking_disable": "reasoning_effort_none",
+  "strict_tool_schema": "supported",
   "preserve_reasoning": true
 }
 ```
 
-Add this object inside the endpoint entry only when the server needs these overrides.
-Reasoning replay is opt-in and sends only native reasoning blocks; provider summaries and
-runtime-authored rationale remain excluded.
+Add this object inside the endpoint entry only when the server needs these overrides. Set
+`strict_tool_schema` to `supported` only when the endpoint accepts strict function schemas;
+built-in tools prefer that assistance but fall back to ordinary schemas when unavailable.
+An explicitly required constraint refuses before the request if unsupported. Runtime argument
+validation remains authoritative. Reasoning replay is opt-in and sends only native reasoning
+blocks; provider summaries and runtime-authored rationale remain excluded.
 
 ### 4. Ask a read-only question
 

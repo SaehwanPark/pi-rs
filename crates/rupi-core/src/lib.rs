@@ -48,8 +48,8 @@ pub use capability::{
 pub use config::{
   ConfigError, ContextOverrides, DEFAULT_MAX_MODEL_REQUESTS_PER_TURN,
   MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN, McpServerConfig, ModelEndpoint, OpenAiCompatOptions,
-  OpenAiMaxTokensField, OpenAiThinkingDisable, OpenAiThinkingInput, RuntimeConfig, RuntimeLimits,
-  ToolPolicy, UiConfig,
+  OpenAiMaxTokensField, OpenAiStrictToolSchemaSupport, OpenAiThinkingDisable, OpenAiThinkingInput,
+  RuntimeConfig, RuntimeLimits, ToolPolicy, UiConfig,
 };
 pub use context::{
   CAPSULE_SCHEMA_VERSION, CapsuleArtifact, CapsuleDecision, ContextAction, ContextCapsule,
@@ -75,7 +75,8 @@ pub use message::{ContentBlock, Message, Role, ToolCallBlock, ToolResultBlock};
 pub use provenance::{ReasoningChunk, ReasoningProvenance};
 pub use provider::{
   CancelToken, Collector, CompletionUsage, ModelProvider, ModelRequest, ProviderEvent,
-  ProviderEventSink, ThinkingLevel, ToolChoice, ToolSpec,
+  ProviderEventSink, ThinkingLevel, ToolChoice, ToolSamplingConstraint, ToolSamplingStrictness,
+  ToolSpec,
 };
 pub use redact::{Redacted, RedactionPolicy, SecretKind};
 pub use session::{

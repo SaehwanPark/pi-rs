@@ -28,7 +28,8 @@ mod relay;
 pub mod sse;
 
 pub use config::{
-  BuildError, DEFAULT_BASE_URL, MaxTokensField, ProviderConfig, ThinkingDisableMode, ThinkingInput,
+  BuildError, DEFAULT_BASE_URL, MaxTokensField, ProviderConfig, StrictToolSchemaSupport,
+  ThinkingDisableMode, ThinkingInput,
 };
 pub use decode::Decoder;
 pub use deferred::Deferred;

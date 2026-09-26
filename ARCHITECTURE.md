@@ -157,7 +157,10 @@ encoding is opt-in; adapters do not assume that every compatible server accepts
 `reasoning_effort: "none"`. Prior assistant reasoning is omitted by default and can only be
 replayed for an opted-in endpoint when its provenance is `Native`; provider summaries,
 declared rationale and reconstructed rationale are never relabeled as native reasoning.
-Header values are redacted from config serialization and debug output.
+Built-in tools prefer strict schema sampling only when the endpoint explicitly declares
+support. A required constraint refuses before dispatch when unsupported or not safely
+normalizable; the registry's pre-execution argument validator remains authoritative. Header
+values are redacted from config serialization and debug output.
 
 ## 6. Event model
 

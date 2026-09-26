@@ -930,7 +930,11 @@ on the Round-4 PR and remains incomplete until each behavior has regression evid
       Endpoint options now reach adapter stream/usage mode, token-limit field, thinking input and
       explicit-off dialect, native-reasoning replay, and redacted custom headers. Config parsing,
       validation/redaction, adapter mapping, and fake-server wire regressions cover the path.
-- [ ] Add capability-gated preferred/required constrained tool sampling.
+- [x] Add capability-gated preferred/required constrained tool sampling.
+      Built-ins request `Prefer`; endpoint support is explicit. The adapter normalizes the
+      supported strict-schema subset, falls back for preferences, and refuses unsupported or
+      unnormalizable `Require` requests before dispatch. Runtime argument validation remains
+      authoritative; registry, mapper, and wire regressions cover the contract.
 - [ ] Add one bounded recovery attempt for eligible output truncation.
 - [ ] Apply context overrides consistently across active windows and adaptive policy.
 - [ ] Keep P2 tokenizer-estimator calibration and model-readable reduced-output recovery tracked;

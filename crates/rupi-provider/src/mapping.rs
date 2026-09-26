@@ -6,8 +6,9 @@
 //! silence, or thinking requested from a server that rejects the field.
 
 use rupi_core::{
-  ContentBlock, Message, ModelRef, ModelRequest, ReasoningProvenance, Role, ThinkingLevel,
-  ToolChoice,
+  ContentBlock, FailurePhase, Message, ModelFailure, ModelFailureKind, ModelRef, ModelRequest,
+  OpenAiStrictToolSchemaSupport, ReasoningProvenance, Role, ThinkingLevel, ToolChoice,
+  ToolSamplingConstraint, ToolSamplingStrictness,
 };
 use serde_json::{Value, json};
 
@@ -32,14 +33,19 @@ pub fn request_body(config: &ProviderConfig, request: &ModelRequest) -> Value {
         .tools
         .iter()
         .map(|spec| {
-          json!({
-            "type": "function",
-            "function": {
-              "name": spec.name,
-              "description": spec.description,
-              "parameters": spec.parameters,
-            }
-          })
+          let mut function = json!({
+            "name": spec.name,
+            "description": spec.description,
+            "parameters": spec.parameters,
+          });
+          if config.strict_tool_schema == OpenAiStrictToolSchemaSupport::Supported
+            && spec.sampling_constraint.is_some()
+            && let Some(parameters) = normalize_strict_schema(&spec.parameters)
+          {
+            function["parameters"] = parameters;
+            function["strict"] = json!(true);
+          }
+          json!({ "type": "function", "function": function })
         })
         .collect(),
     );
@@ -75,6 +81,149 @@ pub fn request_body(config: &ProviderConfig, request: &ModelRequest) -> Value {
     body["stream_options"] = json!({ "include_usage": config.stream_usage });
   }
   body
+}
+
+/// Refuse required sampling constraints before dispatch when the endpoint cannot honor them.
+#[allow(clippy::result_large_err)]
+pub fn validate_tool_sampling(
+  config: &ProviderConfig,
+  request: &ModelRequest,
+) -> Result<(), ModelFailure> {
+  if !request.capabilities.tools {
+    return Ok(());
+  }
+  for spec in &request.tools {
+    if matches!(
+      spec.sampling_constraint,
+      Some(ToolSamplingConstraint::JsonSchema {
+        strictness: ToolSamplingStrictness::Require,
+      })
+    ) {
+      if config.strict_tool_schema != OpenAiStrictToolSchemaSupport::Supported {
+        return Err(ModelFailure::new(
+          ModelFailureKind::Protocol,
+          FailurePhase::PreRequest,
+          format!(
+            "tool '{}' requires strict JSON Schema sampling, but the endpoint does not support it",
+            spec.name
+          ),
+        ));
+      }
+      if normalize_strict_schema(&spec.parameters).is_none() {
+        return Err(ModelFailure::new(
+          ModelFailureKind::Protocol,
+          FailurePhase::PreRequest,
+          format!(
+            "tool '{}' requires strict JSON Schema sampling, but its schema cannot be normalized for this endpoint",
+            spec.name
+          ),
+        ));
+      }
+    }
+  }
+  Ok(())
+}
+
+/// Convert Rupi's optional-property schemas to the OpenAI strict subset.
+///
+/// Strict mode requires every declared property to be listed as required and
+/// optional values to admit null. This conversion is adapter-local; the
+/// registry's original schema remains authoritative for execution validation.
+fn normalize_strict_schema(schema: &Value) -> Option<Value> {
+  let object = schema.as_object()?;
+  let is_object = object.get("type").and_then(Value::as_str) == Some("object")
+    || object.get("properties").is_some();
+  if is_object {
+    if object.get("additionalProperties") != Some(&Value::Bool(false)) {
+      return None;
+    }
+    let mut result = schema.clone();
+    let empty_properties = serde_json::Map::new();
+    let properties = match object.get("properties") {
+      None => &empty_properties,
+      Some(Value::Object(properties)) => properties,
+      Some(_) => return None,
+    };
+    let required: std::collections::HashSet<&str> = match object.get("required") {
+      None => std::collections::HashSet::new(),
+      Some(Value::Array(items)) => items.iter().map(Value::as_str).collect::<Option<_>>()?,
+      Some(_) => return None,
+    };
+    if required.iter().any(|name| !properties.contains_key(*name)) {
+      return None;
+    }
+    let mut normalized = serde_json::Map::new();
+    for (name, property) in properties {
+      let mut property = normalize_strict_schema(property)?;
+      if !required.contains(name.as_str()) && !make_nullable(&mut property) {
+        return None;
+      }
+      normalized.insert(name.clone(), property);
+    }
+    result["type"] = json!("object");
+    result["properties"] = Value::Object(normalized);
+    result["required"] = json!(properties.keys().collect::<Vec<_>>());
+    result["additionalProperties"] = json!(false);
+    Some(result)
+  } else if object.get("type").and_then(Value::as_str) == Some("array") {
+    let mut result = schema.clone();
+    result["items"] = normalize_strict_schema(object.get("items")?)?;
+    Some(result)
+  } else {
+    let type_name = object.get("type")?;
+    type_name.as_str().map(|_| schema.clone())
+  }
+}
+
+pub(crate) fn strict_tool_argument_schemas(
+  config: &ProviderConfig,
+  request: &ModelRequest,
+) -> std::collections::BTreeMap<String, Value> {
+  if !request.capabilities.tools
+    || config.strict_tool_schema != OpenAiStrictToolSchemaSupport::Supported
+  {
+    return std::collections::BTreeMap::new();
+  }
+  request
+    .tools
+    .iter()
+    .filter(|tool| {
+      tool.sampling_constraint.is_some() && normalize_strict_schema(&tool.parameters).is_some()
+    })
+    .map(|tool| (tool.name.clone(), tool.parameters.clone()))
+    .collect()
+}
+
+fn make_nullable(schema: &mut Value) -> bool {
+  let Some(object) = schema.as_object_mut() else {
+    return false;
+  };
+  if object.contains_key("const")
+    || object.contains_key("$ref")
+    || object
+      .get("enum")
+      .and_then(Value::as_array)
+      .is_some_and(|values| values.contains(&Value::Null))
+  {
+    return false;
+  }
+  match object.get("type").cloned() {
+    Some(Value::String(type_name)) if type_name != "null" => {
+      object.insert("type".into(), json!([type_name, "null"]));
+    }
+    Some(Value::Array(mut types))
+      if types.iter().all(Value::is_string)
+        && !types.iter().any(|value| value.as_str() == Some("null")) =>
+    {
+      types.push(json!("null"));
+      object.insert("type".into(), Value::Array(types));
+    }
+    _ => return false,
+  }
+  if let Some(Value::Array(values)) = object.get_mut("enum") {
+    values.push(Value::Null);
+  }
+  true
 }
 
 /// Translate the thinking level into whatever dialect this endpoint expects.
@@ -224,6 +373,7 @@ pub fn serves(config: &ProviderConfig, model: &ModelRef) -> bool {
 
 #[cfg(test)]
 mod tests {
+  use crate::config::StrictToolSchemaSupport;
   use rupi_core::{
     ModelCapabilities, ModelRef, ToolCallBlock, ToolCallId, ToolResultBlock, ToolSpec,
   };
@@ -249,6 +399,7 @@ mod tests {
       name: "read".into(),
       description: "Read a file".into(),
       parameters: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+      sampling_constraint: None,
     }];
     request
   }
@@ -305,6 +456,88 @@ mod tests {
       request_body(&config(), &capable)["tool_choice"],
       "required",
       "the provider receives the runtime's assistive requirement"
+    );
+  }
+
+  #[test]
+  fn strict_tool_sampling_is_endpoint_gated_and_normalizes_optional_fields() {
+    let mut capable = with_tools(request(vec![Message::user("x")]));
+    capable.capabilities.tools = true;
+    capable.tools[0].parameters = json!({
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string"},
+        "offset": {"type": "integer"}
+      },
+      "required": ["path"]
+    });
+    capable.tools[0].sampling_constraint = Some(ToolSamplingConstraint::JsonSchema {
+      strictness: ToolSamplingStrictness::Prefer,
+    });
+
+    let ordinary = request_body(&config(), &capable);
+    assert!(ordinary["tools"][0]["function"].get("strict").is_none());
+    assert_eq!(
+      ordinary["tools"][0]["function"]["parameters"], capable.tools[0].parameters,
+      "unsupported endpoints keep the ordinary schema"
+    );
+
+    let strict = ProviderConfig {
+      strict_tool_schema: StrictToolSchemaSupport::Supported,
+      ..config()
+    };
+    let constrained = request_body(&strict, &capable);
+    let function = &constrained["tools"][0]["function"];
+    assert_eq!(function["strict"], true);
+    assert_eq!(function["parameters"]["additionalProperties"], false);
+    assert_eq!(
+      function["parameters"]["required"].as_array().unwrap().len(),
+      2
+    );
+    assert_eq!(
+      function["parameters"]["properties"]["offset"]["type"],
+      json!(["integer", "null"])
+    );
+    assert!(validate_tool_sampling(&strict, &capable).is_ok());
+    let mut required = capable.clone();
+    required.tools[0].sampling_constraint = Some(ToolSamplingConstraint::JsonSchema {
+      strictness: ToolSamplingStrictness::Require,
+    });
+    assert!(validate_tool_sampling(&strict, &required).is_ok());
+    assert_eq!(
+      request_body(&strict, &required)["tools"][0]["function"]["strict"],
+      true
+    );
+
+    let mut unsupported_schema = capable.clone();
+    unsupported_schema.tools[0].parameters = json!({
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"mode": {"type": "string", "const": "safe"}}
+    });
+    let fallback = request_body(&strict, &unsupported_schema);
+    assert!(fallback["tools"][0]["function"].get("strict").is_none());
+    unsupported_schema.tools[0].sampling_constraint = Some(ToolSamplingConstraint::JsonSchema {
+      strictness: ToolSamplingStrictness::Require,
+    });
+    assert!(validate_tool_sampling(&strict, &unsupported_schema).is_err());
+  }
+
+  #[test]
+  fn required_tool_sampling_fails_before_dispatch_when_unsupported() {
+    let mut capable = with_tools(request(vec![Message::user("x")]));
+    capable.capabilities.tools = true;
+    capable.tools[0].sampling_constraint = Some(ToolSamplingConstraint::JsonSchema {
+      strictness: ToolSamplingStrictness::Require,
+    });
+    let failure = validate_tool_sampling(&config(), &capable).unwrap_err();
+    assert_eq!(failure.kind, ModelFailureKind::Protocol);
+    assert_eq!(failure.phase, FailurePhase::PreRequest);
+    assert!(
+      failure
+        .message
+        .contains("requires strict JSON Schema sampling")
     );
   }
 

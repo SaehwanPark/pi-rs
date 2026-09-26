@@ -18,8 +18,8 @@ use rupi_core::{CapabilityGap, ModelCapabilities, ModelEndpoint, ReasoningExposu
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 
 pub use rupi_core::{
-  OpenAiMaxTokensField as MaxTokensField, OpenAiThinkingDisable as ThinkingDisableMode,
-  OpenAiThinkingInput as ThinkingInput,
+  OpenAiMaxTokensField as MaxTokensField, OpenAiStrictToolSchemaSupport as StrictToolSchemaSupport,
+  OpenAiThinkingDisable as ThinkingDisableMode, OpenAiThinkingInput as ThinkingInput,
 };
 
 /// Base URL used when nothing is configured.
@@ -62,6 +62,8 @@ pub struct ProviderConfig {
   pub thinking_input: ThinkingInput,
   /// How this endpoint explicitly disables reasoning in the effort dialect.
   pub thinking_disable: ThinkingDisableMode,
+  /// Whether this endpoint accepts strict function-tool schemas.
+  pub strict_tool_schema: StrictToolSchemaSupport,
   /// Whether native reasoning may be replayed with assistant history.
   pub preserve_reasoning: bool,
   /// Whether to stream. One-shot mode is the documented workaround for
@@ -96,6 +98,7 @@ impl fmt::Debug for ProviderConfig {
       .field("max_tokens_field", &self.max_tokens_field)
       .field("thinking_input", &self.thinking_input)
       .field("thinking_disable", &self.thinking_disable)
+      .field("strict_tool_schema", &self.strict_tool_schema)
       .field("preserve_reasoning", &self.preserve_reasoning)
       .field("stream", &self.stream)
       .field("stream_usage", &self.stream_usage)
@@ -128,6 +131,7 @@ impl Default for ProviderConfig {
       max_tokens_field: MaxTokensField::default(),
       thinking_input: ThinkingInput::default(),
       thinking_disable: ThinkingDisableMode::default(),
+      strict_tool_schema: StrictToolSchemaSupport::default(),
       preserve_reasoning: false,
       stream: true,
       stream_usage: true,
@@ -231,6 +235,10 @@ impl ProviderConfig {
       max_tokens_field: endpoint.openai_compat.max_tokens_field.unwrap_or_default(),
       thinking_input: endpoint.openai_compat.thinking_input.unwrap_or_default(),
       thinking_disable: endpoint.openai_compat.thinking_disable.unwrap_or_default(),
+      strict_tool_schema: endpoint
+        .openai_compat
+        .strict_tool_schema
+        .unwrap_or_default(),
       preserve_reasoning: endpoint.openai_compat.preserve_reasoning,
       stream: endpoint.openai_compat.stream.unwrap_or(true),
       stream_usage: endpoint.openai_compat.stream_usage.unwrap_or(true),
@@ -518,6 +526,7 @@ mod tests {
       max_tokens_field: Some(MaxTokensField::MaxCompletionTokens),
       thinking_input: Some(ThinkingInput::ChatTemplateThinking),
       thinking_disable: Some(ThinkingDisableMode::ReasoningEffortNone),
+      strict_tool_schema: Some(StrictToolSchemaSupport::Supported),
       preserve_reasoning: true,
       headers: BTreeMap::from([("x-route".into(), "local-fast".into())]),
     };
@@ -533,6 +542,10 @@ mod tests {
     assert_eq!(
       derived.thinking_disable,
       ThinkingDisableMode::ReasoningEffortNone
+    );
+    assert_eq!(
+      derived.strict_tool_schema,
+      StrictToolSchemaSupport::Supported
     );
     assert!(derived.preserve_reasoning);
     assert_eq!(derived.headers["x-route"], "local-fast");

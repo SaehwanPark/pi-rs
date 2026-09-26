@@ -21,7 +21,7 @@ use rupi_core::{
 use crate::{
   config::{BuildError, ProviderConfig, agent_for, agent_for_proxy, redact_url},
   decode::{self, Decoder, StreamEnd},
-  mapping::request_body,
+  mapping::{self, request_body},
   relay::CancellableHttpRelay,
 };
 
@@ -148,10 +148,12 @@ impl OpenAiCompat {
   fn read_stream(
     &self,
     response: ureq::Response,
+    request: &ModelRequest,
     sink: &mut dyn ProviderEventSink,
     cancel: &CancelToken,
   ) -> Result<CompletionUsage, ModelFailure> {
-    let mut decoder = Decoder::new(self.config.capabilities.exposed_reasoning);
+    let mut decoder = Decoder::new(self.config.capabilities.exposed_reasoning)
+      .with_strict_tool_schemas(mapping::strict_tool_argument_schemas(&self.config, request));
     // Which kind of end we actually observe decides whether this turn may be
     // reported as complete.
     let mut end = StreamEnd::DoneSentinel;
@@ -230,6 +232,7 @@ impl OpenAiCompat {
   fn read_one_shot(
     &self,
     response: ureq::Response,
+    request: &ModelRequest,
     sink: &mut dyn ProviderEventSink,
     cancel: &CancelToken,
   ) -> Result<CompletionUsage, ModelFailure> {
@@ -256,7 +259,8 @@ impl OpenAiCompat {
     }
     let value = decode_chunk(std::str::from_utf8(&body).unwrap_or(""))
       .map_err(|failure| failure.with_model(self.model_ref()))?;
-    let mut decoder = Decoder::new(self.config.capabilities.exposed_reasoning);
+    let mut decoder = Decoder::new(self.config.capabilities.exposed_reasoning)
+      .with_strict_tool_schemas(mapping::strict_tool_argument_schemas(&self.config, request));
     decoder
       .chunk(&value, sink)
       .map_err(|failure| annotated(&failure, false).with_model(self.model_ref()))?;
@@ -285,9 +289,9 @@ impl OpenAiCompat {
       Err(failure) => return Err(failure.with_model(self.model_ref())),
     };
     if self.config.stream {
-      self.read_stream(response, sink, cancel)
+      self.read_stream(response, request, sink, cancel)
     } else {
-      self.read_one_shot(response, sink, cancel)
+      self.read_one_shot(response, request, sink, cancel)
     }
   }
 
@@ -302,6 +306,8 @@ impl OpenAiCompat {
     sink: &mut dyn ProviderEventSink,
     cancel: &CancelToken,
   ) -> Result<CompletionUsage, ModelFailure> {
+    mapping::validate_tool_sampling(&self.config, request)
+      .map_err(|failure| failure.with_model(self.model_ref()))?;
     if self.quarantined.load(Ordering::Acquire) {
       return Err(
         ModelFailure::new(
@@ -705,7 +711,10 @@ impl ModelProvider for OpenAiCompat {
 
 #[cfg(test)]
 mod tests {
-  use rupi_core::{Collector, ModelRef, ProviderEvent, ReasoningExposure};
+  use rupi_core::{
+    Collector, ModelRef, ProviderEvent, ReasoningExposure, ToolSamplingConstraint,
+    ToolSamplingStrictness,
+  };
 
   use super::*;
 
@@ -775,6 +784,36 @@ mod tests {
     assert_eq!(failure.kind, ModelFailureKind::Cancelled);
     assert_eq!(failure.phase, FailurePhase::PreRequest);
     assert_eq!(failure.model, Some(ModelRef::new("local", "qwen3.8-flash")));
+    assert!(collector.events().is_empty());
+  }
+
+  #[test]
+  fn a_required_strict_tool_refuses_before_opening_the_endpoint() {
+    let mut config =
+      ProviderConfig::local("local", "qwen3.8-flash", "http://127.0.0.1:9/v1", 4_096);
+    config.capabilities.tools = true;
+    let adapter = OpenAiCompat::new(config).unwrap();
+    let mut request = request();
+    request.capabilities.tools = true;
+    request.tools.push(rupi_core::ToolSpec {
+      name: "read".into(),
+      description: "Read a path".into(),
+      parameters: serde_json::json!({
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"]
+      }),
+      sampling_constraint: Some(ToolSamplingConstraint::JsonSchema {
+        strictness: ToolSamplingStrictness::Require,
+      }),
+    });
+    let mut collector = Collector::default();
+    let failure = adapter
+      .stream(&request, &mut collector, &CancelToken::new())
+      .unwrap_err();
+    assert_eq!(failure.kind, ModelFailureKind::Protocol);
+    assert_eq!(failure.phase, FailurePhase::PreRequest);
+    assert!(failure.message.contains("does not support it"));
     assert!(collector.events().is_empty());
   }
 

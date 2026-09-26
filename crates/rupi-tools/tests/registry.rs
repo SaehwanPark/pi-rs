@@ -10,7 +10,8 @@ use std::{fs, path::Path};
 use rupi_core::ToolExecutionState as State;
 use rupi_core::{
   CancelToken, CancelToken as Cancel, ReconciliationStatus, ReplayDecision, ToolCallId, ToolChunk,
-  ToolMetadata, ToolOutcome, ToolPolicy, ToolProgress, ToolRequest, ToolSpec,
+  ToolMetadata, ToolOutcome, ToolPolicy, ToolProgress, ToolRequest, ToolSamplingConstraint,
+  ToolSamplingStrictness, ToolSpec,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -115,6 +116,13 @@ fn the_builtin_set_is_registered_with_usable_specs() {
       spec.name
     );
     assert!(spec.parameters.is_object(), "{} has no schema", spec.name);
+    assert_eq!(
+      spec.sampling_constraint,
+      Some(ToolSamplingConstraint::JsonSchema {
+        strictness: ToolSamplingStrictness::Prefer,
+      }),
+      "built-ins prefer provider schema constraints without requiring them"
+    );
   }
 }
 
