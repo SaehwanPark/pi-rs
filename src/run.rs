@@ -667,7 +667,7 @@ fn backup_provider(config: &RuntimeConfig) -> Result<Option<Deferred>, String> {
   let endpoint = config
     .endpoint_for(&model)
     .ok_or_else(|| format!("invalid config: backup model {model} has no endpoint entry"))?;
-  let declared = endpoint.capabilities.clone();
+  let declared = endpoint.effective_capabilities();
   let endpoint = endpoint.clone();
   Ok(
     Deferred::new(model, declared, move || {
@@ -777,6 +777,10 @@ impl TurnProgress for CliProgress<'_> {
 
   fn on_reasoning(&mut self, text: &str, provenance: ReasoningProvenance) {
     save(&mut self.io_error, self.surface.reasoning(text, provenance));
+  }
+
+  fn mutating_approval_available(&self) -> bool {
+    self.interactive_approval && io::stdin().is_terminal()
   }
 
   fn on_text_delta(&mut self, text: &str) {

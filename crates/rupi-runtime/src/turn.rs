@@ -11,8 +11,9 @@
 //! - **One model at a time.** Exactly one epoch is active; a change of model is an
 //!   epoch transition with a recorded reason, never an implicit swap.
 //! - Ordinary request retries require that nothing was streamed. The one bounded
-//!   output-limit recovery is an explicit exception: failed deltas stay out of
-//!   future model context and tools from the incomplete response never execute.
+//!   output-limit recovery is allowed only when no assistant output escaped to an
+//!   irreversible live surface; failed deltas stay out of future model context and
+//!   tools from the incomplete response never execute.
 //! - **Every tool call reaches a terminal lifecycle state**, including calls that
 //!   were interrupted or refused. A tool call with no terminal event is a bug here.
 //! - **Context is never silently truncated.** An oversized request is refused, and
@@ -30,13 +31,16 @@ use rupi_core::{
   ContextLevel, ContextPolicy, ContextReduced, ContextState, DEFAULT_MAX_MODEL_REQUESTS_PER_TURN,
   Diagnostic, DiagnosticLevel, EpochReason, EventEnvelope, EventMeta, EventSeq, EventSink,
   ExternalContextItem, ExternalContextRetrieved, FailurePhase,
-  MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN, Message, ModelCapabilities, ModelEpoch,
-  ModelEpochStarted, ModelFailover, ModelFailure, ModelFailureKind, ModelProvider, ModelRef,
-  ModelRequest, ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta,
-  ReasoningProvenance, ReductionReason, Role, SessionEndReason, SessionEnded, SessionId,
-  SessionStarted, SinkError, ThinkingLevel, ToolCallBlock, ToolChoice, ToolCompleted,
-  ToolExecutionState, ToolFailed, ToolOutcome, ToolProgress, ToolRequested, ToolResultBlock,
-  ToolStarted, ToolUnknown, TraceId, TurnCompleted, TurnId, TurnStatus, UserMessage,
+  MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN, MAX_RESPONSE_EVENTS, MAX_RESPONSE_REASONING_BYTES,
+  MAX_RESPONSE_TEXT_BYTES, MAX_RESPONSE_TOOL_CALLS, MAX_TOOL_ARGUMENT_BYTES_PER_CALL,
+  MAX_TOOL_ARGUMENT_BYTES_TOTAL, MAX_TOOL_ID_BYTES, MAX_TOOL_NAME_BYTES, Message,
+  ModelCapabilities, ModelEpoch, ModelEpochStarted, ModelFailover, ModelFailure, ModelFailureKind,
+  ModelProvider, ModelRef, ModelRequest, ModelRequestCompleted, ModelRequestStarted, ModelRetry,
+  ReasoningChunk, ReasoningDelta, ReasoningProvenance, ReductionReason, Role, SessionEndReason,
+  SessionEnded, SessionId, SessionStarted, SinkError, ThinkingLevel, ToolCallBlock, ToolChoice,
+  ToolCompleted, ToolExecutionState, ToolFailed, ToolOutcome, ToolProgress, ToolRequested,
+  ToolResultBlock, ToolStarted, ToolUnknown, TraceId, TurnCompleted, TurnId, TurnStatus,
+  UserMessage,
 };
 use rupi_tools::{Approval, ApprovalGate, Executed, ToolRegistry};
 
@@ -114,6 +118,18 @@ pub trait TurnProgress: Send {
   }
   fn on_reasoning(&mut self, _text: &str, _provenance: ReasoningProvenance) {}
   fn on_text_delta(&mut self, _text: &str) {}
+  /// Whether assistant deltas are immediately committed to a non-transactional
+  /// surface such as stdout. Conservative by default; buffered/headless surfaces
+  /// may opt out when they can discard an incomplete attempt.
+  fn output_is_irreversible(&self) -> bool {
+    true
+  }
+  /// Whether a mutating call can be approved on this surface right now.
+  /// Surfaces without an approval path must not advertise a progress tool that
+  /// they can only refuse after another provider round-trip.
+  fn mutating_approval_available(&self) -> bool {
+    false
+  }
   fn on_tool_requested(&mut self, _call: &ToolCallBlock) {}
   /// Answer a mutating-tool approval request on a surface that can ask a person.
   ///
@@ -132,7 +148,11 @@ pub trait TurnProgress: Send {
 
 /// A sink that records nothing, for headless runs and tests.
 pub struct SilentProgress;
-impl TurnProgress for SilentProgress {}
+impl TurnProgress for SilentProgress {
+  fn output_is_irreversible(&self) -> bool {
+    false
+  }
+}
 
 /// Durable sink for the canonical event stream.
 ///
@@ -389,6 +409,9 @@ enum Action {
 struct Response {
   epoch: u32,
   text: Option<String>,
+  /// Ordered text/reasoning deltas from this successfully completed response.
+  /// Failed attempts stay trace-only and never reach this semantic projection.
+  content: Vec<ContentBlock>,
   calls: Vec<ToolCallBlock>,
   rejected_calls: BTreeMap<String, String>,
   /// The completion is held until the exact assistant message is assembled, so
@@ -443,6 +466,7 @@ pub struct TurnLoop<'a> {
   /// repeat a mutating side effect.
   tools_enabled: bool,
   interactive_tool_approval: bool,
+  mutating_approval_available: bool,
   session_started: bool,
   /// Whether the first lifecycle event belongs to a continuation of an existing
   /// durable journal rather than a newly created session.
@@ -521,6 +545,7 @@ impl<'a> TurnLoop<'a> {
       requests: AtomicUsize::new(0),
       tools_enabled: true,
       interactive_tool_approval: false,
+      mutating_approval_available: false,
       session_started: false,
       resumed: false,
       interrupted_tools: Vec::new(),
@@ -606,6 +631,7 @@ impl<'a> TurnLoop<'a> {
   /// approval and allow/deny policy.
   pub fn with_interactive_tool_approval(mut self, enabled: bool) -> Self {
     self.interactive_tool_approval = enabled;
+    self.mutating_approval_available = enabled;
     self
   }
 
@@ -1053,6 +1079,8 @@ impl<'a> TurnLoop<'a> {
     // new user turn boundary, so let it explicitly open a fresh generation;
     // automatic retries inside the previous turn never reach this hook.
     self.provider().reset_after_abandonment();
+    self.mutating_approval_available =
+      self.interactive_tool_approval && progress.mutating_approval_available();
     let turn_id = TurnId::new();
     let clock = Instant::now();
     let mut report = TurnReport::new(turn_id.clone(), self.epoch_index());
@@ -1134,6 +1162,8 @@ impl<'a> TurnLoop<'a> {
         return self.finish(report, TurnStatus::Cancelled, clock, Some(turn_id.clone()));
       }
 
+      self.mutating_approval_available =
+        self.interactive_tool_approval && progress.mutating_approval_available();
       let response = match self.attempt(turn_id.clone(), &mut turn_history_start, cancel, progress)
       {
         Ok(response) => response,
@@ -1163,7 +1193,16 @@ impl<'a> TurnLoop<'a> {
           failure,
           actual_output_tokens,
           requested_output_tokens,
+          surface_output_emitted,
         }) => {
+          if surface_output_emitted {
+            self.diagnostic(
+              Some(turn_id.clone()),
+              DiagnosticLevel::Warn,
+              "output-limit recovery was skipped because partial assistant output was already streamed to the surface",
+            )?;
+            return self.finish_failure(report, failure, clock, turn_id.clone());
+          }
           if truncation_recovery_used {
             self.diagnostic(
               Some(turn_id.clone()),
@@ -1257,7 +1296,11 @@ impl<'a> TurnLoop<'a> {
         cancel,
         progress,
       )?;
-      self.observe_progress(&turn_id, progress_succeeded)?;
+      if let Some(reason) = self.observe_progress(&turn_id, progress_succeeded)? {
+        let failure =
+          ModelFailure::new(ModelFailureKind::Semantic, FailurePhase::PreRequest, reason);
+        return self.finish_failure(report, failure, clock, turn_id.clone());
+      }
     }
 
     if self.progress_boundary_active {
@@ -1647,7 +1690,7 @@ impl<'a> TurnLoop<'a> {
     // emergency epoch; the normal builder will issue the same request again.
     if self.turn_has_structural_compaction(turn_id) {
       let request = self.assemble_request(self.messages.clone());
-      if estimate_tokens(&request) <= target {
+      if request_context_tokens(&request) <= target {
         self.diagnostic(
           Some(turn_id.clone()),
           DiagnosticLevel::Info,
@@ -1677,7 +1720,7 @@ impl<'a> TurnLoop<'a> {
       candidate_messages.push(Message::user(summary.clone()));
       candidate_messages.extend(suffix.iter().cloned());
       let request = self.assemble_request(candidate_messages);
-      if estimate_tokens(&request) <= target {
+      if request_context_tokens(&request) <= target {
         accepted = Some(summary);
         break;
       }
@@ -1815,7 +1858,10 @@ impl<'a> TurnLoop<'a> {
         calls,
         rejected_calls,
         committed,
+        surface_output_emitted,
         reasoning_provenance: provenance,
+        assistant_content,
+        provider_error,
         sink_error,
         first_delta_ms,
         ..
@@ -1823,6 +1869,10 @@ impl<'a> TurnLoop<'a> {
       if let Some(error) = sink_error {
         return Err(TurnFailure::Sink(error));
       }
+      let outcome = match provider_error {
+        Some(error) => Err(error),
+        None => outcome,
+      };
 
       let mut failed_usage = None;
       let failure = match outcome {
@@ -1878,6 +1928,7 @@ impl<'a> TurnLoop<'a> {
               return Ok(Response {
                 epoch,
                 text: (!text.is_empty()).then_some(text),
+                content: assistant_content,
                 calls,
                 rejected_calls,
                 completion,
@@ -1972,11 +2023,13 @@ impl<'a> TurnLoop<'a> {
       if let Some((actual_output_tokens, requested_output_tokens)) = recoverable_output_truncation {
         // This special path stays on the current model and bypasses generic
         // failover: the response is not projected into model context, and every
-        // decoded tool call was closed without execution above.
+        // decoded tool call was closed without execution above. The outer loop
+        // permits recovery only when no partial answer escaped to the surface.
         return Err(TurnFailure::OutputTruncated {
           failure,
           actual_output_tokens,
           requested_output_tokens,
+          surface_output_emitted,
         });
       }
       // Provider overflow is a distinct outcome. It is eligible for the outer
@@ -2222,8 +2275,29 @@ impl<'a> TurnLoop<'a> {
     turn_id: &TurnId,
     turn_history_start: &mut usize,
   ) -> Result<u32, TurnError> {
+    self.evict_oldest_with_estimate(provider, target, turn_id, turn_history_start, false)
+  }
+
+  fn evict_oldest_to_prompt(
+    &mut self,
+    target: u64,
+    turn_id: &TurnId,
+    turn_history_start: &mut usize,
+  ) -> Result<u32, TurnError> {
+    let provider = self.provider();
+    self.evict_oldest_with_estimate(provider, target, turn_id, turn_history_start, true)
+  }
+
+  fn evict_oldest_with_estimate(
+    &mut self,
+    provider: &dyn ModelProvider,
+    target: u64,
+    turn_id: &TurnId,
+    turn_history_start: &mut usize,
+    prompt_only: bool,
+  ) -> Result<u32, TurnError> {
     self.normalize_message_seqs();
-    let before = self.estimate_request_for(provider, self.messages.clone());
+    let before = self.estimate_request_after_eviction(provider, 0, 0, false);
     let turn_start = (*turn_history_start).min(self.messages.len());
     // The current-turn suffix and a restored checkpoint capsule are both
     // non-evictable. The latter is a durable barrier, not ordinary history.
@@ -2233,26 +2307,36 @@ impl<'a> TurnLoop<'a> {
     let max_drop = evictable_end.saturating_sub(evictable_start);
     let mut desired = 0usize;
     while desired < max_drop
-      && self.estimate_request_after_eviction(provider, evictable_start, desired) > target
+      && self.estimate_request_after_eviction(provider, evictable_start, desired, prompt_only)
+        > target
     {
       desired += 1;
     }
     // A reduction may remove only complete conversation turns. If the byte
     // target lands inside an assistant tool-call/result pair, retain the last
     // safe boundary instead of handing a provider an invalid protocol history.
-    let dropped = (0..=desired)
-      .rev()
-      .find(|drop| {
-        safe_eviction_boundary(
-          &self.messages,
-          evictable_start,
-          evictable_start + *drop,
-          evictable_end,
-        )
-      })
-      .unwrap_or(0);
+    let is_safe_boundary = |drop: &usize| {
+      safe_eviction_boundary(
+        &self.messages,
+        evictable_start,
+        evictable_start + *drop,
+        evictable_end,
+      )
+    };
+    let dropped = if prompt_only {
+      (desired..=max_drop)
+        .find(|drop| {
+          is_safe_boundary(drop)
+            && self.estimate_request_after_eviction(provider, evictable_start, *drop, true)
+              <= target
+        })
+        .or_else(|| (0..=desired).rev().find(is_safe_boundary))
+        .unwrap_or(0)
+    } else {
+      (0..=desired).rev().find(is_safe_boundary).unwrap_or(0)
+    };
     if dropped > 0 {
-      let visible = self.estimate_request_after_eviction(provider, evictable_start, dropped);
+      let visible = self.estimate_request_after_eviction(provider, evictable_start, dropped, false);
       let dropped_count = u32::try_from(dropped)
         .map_err(|_| TurnError::Sink("eviction message count exceeds durable limit".into()))?;
       let retained_count = u32::try_from(self.messages.len().saturating_sub(dropped))
@@ -2754,7 +2838,7 @@ impl<'a> TurnLoop<'a> {
       candidate.push(Message::user(summary.clone()));
       candidate.extend(self.messages[boundary..].iter().cloned());
       selected = Some((boundary, summary));
-      if estimate_tokens(&self.assemble_request(candidate)) <= target_tokens {
+      if request_context_tokens(&self.assemble_request(candidate)) <= target_tokens {
         break;
       }
     }
@@ -2809,6 +2893,35 @@ impl<'a> TurnLoop<'a> {
     self.assemble_request_for(self.provider(), messages)
   }
 
+  fn exposed_tools_for(&self, capabilities: &ModelCapabilities) -> Vec<rupi_core::ToolSpec> {
+    if !self.tools_enabled || !capabilities.tools {
+      return Vec::new();
+    }
+    let may_approve_mutations =
+      self.mutating_approval_available || self.tools.auto_approves_mutating();
+    self
+      .tools
+      .specs()
+      .into_iter()
+      .filter(|spec| {
+        self.progress_tool_is_exposed(&spec.name)
+          && (may_approve_mutations
+            || self
+              .tools
+              .metadata_for(&spec.name)
+              .is_some_and(|metadata| metadata.read_only))
+      })
+      .collect()
+  }
+
+  fn effective_progress_tools(&self) -> Vec<String> {
+    self
+      .exposed_tools_for(&self.provider().capabilities())
+      .into_iter()
+      .map(|spec| spec.name)
+      .collect()
+  }
+
   /// Assemble a request as a particular attached model would receive it. The
   /// failover rebudget gate uses this before changing the active epoch.
   fn assemble_request_for(
@@ -2818,25 +2931,7 @@ impl<'a> TurnLoop<'a> {
   ) -> ModelRequest {
     let capabilities = provider.capabilities();
     let max_output_tokens = capabilities.max_output_tokens;
-    let may_approve_mutations =
-      self.interactive_tool_approval || self.tools.auto_approves_mutating();
-    let tools = if self.tools_enabled && capabilities.tools {
-      self
-        .tools
-        .specs()
-        .into_iter()
-        .filter(|spec| {
-          self.progress_tool_is_exposed(&spec.name)
-            && (may_approve_mutations
-              || self
-                .tools
-                .metadata_for(&spec.name)
-                .is_some_and(|metadata| metadata.read_only))
-        })
-        .collect()
-    } else {
-      Vec::new()
-    };
+    let tools = self.exposed_tools_for(&capabilities);
     let tool_choice = if self.progress_boundary_active && !tools.is_empty() {
       ToolChoice::Required
     } else {
@@ -2857,7 +2952,7 @@ impl<'a> TurnLoop<'a> {
   }
 
   fn estimate_request_for(&self, provider: &dyn ModelProvider, messages: Vec<Message>) -> u64 {
-    estimate_tokens(&self.assemble_request_for(provider, messages))
+    request_context_tokens(&self.assemble_request_for(provider, messages))
   }
 
   fn estimate_request_after_eviction(
@@ -2865,13 +2960,19 @@ impl<'a> TurnLoop<'a> {
     provider: &dyn ModelProvider,
     start: usize,
     dropped: usize,
+    prompt_only: bool,
   ) -> u64 {
     let mut messages = self.messages.clone();
     let end = start.saturating_add(dropped).min(messages.len());
     if start < end {
       messages.drain(start..end);
     }
-    self.estimate_request_for(provider, messages)
+    let request = self.assemble_request_for(provider, messages);
+    if prompt_only {
+      estimate_tokens(&request)
+    } else {
+      request_context_tokens(&request)
+    }
   }
 
   /// Whether a tool remains available after the opt-in progress boundary has
@@ -2916,39 +3017,45 @@ impl<'a> TurnLoop<'a> {
     &mut self,
     turn_id: &TurnId,
     progress_succeeded: bool,
-  ) -> Result<(), TurnError> {
+  ) -> Result<Option<String>, TurnError> {
     let Some(limit) = self.progress_request_limit else {
-      return Ok(());
+      return Ok(None);
     };
     if progress_succeeded {
       self.progress_requests_without_progress = 0;
       self.progress_boundary_active = false;
       self.progress_boundary_used = true;
-      return Ok(());
+      return Ok(None);
     }
     if self.progress_boundary_used {
-      return Ok(());
+      return Ok(None);
     }
     self.progress_requests_without_progress =
       self.progress_requests_without_progress.saturating_add(1);
     if self.progress_requests_without_progress >= limit && !self.progress_boundary_active {
       self.progress_boundary_active = true;
+      let available = self.effective_progress_tools();
+      if available.is_empty() {
+        let reason = "progress boundary cannot be satisfied: configured progress tools are unavailable under the current model, tool, or approval policy".to_string();
+        self.diagnostic(
+          Some(turn_id.clone()),
+          DiagnosticLevel::Error,
+          reason.clone(),
+        )?;
+        return Ok(Some(reason));
+      }
       self.append_progress_instruction(turn_id)?;
-      let tools = if self.progress_tool_names.is_empty() {
-        "permitted mutating tools".to_string()
-      } else {
-        self.progress_tool_names.join(", ")
-      };
       self.diagnostic(
         Some(turn_id.clone()),
         DiagnosticLevel::Info,
         format!(
-          "progress boundary active after {} model request(s) without a configured progress tool; next request exposes {tools}",
-          self.progress_requests_without_progress
+          "progress boundary active after {} model request(s) without a configured progress tool; next request exposes {}",
+          self.progress_requests_without_progress,
+          available.join(", ")
         ),
       )?;
     }
-    Ok(())
+    Ok(None)
   }
 
   /// Correct a response that tried to complete without satisfying the boundary.
@@ -3005,9 +3112,33 @@ impl<'a> TurnLoop<'a> {
     turn_id: &TurnId,
     turn_history_start: &mut usize,
   ) -> Result<ModelRequest, TurnError> {
+    // Failover and interactive approval availability can change after activation;
+    // never spend a provider round-trip when the narrowed tool set is now empty.
+    if self.progress_boundary_active
+      && self.tools_enabled
+      && self.effective_progress_tools().is_empty()
+    {
+      let reason = "progress boundary cannot be satisfied: configured progress tools became unavailable under the current model, tool, or approval policy";
+      self.diagnostic(Some(turn_id.clone()), DiagnosticLevel::Error, reason)?;
+      return Err(TurnError::Unavailable(ModelFailure::new(
+        ModelFailureKind::Semantic,
+        FailurePhase::PreRequest,
+        reason,
+      )));
+    }
     let capabilities = self.provider().capabilities();
+    if capabilities.max_output_tokens == Some(0) {
+      self.diagnostic(
+        Some(turn_id.clone()),
+        DiagnosticLevel::Error,
+        "context cannot reserve a useful output budget: configured output ceiling is zero",
+      )?;
+      return Err(TurnError::Aborted(TurnStatus::Failed {
+        kind: ModelFailureKind::ContextOverflow,
+      }));
+    }
     let estimated_request = self.assemble_request(self.messages.clone());
-    let estimated_tokens = estimate_tokens(&estimated_request);
+    let estimated_tokens = request_context_tokens(&estimated_request);
     let state = {
       let mut state = ContextState::zero(capabilities.context_window);
       state.model = Some(self.active_model());
@@ -3152,7 +3283,55 @@ impl<'a> TurnLoop<'a> {
       ContextAction::Warn { .. } | ContextAction::Keep => {}
     }
 
-    Ok(self.assemble_request(self.messages.clone()))
+    let mut request = self.assemble_request(self.messages.clone());
+    let mut budget = RequestBudget::for_request(&request);
+    if budget.is_unusable() {
+      let target_prompt_tokens = if let Some(desired_output_tokens) = budget.desired_output_tokens {
+        budget
+          .context_window
+          .saturating_sub(budget.safety_reserve_tokens)
+          .saturating_sub(desired_output_tokens.min(MINIMUM_USEFUL_OUTPUT_TOKENS))
+      } else {
+        budget.context_window
+      };
+      self.evict_oldest_to_prompt(target_prompt_tokens, turn_id, turn_history_start)?;
+      request = self.assemble_request(self.messages.clone());
+      budget = RequestBudget::for_request(&request);
+    }
+    if budget.is_unusable() {
+      self.diagnostic(
+        Some(turn_id.clone()),
+        DiagnosticLevel::Error,
+        format!(
+          "context cannot reserve a useful output budget: prompt estimate {}, desired output {}, available output {} after {}-token safety reserve in a {}-token window",
+          budget.prompt_tokens_est,
+          budget.desired_output_tokens.unwrap_or_default(),
+          budget.effective_output_tokens.unwrap_or_default(),
+          budget.safety_reserve_tokens,
+          budget.context_window,
+        ),
+      )?;
+      return Err(TurnError::Aborted(TurnStatus::Failed {
+        kind: ModelFailureKind::ContextOverflow,
+      }));
+    }
+    if budget.desired_output_tokens != budget.effective_output_tokens {
+      self.diagnostic(
+        Some(turn_id.clone()),
+        DiagnosticLevel::Warn,
+        format!(
+          "output budget reduced from {} to {} tokens to fit the active {}-token context window (prompt estimate {}, safety reserve {})",
+          budget.desired_output_tokens.unwrap_or_default(),
+          budget.effective_output_tokens.unwrap_or_default(),
+          budget.context_window,
+          budget.prompt_tokens_est,
+          budget.safety_reserve_tokens,
+        ),
+      )?;
+    }
+    request =
+      request.with_output_budget(budget.desired_output_tokens, budget.effective_output_tokens);
+    Ok(request)
   }
 
   /// Persist one assistant response and add its visible content to model history.
@@ -3169,6 +3348,7 @@ impl<'a> TurnLoop<'a> {
     let Response {
       epoch,
       text,
+      content,
       calls,
       rejected_calls,
       mut completion,
@@ -3177,9 +3357,11 @@ impl<'a> TurnLoop<'a> {
     report.requests = self.requests.load(Ordering::SeqCst);
 
     let mut blocks = Vec::new();
-    if include_assistant_message && let Some(text) = text.filter(|text| !text.is_empty()) {
-      blocks.push(ContentBlock::text(text.clone()));
-      report.text.push_str(&text);
+    if include_assistant_message {
+      if let Some(text) = text.filter(|text| !text.is_empty()) {
+        report.text.push_str(&text);
+      }
+      blocks.extend(content);
     }
     for call in &calls {
       blocks.push(ContentBlock::ToolCall(ToolCallBlock {
@@ -3390,7 +3572,7 @@ impl<'a> TurnLoop<'a> {
       let approval = match metadata.as_ref().filter(|metadata| !metadata.read_only) {
         None => Approval::Allow,
         Some(_) if self.tools.auto_approves_mutating() => Approval::Allow,
-        Some(metadata) if self.interactive_tool_approval => {
+        Some(metadata) if self.mutating_approval_available => {
           progress.approve_mutating_tool(metadata, &call.arguments)
         }
         Some(_) => Approval::Deny(
@@ -3569,6 +3751,7 @@ enum TurnFailure {
     failure: ModelFailure,
     actual_output_tokens: u64,
     requested_output_tokens: u64,
+    surface_output_emitted: bool,
   },
   /// No model can serve the request.
   Fatal(ModelFailure),
@@ -3623,12 +3806,21 @@ struct Collector<'a> {
   clock: Instant,
   first_delta_ms: Option<u64>,
   text: String,
+  assistant_content: Vec<ContentBlock>,
   calls: Vec<ToolCallBlock>,
   rejected_calls: BTreeMap<String, String>,
   committed: bool,
+  /// Reasoning or assistant text has already been handed to the live surface;
+  /// output-limit recovery cannot retract it from plain stdout or the TUI.
+  surface_output_emitted: bool,
   reasoning_index: u32,
   text_index: u32,
   reasoning_provenance: Option<ReasoningProvenance>,
+  response_events: usize,
+  text_bytes: usize,
+  reasoning_bytes: usize,
+  tool_argument_bytes: usize,
+  provider_error: Option<ModelFailure>,
   sink_error: Option<SinkError>,
 }
 
@@ -3648,12 +3840,19 @@ impl<'a> Collector<'a> {
       clock,
       first_delta_ms: None,
       text: String::new(),
+      assistant_content: Vec::new(),
       calls: Vec::new(),
       rejected_calls: BTreeMap::new(),
       committed: false,
+      surface_output_emitted: false,
       reasoning_index: 0,
       text_index: 0,
       reasoning_provenance: None,
+      response_events: 0,
+      text_bytes: 0,
+      reasoning_bytes: 0,
+      tool_argument_bytes: 0,
+      provider_error: None,
       sink_error: None,
     }
   }
@@ -3664,8 +3863,57 @@ impl<'a> Collector<'a> {
     }
   }
 
+  fn append_text_content(&mut self, text: &str) {
+    if let Some(ContentBlock::Text { text: prior }) = self.assistant_content.last_mut() {
+      prior.push_str(text);
+    } else {
+      self.assistant_content.push(ContentBlock::Text {
+        text: text.to_string(),
+      });
+    }
+  }
+
+  fn append_reasoning_content(&mut self, text: &str, provenance: ReasoningProvenance) {
+    if let Some(ContentBlock::Reasoning(prior)) = self.assistant_content.last_mut()
+      && prior.provenance == provenance
+    {
+      prior.text.push_str(text);
+    } else {
+      self
+        .assistant_content
+        .push(ContentBlock::Reasoning(ReasoningChunk::new(
+          text, provenance,
+        )));
+    }
+  }
+
+  fn reject_response(&mut self, message: String) {
+    if self.provider_error.is_none() {
+      self.provider_error = Some(
+        ModelFailure::new(
+          ModelFailureKind::Protocol,
+          FailurePhase::Normalizing,
+          message,
+        )
+        .with_partial_output(self.committed),
+      );
+      self.cancel.cancel();
+    }
+  }
+
+  fn account_response_event(&mut self) -> bool {
+    if self.response_events >= MAX_RESPONSE_EVENTS {
+      self.reject_response(format!(
+        "provider response exceeded the {MAX_RESPONSE_EVENTS}-event aggregate limit"
+      ));
+      return false;
+    }
+    self.response_events += 1;
+    true
+  }
+
   fn trace_event(&mut self, event: AgentEvent) -> Option<EventEnvelope> {
-    if self.sink_error.is_some() {
+    if self.sink_error.is_some() || self.provider_error.is_some() {
       return None;
     }
     let mut meta = EventMeta::new(
@@ -3687,9 +3935,23 @@ impl<'a> Collector<'a> {
 
 impl rupi_core::ProviderEventSink for Collector<'_> {
   fn emit(&mut self, event: &rupi_core::ProviderEvent) {
+    if self.sink_error.is_some() || self.provider_error.is_some() {
+      return;
+    }
     self.mark_first_delta();
+    if !self.account_response_event() {
+      return;
+    }
     match event {
       rupi_core::ProviderEvent::ReasoningDelta { text, provenance } => {
+        if self.reasoning_bytes.saturating_add(text.len()) > MAX_RESPONSE_REASONING_BYTES {
+          self.reject_response(format!(
+            "provider response exceeded the {}-byte aggregate reasoning limit",
+            MAX_RESPONSE_REASONING_BYTES
+          ));
+          return;
+        }
+        self.reasoning_bytes += text.len();
         let traced = self.trace_event(AgentEvent::ReasoningDelta(ReasoningDelta {
           text: text.clone(),
           provenance: *provenance,
@@ -3699,10 +3961,20 @@ impl rupi_core::ProviderEventSink for Collector<'_> {
           self.reasoning_index = self.reasoning_index.saturating_add(1);
           self.reasoning_provenance = Some(*provenance);
           self.committed = true;
+          self.append_reasoning_content(text, *provenance);
+          self.surface_output_emitted |= !text.is_empty() && self.progress.output_is_irreversible();
           self.progress.on_reasoning(text, *provenance);
         }
       }
       rupi_core::ProviderEvent::TextDelta(text) => {
+        if self.text_bytes.saturating_add(text.len()) > MAX_RESPONSE_TEXT_BYTES {
+          self.reject_response(format!(
+            "provider response exceeded the {}-byte aggregate text limit",
+            MAX_RESPONSE_TEXT_BYTES
+          ));
+          return;
+        }
+        self.text_bytes += text.len();
         let traced = self.trace_event(AgentEvent::AssistantDelta(AssistantDelta {
           text: text.clone(),
           chunk_index: self.text_index,
@@ -3710,17 +3982,46 @@ impl rupi_core::ProviderEventSink for Collector<'_> {
         if traced.is_some() {
           self.text_index = self.text_index.saturating_add(1);
           self.committed = true;
+          self.append_text_content(text);
+          self.surface_output_emitted |= !text.is_empty() && self.progress.output_is_irreversible();
           self.text.push_str(text);
           self.progress.on_text_delta(text);
         }
       }
       rupi_core::ProviderEvent::ToolCall(call) => {
-        if self.sink_error.is_none() {
-          self.committed = true;
-          self.calls.push(call.clone());
+        if call.name.len() > MAX_TOOL_NAME_BYTES || call.id.as_str().len() > MAX_TOOL_ID_BYTES {
+          self.reject_response("provider tool-call identity exceeded response limits".into());
+          return;
         }
+        let argument_bytes = bounded_json_bytes(&call.arguments, MAX_TOOL_ARGUMENT_BYTES_PER_CALL);
+        let total_bytes = self.tool_argument_bytes.saturating_add(argument_bytes);
+        if self.calls.len() >= MAX_RESPONSE_TOOL_CALLS {
+          self.reject_response(format!(
+            "provider response exceeded the {MAX_RESPONSE_TOOL_CALLS}-tool-call limit"
+          ));
+          return;
+        }
+        if argument_bytes > MAX_TOOL_ARGUMENT_BYTES_PER_CALL
+          || total_bytes > MAX_TOOL_ARGUMENT_BYTES_TOTAL
+        {
+          self.reject_response("provider response exceeded tool-argument byte limits".into());
+          return;
+        }
+        self.tool_argument_bytes = total_bytes;
+        self.committed = true;
+        self.calls.push(call.clone());
       }
       rupi_core::ProviderEvent::ToolCallRejected { id, name, reason } => {
+        if name.len() > MAX_TOOL_NAME_BYTES || id.as_str().len() > MAX_TOOL_ID_BYTES {
+          self.reject_response("provider tool-call identity exceeded response limits".into());
+          return;
+        }
+        if self.calls.len() >= MAX_RESPONSE_TOOL_CALLS {
+          self.reject_response(format!(
+            "provider response exceeded the {MAX_RESPONSE_TOOL_CALLS}-tool-call limit"
+          ));
+          return;
+        }
         if self.sink_error.is_none() {
           self.committed = true;
           self.calls.push(ToolCallBlock {
@@ -3781,11 +4082,120 @@ impl ToolProgress for LiveToolSink<'_> {
   }
 }
 
+fn bounded_json_bytes(value: &serde_json::Value, limit: usize) -> usize {
+  fn measure(value: &serde_json::Value, limit: usize) -> usize {
+    let mut bytes = match value {
+      serde_json::Value::Null => 4,
+      serde_json::Value::Bool(true) => 4,
+      serde_json::Value::Bool(false) => 5,
+      serde_json::Value::Number(number) => number.to_string().len(),
+      serde_json::Value::String(text) => text.len().saturating_add(2),
+      serde_json::Value::Array(items) => {
+        let mut bytes = 2usize;
+        for item in items {
+          bytes = bytes.saturating_add(measure(item, limit)).saturating_add(1);
+          if bytes > limit {
+            return limit.saturating_add(1);
+          }
+        }
+        bytes
+      }
+      serde_json::Value::Object(fields) => {
+        let mut bytes = 2usize;
+        for (name, item) in fields {
+          bytes = bytes
+            .saturating_add(name.len())
+            .saturating_add(measure(item, limit))
+            .saturating_add(3);
+          if bytes > limit {
+            return limit.saturating_add(1);
+          }
+        }
+        bytes
+      }
+    };
+    bytes = bytes.min(limit.saturating_add(1));
+    bytes
+  }
+
+  measure(value, limit)
+}
+
 fn elapsed_ms(clock: Instant) -> u64 {
   clock.elapsed().as_millis() as u64
 }
 
-/// Rough token estimate for the request about to be sent.
+/// Minimum output retained when context pressure forces a configured ceiling lower.
+/// Below this, reducing the cap would make the request misleadingly unusable; compact
+/// first or refuse before dispatch.
+const MINIMUM_USEFUL_OUTPUT_TOKENS: u64 = 256;
+
+/// Prompt plus requested generation budget for one exact assembled request.
+struct RequestBudget {
+  prompt_tokens_est: u64,
+  desired_output_tokens: Option<u64>,
+  effective_output_tokens: Option<u64>,
+  context_window: u64,
+  safety_reserve_tokens: u64,
+}
+
+impl RequestBudget {
+  fn for_request(request: &ModelRequest) -> Self {
+    let prompt_tokens_est = estimate_tokens(request);
+    let context_window = request.capabilities.context_window;
+    // Leave room for estimator error and provider-side framing. The runtime
+    // still uses the full advertised window to derive profile thresholds.
+    let safety_reserve_tokens = context_window / 10;
+    let available_output = context_window
+      .saturating_sub(prompt_tokens_est)
+      .saturating_sub(safety_reserve_tokens);
+    let desired_output_tokens = request.desired_output_tokens;
+    let effective_output_tokens =
+      desired_output_tokens.map(|desired| desired.min(available_output));
+    Self {
+      prompt_tokens_est,
+      desired_output_tokens,
+      effective_output_tokens,
+      context_window,
+      safety_reserve_tokens,
+    }
+  }
+
+  fn is_unusable(&self) -> bool {
+    if self.desired_output_tokens == Some(0) {
+      return true;
+    }
+    let minimum_prompt_headroom = if self.desired_output_tokens.is_some() {
+      self.safety_reserve_tokens
+    } else {
+      0
+    };
+    self
+      .prompt_tokens_est
+      .saturating_add(minimum_prompt_headroom)
+      > self.context_window
+      || self
+        .desired_output_tokens
+        .zip(self.effective_output_tokens)
+        .is_some_and(|(desired, effective)| {
+          effective < desired && effective < MINIMUM_USEFUL_OUTPUT_TOKENS
+        })
+  }
+
+  fn context_tokens_est(&self) -> u64 {
+    // The reserve constrains the exact output ceiling but is not itself a model
+    // token; threshold estimates report prompt plus the effective wire allowance.
+    self
+      .prompt_tokens_est
+      .saturating_add(self.effective_output_tokens.unwrap_or_default())
+  }
+}
+
+fn request_context_tokens(request: &ModelRequest) -> u64 {
+  RequestBudget::for_request(request).context_tokens_est()
+}
+
+/// Rough token estimate for the prompt about to be sent.
 ///
 /// The estimate deliberately includes the complete tool schema because a request
 /// can fit by message bytes alone while still exceeding the provider window once
@@ -3832,11 +4242,11 @@ fn tool_availability_prompt(tools: &[rupi_core::ToolSpec]) -> String {
   )
 }
 
-/// Leave ten percent of the provider's advertised window as estimation headroom.
-/// The assembled request, including system text and exposed tools, is measured
-/// before this target is accepted.
+/// Leave ten percent of the provider's advertised window as recovery headroom.
+/// The request estimate includes prompt plus effective output, but not the
+/// reserved slack already deducted when the exact output ceiling is resolved.
 fn overflow_recovery_target(window: u64) -> u64 {
-  window.saturating_mul(9) / 10
+  window.saturating_sub(window / 10)
 }
 
 /// Truncate text without ever splitting a UTF-8 code point.
@@ -4312,6 +4722,7 @@ fn format_coding_summary(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use serde_json::json;
   use std::sync::{Arc, Mutex};
 
   use crate::StoreTrace;
@@ -5115,12 +5526,53 @@ mod tests {
     registry
   }
 
+  fn assert_unsatisfiable_progress_boundary(
+    provider: &Scripted,
+    tools: ToolRegistry,
+    progress_tools: Vec<String>,
+    interactive_approval: bool,
+  ) {
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let error = TurnLoop::new(
+      provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_progress_boundary(Some(1), progress_tools)
+    .with_interactive_tool_approval(interactive_approval)
+    .with_max_requests(8)
+    .run_turn("make progress", &CancelToken::new(), &mut SilentProgress)
+    .expect_err("an impossible progress boundary must fail before another request");
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::Semantic));
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(trace.count("model_request_started"), 1);
+    assert_eq!(trace.count("turn_completed"), 1);
+    assert!(
+      trace
+        .diagnostics()
+        .iter()
+        .any(|message| { message.contains("progress boundary cannot be satisfied") })
+    );
+  }
+
   struct ApprovalProgress {
     decision: Approval,
     prompts: usize,
   }
 
   impl TurnProgress for ApprovalProgress {
+    fn mutating_approval_available(&self) -> bool {
+      true
+    }
+
     fn approve_mutating_tool(
       &mut self,
       _metadata: &rupi_core::ToolMetadata,
@@ -5313,7 +5765,8 @@ mod tests {
   #[test]
   fn pre_policy_estimate_includes_system_prompt_and_tool_schemas() {
     let mut provider = Scripted::new("request-sizing", Vec::new());
-    provider.capabilities.context_window = 16_000;
+    provider.capabilities.context_window = 32_000;
+    provider.capabilities.max_output_tokens = None;
     let tools = registry_with(vec![Box::new(SizedTool {
       description: "description ".repeat(4_000),
       schema: serde_json::json!({"type":"object","description":"schema ".repeat(4_000)}),
@@ -5342,7 +5795,7 @@ mod tests {
       .clone()
       .expect("policy receives context state");
 
-    assert_eq!(state.estimated_tokens, estimate_tokens(&request));
+    assert_eq!(state.estimated_tokens, request_context_tokens(&request));
     assert!(state.estimated_tokens > estimate_messages(&request.messages));
     assert!(
       state.estimated_tokens
@@ -5355,6 +5808,141 @@ mod tests {
     );
     assert!(!request.tools.is_empty());
     assert!(request.system.is_some());
+  }
+
+  #[test]
+  fn output_budget_clamps_the_exact_wire_ceiling_with_prompt_headroom() {
+    let mut provider = Scripted::new("output-budget", Vec::new());
+    provider.capabilities.context_window = 32_768;
+    provider.capabilities.max_output_tokens = Some(16_384);
+    let tools = registry_with(Vec::new());
+    let observed = Arc::new(Mutex::new(None));
+    let policy = CaptureContextState(Arc::clone(&observed));
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_system("s".repeat(96_000));
+    let mut turn_history_start = 0;
+
+    let request = runtime
+      .build_request(&TurnId::new(), &mut turn_history_start)
+      .expect("a useful clamped output budget fits");
+    let budget = RequestBudget::for_request(&request);
+    let state = observed
+      .lock()
+      .unwrap()
+      .clone()
+      .expect("policy receives the assembled prompt and output reservation");
+
+    assert_eq!(request.desired_output_tokens, Some(16_384));
+    assert_eq!(request.max_output_tokens, budget.effective_output_tokens);
+    assert!(request.max_output_tokens.unwrap() >= MINIMUM_USEFUL_OUTPUT_TOKENS);
+    assert!(request.max_output_tokens.unwrap() < request.desired_output_tokens.unwrap());
+    assert!(budget.context_tokens_est() <= budget.context_window);
+    assert_eq!(state.estimated_tokens, request_context_tokens(&request));
+    assert!(
+      trace
+        .diagnostics()
+        .iter()
+        .any(|message| { message.contains("output budget reduced from 16384") })
+    );
+  }
+
+  #[test]
+  fn insufficient_output_headroom_reduces_only_prior_history_before_dispatch() {
+    let mut provider = Scripted::new("output-budget-reduction", Vec::new());
+    provider.capabilities.context_window = 4_096;
+    provider.capabilities.max_output_tokens = Some(4_096);
+    let tools = registry_with(Vec::new());
+    let policy = CaptureContextState(Arc::new(Mutex::new(None)));
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![
+      Message::user("old request ".repeat(1_000)),
+      Message::assistant("old answer ".repeat(1_000)),
+      Message::user("current request"),
+    ]);
+    let mut turn_history_start = 2;
+
+    let request = runtime
+      .build_request(&TurnId::new(), &mut turn_history_start)
+      .expect("prior history can be evicted to reserve useful output");
+
+    assert_eq!(request.desired_output_tokens, Some(4_096));
+    assert!(request.max_output_tokens.unwrap() >= MINIMUM_USEFUL_OUTPUT_TOKENS);
+    assert_eq!(request.messages.len(), 1);
+    assert_eq!(request.messages[0].text(), "current request");
+    assert_eq!(trace.count("context_reduced"), 1);
+  }
+
+  #[test]
+  fn refuses_before_dispatch_when_only_a_tiny_output_budget_fits() {
+    let mut provider = Scripted::new("tiny-output-budget", vec![text("should not run")]);
+    provider.capabilities.context_window = 256;
+    provider.capabilities.max_output_tokens = Some(8_192);
+    let tools = registry_with(Vec::new());
+    let policy = CaptureContextState(Arc::new(Mutex::new(None)));
+    let mut trace = Recorder::default();
+    let error = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .run_turn("question", &CancelToken::new(), &mut SilentProgress)
+    .expect_err("a sub-minimum output request must not be sent");
+
+    assert_eq!(error.kind(), Some(ModelFailureKind::ContextOverflow));
+    assert_eq!(provider.requests().len(), 0);
+    assert!(
+      trace
+        .diagnostics()
+        .iter()
+        .any(|message| { message.contains("cannot reserve a useful output budget") })
+    );
+  }
+
+  #[test]
+  fn zero_provider_output_ceiling_refuses_without_reducing_history() {
+    let mut provider = Scripted::new("zero-output-budget", vec![text("should not run")]);
+    provider.capabilities.max_output_tokens = Some(0);
+    let tools = registry_with(Vec::new());
+    let policy = CaptureContextState(Arc::new(Mutex::new(None)));
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_messages(vec![Message::user("prior"), Message::user("current")]);
+    let mut turn_history_start = 1;
+
+    let error = runtime
+      .build_request(&TurnId::new(), &mut turn_history_start)
+      .expect_err("zero output cannot be corrected by deleting history");
+    assert_eq!(error.kind(), Some(ModelFailureKind::ContextOverflow));
+    assert_eq!(runtime.messages.len(), 2);
+    drop(runtime);
+    assert_eq!(trace.count("context_reduced"), 0);
+    assert!(provider.requests().is_empty());
   }
 
   struct RecordingProfilePolicy {
@@ -5405,6 +5993,7 @@ mod tests {
       vec![tool_call("expand", serde_json::json!({})), text("done")],
     );
     provider.capabilities.context_window = 32_000;
+    provider.capabilities.max_output_tokens = None;
     let mut usage = rupi_core::CompletionUsage::unknown();
     usage.input_tokens = Some(8_000);
     usage.logical_prompt_tokens = Some(8_000);
@@ -6165,6 +6754,7 @@ mod tests {
         ),
       );
       provider.capabilities.context_window = 128;
+      provider.capabilities.max_output_tokens = None;
       provider
     };
     let tools = registry_with(Vec::new());
@@ -6226,7 +6816,11 @@ mod tests {
     .expect_err("the system prompt consumes the recovery budget");
 
     assert_eq!(error.kind(), Some(ModelFailureKind::ContextOverflow));
-    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(
+      provider.requests().len(),
+      0,
+      "impossible prompt is refused before dispatch"
+    );
     assert_eq!(trace.count("context_compaction_epoch"), 0);
   }
 
@@ -6264,7 +6858,11 @@ mod tests {
     .expect_err("tool schemas consume the recovery budget");
 
     assert_eq!(error.kind(), Some(ModelFailureKind::ContextOverflow));
-    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(
+      provider.requests().len(),
+      0,
+      "impossible tool schema is refused before dispatch"
+    );
     assert_eq!(trace.count("context_compaction_epoch"), 0);
   }
 
@@ -6350,18 +6948,26 @@ mod tests {
   }
 
   #[test]
-  fn reasoning_carries_its_provenance_to_the_surface() {
+  fn reasoning_carries_its_provenance_to_the_surface_and_completed_message() {
     let provider = Scripted::new(
       "thinks",
-      vec![vec![
-        ProviderEvent::ReasoningDelta {
-          text: "weighing options".into(),
-          provenance: rupi_core::ReasoningProvenance::Native,
-        },
-        ProviderEvent::TextDelta("answer".into()),
-      ]],
+      vec![
+        vec![
+          ProviderEvent::ReasoningDelta {
+            text: "weighing options".into(),
+            provenance: rupi_core::ReasoningProvenance::Native,
+          },
+          ProviderEvent::TextDelta("checking".into()),
+          ProviderEvent::ToolCall(ToolCallBlock {
+            id: rupi_core::ToolCallId::new(),
+            name: "spy".into(),
+            arguments: serde_json::json!({}),
+          }),
+        ],
+        text("answer"),
+      ],
     );
-    let tools = registry_with(Vec::new());
+    let tools = registry_with(vec![Box::new(Spy(Arc::new(Mutex::new(Vec::new()))))]);
     let policy = rupi_core::ProfilePolicy::new(
       rupi_core::ContextProfile::Balanced,
       provider.capabilities().context_window,
@@ -6390,6 +6996,89 @@ mod tests {
     // reader can tell native output from a reconstructed rationale.
     let completed = trace.find("model_request_completed").expect("completed");
     assert_eq!(completed["reasoning_provenance"], "native");
+    let requests = provider.requests();
+    let assistant = requests[1]
+      .messages
+      .iter()
+      .find(|message| message.role == Role::Assistant)
+      .expect("the next request uses the completed assistant message");
+    assert!(matches!(
+      &assistant.content[0],
+      ContentBlock::Reasoning(chunk)
+        if chunk.text == "weighing options"
+          && chunk.provenance == rupi_core::ReasoningProvenance::Native
+    ));
+    assert_eq!(assistant.content[1], ContentBlock::text("checking"));
+    assert!(matches!(assistant.content[2], ContentBlock::ToolCall(_)));
+  }
+
+  #[test]
+  fn successful_reasoning_is_persisted_with_provenance_for_resume() {
+    let temp = rupi_store::TempDir::new("runtime-native-reasoning-projection");
+    let store = rupi_store::Store::open(temp.path(), rupi_store::WritePolicy::default())
+      .expect("store opens");
+    let session_id = SessionId::new();
+    let provider = Scripted::new(
+      "reasoning-projection",
+      vec![vec![
+        ProviderEvent::ReasoningDelta {
+          text: "examining the failure".into(),
+          provenance: ReasoningProvenance::Native,
+        },
+        ProviderEvent::TextDelta("answer".into()),
+      ]],
+    );
+    let tools = registry_with(Vec::new());
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let session = store
+      .begin(SessionHeader {
+        session_id: session_id.clone(),
+        version: rupi_core::session::SESSION_SCHEMA_VERSION,
+        started_at_ms: 1,
+        working_dir: "/workspace".into(),
+        model: provider.model().clone(),
+        parent_session: None,
+        branched_from_event: None,
+        imported_from: None,
+      })
+      .expect("session begins");
+    let mut trace = StoreTrace::new(session);
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      session_id.clone(),
+      TraceId::new(),
+    );
+
+    runtime
+      .run_turn(
+        "why did this fail",
+        &CancelToken::new(),
+        &mut SilentProgress,
+      )
+      .expect("complete answer is durable");
+    drop(runtime);
+    trace.flush().expect("durable records flush");
+    drop(trace);
+
+    let restored = store.restore(&session_id).expect("session restores");
+    let assistant = restored
+      .messages
+      .iter()
+      .find(|attributed| attributed.message.role == Role::Assistant)
+      .expect("completed assistant message is in the session projection");
+    assert!(matches!(
+      &assistant.message.content[0],
+      ContentBlock::Reasoning(chunk)
+        if chunk.text == "examining the failure"
+          && chunk.provenance == ReasoningProvenance::Native
+    ));
+    assert_eq!(assistant.message.content[1], ContentBlock::text("answer"));
   }
 
   #[test]
@@ -6632,6 +7321,117 @@ mod tests {
     assert!(result.is_error);
     assert!(result.text.contains("not run"));
     assert!(result.text.contains("corrected tool call"));
+  }
+
+  #[test]
+  fn active_progress_boundary_rechecks_tool_availability_before_dispatch() {
+    let mut provider = Scripted::new("boundary-lost-tools", Vec::new());
+    provider.capabilities.tools = false;
+    let tools = registry_with(vec![Box::new(MutatingSpy {
+      seen: Arc::new(Mutex::new(Vec::new())),
+      outcome: ToolOutcome::succeeded("mutated"),
+    })]);
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+    let mut trace = Recorder::default();
+    let mut runtime = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_progress_boundary(Some(1), vec!["write_probe".into()]);
+    runtime.progress_boundary_active = true;
+    let mut turn_history_start = 0;
+
+    let error = runtime
+      .build_request(&TurnId::new(), &mut turn_history_start)
+      .expect_err("tool availability loss must stop before dispatch");
+    assert_eq!(error.kind(), Some(ModelFailureKind::Semantic));
+    drop(runtime);
+
+    assert!(provider.requests().is_empty());
+    assert!(
+      trace
+        .diagnostics()
+        .iter()
+        .any(|message| { message.contains("became unavailable") })
+    );
+  }
+
+  #[test]
+  fn unsatisfiable_progress_boundary_fails_before_another_provider_request() {
+    let unknown = Scripted::new("unknown-progress", vec![tool_call("spy", json!({}))]);
+    assert_unsatisfiable_progress_boundary(
+      &unknown,
+      registry_with(vec![Box::new(Spy(Arc::new(Mutex::new(Vec::new()))))]),
+      vec!["not_registered".into()],
+      false,
+    );
+
+    let read_only = Scripted::new("readonly-progress", vec![tool_call("spy", json!({}))]);
+    assert_unsatisfiable_progress_boundary(
+      &read_only,
+      registry_with(vec![Box::new(Spy(Arc::new(Mutex::new(Vec::new()))))]),
+      vec!["spy".into()],
+      false,
+    );
+
+    let deny_policy = ToolPolicy {
+      auto_approve_mutating: true,
+      deny: vec!["write_probe".into()],
+      ..ToolPolicy::default()
+    };
+    let mut denied_tools =
+      ToolRegistry::new(Workspace::new(std::env::temp_dir()).unwrap()).with_policy(&deny_policy);
+    denied_tools.register(Box::new(Spy(Arc::new(Mutex::new(Vec::new())))));
+    denied_tools.register(Box::new(MutatingSpy {
+      seen: Arc::new(Mutex::new(Vec::new())),
+      outcome: ToolOutcome::succeeded("mutated"),
+    }));
+    let denied = Scripted::new("denied-progress", vec![tool_call("spy", json!({}))]);
+    assert_unsatisfiable_progress_boundary(
+      &denied,
+      denied_tools,
+      vec!["write_probe".into()],
+      false,
+    );
+
+    let mut no_tool_provider = Scripted::new("no-tool-progress", vec![tool_call("spy", json!({}))]);
+    no_tool_provider.capabilities.tools = false;
+    let no_tool_registry = registry_with(vec![
+      Box::new(Spy(Arc::new(Mutex::new(Vec::new())))),
+      Box::new(MutatingSpy {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        outcome: ToolOutcome::succeeded("mutated"),
+      }),
+    ]);
+    assert_unsatisfiable_progress_boundary(
+      &no_tool_provider,
+      no_tool_registry,
+      vec!["write_probe".into()],
+      false,
+    );
+
+    let unavailable_approval =
+      Scripted::new("approval-unavailable", vec![tool_call("spy", json!({}))]);
+    let approval_tools = registry_with_default_deny(vec![
+      Box::new(Spy(Arc::new(Mutex::new(Vec::new())))),
+      Box::new(MutatingSpy {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        outcome: ToolOutcome::succeeded("mutated"),
+      }),
+    ]);
+    assert_unsatisfiable_progress_boundary(
+      &unavailable_approval,
+      approval_tools,
+      vec!["write_probe".into()],
+      true,
+    );
   }
 
   #[test]
@@ -7917,6 +8717,70 @@ mod tests {
   }
 
   #[test]
+  fn runtime_collector_bounds_text_and_tool_arguments_before_accumulation() {
+    let mut trace = Recorder::default();
+    let mut progress = SilentProgress;
+    let cancel = CancelToken::new();
+    let mut collector = Collector::new(
+      &mut progress,
+      &mut trace,
+      StreamAttribution {
+        turn_id: TurnId::new(),
+        session_id: SessionId::new(),
+        trace_id: TraceId::new(),
+        epoch: 0,
+        model: ModelRef::new("test", "bounds"),
+      },
+      cancel.clone(),
+      Instant::now(),
+    );
+    rupi_core::ProviderEventSink::emit(
+      &mut collector,
+      &ProviderEvent::TextDelta("x".repeat(MAX_RESPONSE_TEXT_BYTES + 1)),
+    );
+    assert!(cancel.is_cancelled());
+    assert!(collector.text.is_empty());
+    assert!(collector.provider_error.as_ref().is_some_and(|error| {
+      error.kind == ModelFailureKind::Protocol
+        && error.message.contains("aggregate text limit")
+        && !error.partial_output_emitted
+    }));
+    assert_eq!(trace.count("assistant_delta"), 0);
+
+    let mut trace = Recorder::default();
+    let mut progress = SilentProgress;
+    let cancel = CancelToken::new();
+    let mut collector = Collector::new(
+      &mut progress,
+      &mut trace,
+      StreamAttribution {
+        turn_id: TurnId::new(),
+        session_id: SessionId::new(),
+        trace_id: TraceId::new(),
+        epoch: 0,
+        model: ModelRef::new("test", "bounds"),
+      },
+      cancel,
+      Instant::now(),
+    );
+    rupi_core::ProviderEventSink::emit(
+      &mut collector,
+      &ProviderEvent::ToolCall(ToolCallBlock {
+        id: rupi_core::ToolCallId::new(),
+        name: "spy".into(),
+        arguments: serde_json::json!({
+          "value": "x".repeat(MAX_TOOL_ARGUMENT_BYTES_PER_CALL + 1)
+        }),
+      }),
+    );
+    assert!(collector.calls.is_empty());
+    assert!(collector.provider_error.as_ref().is_some_and(|error| {
+      error.kind == ModelFailureKind::Protocol
+        && error.message.contains("tool-argument byte limits")
+    }));
+  }
+
+  #[test]
   fn output_limited_completion_is_failed_and_keeps_provider_evidence() {
     let provider = Scripted::new("limited", vec![text("partial")]).finishes_with("length");
     let tools = registry_with(Vec::new());
@@ -8556,6 +9420,7 @@ mod tests {
   fn a_compact_recommendation_evicts_oldest_turns_before_the_request() {
     let mut provider = Scripted::new("pressured", vec![text("ok")]);
     provider.capabilities.context_window = PRESSURED_WINDOW;
+    provider.capabilities.max_output_tokens = None;
     let tools = registry_with(Vec::new());
     let policy =
       rupi_core::ProfilePolicy::new(rupi_core::ContextProfile::Balanced, PRESSURED_WINDOW);
@@ -8637,6 +9502,7 @@ mod tests {
   fn the_live_turn_is_never_evicted_and_the_recommendation_stays_visible() {
     let mut provider = Scripted::new("pressured", vec![text("ok")]);
     provider.capabilities.context_window = PRESSURED_WINDOW;
+    provider.capabilities.max_output_tokens = None;
     let tools = registry_with(Vec::new());
     let policy =
       rupi_core::ProfilePolicy::new(rupi_core::ContextProfile::Balanced, PRESSURED_WINDOW);
@@ -8846,7 +9712,8 @@ mod tests {
         imported_from: None,
       })
       .expect("session begins");
-    let provider = Scripted::new("l0", vec![text("answer 1"), text("answer 2")]);
+    let mut provider = Scripted::new("l0", vec![text("answer 1"), text("answer 2")]);
+    provider.capabilities.max_output_tokens = None;
     let tools = registry_with(Vec::new());
     let policy = rupi_core::ProfilePolicy::new(rupi_core::ContextProfile::Balanced, 32_768);
     let mut trace = StoreTrace::new(session);
@@ -9494,6 +10361,7 @@ mod tests {
   fn summarizing_compaction_producer_triggers_under_window_pressure() {
     let mut provider = Scripted::new("pressured", vec![text("ok")]);
     provider.capabilities.context_window = PRESSURED_WINDOW;
+    provider.capabilities.max_output_tokens = None;
     let tools = registry_with(Vec::new());
     let policy =
       rupi_core::ProfilePolicy::new(rupi_core::ContextProfile::Balanced, PRESSURED_WINDOW);
@@ -9556,6 +10424,7 @@ mod tests {
       ),
     );
     provider.capabilities.context_window = PRESSURED_WINDOW;
+    provider.capabilities.max_output_tokens = None;
     let tools = registry_with(Vec::new());
     let policy =
       rupi_core::ProfilePolicy::new(rupi_core::ContextProfile::Balanced, PRESSURED_WINDOW);
@@ -9583,6 +10452,7 @@ mod tests {
   fn custom_summarizer_is_honoured_during_compaction() {
     let mut provider = Scripted::new("pressured", vec![text("ok")]);
     provider.capabilities.context_window = PRESSURED_WINDOW;
+    provider.capabilities.max_output_tokens = None;
     let tools = registry_with(Vec::new());
     let policy =
       rupi_core::ProfilePolicy::new(rupi_core::ContextProfile::Balanced, PRESSURED_WINDOW);

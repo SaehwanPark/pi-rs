@@ -10,8 +10,11 @@
 use std::io;
 
 use rupi_core::{
-  CancelToken, CompletionCertainty, FailurePhase, ProviderEvent, ProviderEventSink,
-  ReasoningExposure, ReasoningProvenance, ToolCallBlock, ToolCallId, provider::CompletionUsage,
+  CancelToken, CompletionCertainty, FailurePhase, MAX_RESPONSE_EVENTS,
+  MAX_RESPONSE_REASONING_BYTES, MAX_RESPONSE_TEXT_BYTES, MAX_RESPONSE_TOOL_CALLS,
+  MAX_TOOL_ARGUMENT_BYTES_PER_CALL, MAX_TOOL_ARGUMENT_BYTES_TOTAL, MAX_TOOL_ID_BYTES,
+  MAX_TOOL_NAME_BYTES, ProviderEvent, ProviderEventSink, ReasoningExposure, ReasoningProvenance,
+  ToolCallBlock, ToolCallId, provider::CompletionUsage,
 };
 use serde_json::Value;
 
@@ -53,6 +56,10 @@ pub struct Decoder {
   output_tokens: Option<u64>,
   /// Whether anything the user would call an answer has been emitted.
   emitted_output: bool,
+  response_events: usize,
+  text_bytes: usize,
+  reasoning_bytes: usize,
+  tool_argument_bytes: usize,
 }
 
 struct ToolBuilder {
@@ -96,6 +103,10 @@ impl Decoder {
       provider_total_tokens: None,
       output_tokens: None,
       emitted_output: false,
+      response_events: 0,
+      text_bytes: 0,
+      reasoning_bytes: 0,
+      tool_argument_bytes: 0,
     }
   }
 
@@ -111,17 +122,12 @@ impl Decoder {
   /// Provenance for thinking text arriving now.
   ///
   /// The claim comes from what the endpoint *declared*, not from the field the
-  /// text arrived in. `reasoning_content` holds the model's own thinking on a
-  /// llama.cpp or vLLM server and a provider-written summary of hidden reasoning
-  /// on a hosted one; deciding by field name alone would record hidden chain of
-  /// thought as if it had been exposed. An endpoint that declares nothing leaves
-  /// the field name as the only evidence, and the fields read here are the
-  /// native-shaped ones.
-  fn reasoning_provenance(&self) -> ReasoningProvenance {
-    self
-      .exposure
-      .implied_provenance()
-      .unwrap_or(ReasoningProvenance::Native)
+  /// text arrived in. `reasoning_content` holds model thinking on some local
+  /// servers and provider-written summaries on some hosted ones. When exposure is
+  /// undeclared, discard these fields from the semantic stream rather than guess;
+  /// raw payload retention remains an explicit opt-in.
+  fn reasoning_provenance(&self) -> Option<ReasoningProvenance> {
+    self.exposure.implied_provenance()
   }
 
   /// Whether visible output has already reached the sink.
@@ -197,19 +203,36 @@ impl Decoder {
       if let Some(finish) = choice.get("finish_reason").and_then(Value::as_str) {
         self.finish_reason = Some(finish.to_string());
       }
-      if let Some(reasoning) = reasoning_text(&delta) {
-        if !reasoning.is_empty() {
-          // Server-generated thinking: the endpoint's declaration decides
-          // whether that is the model's own reasoning or a summary of it.
-          sink.emit(&ProviderEvent::ReasoningDelta {
-            text: reasoning.to_string(),
-            provenance: self.reasoning_provenance(),
-          });
-          self.emitted_output = true;
+      if let Some(reasoning) = reasoning_text(&delta)
+        && let Some(provenance) = self.reasoning_provenance()
+        && !reasoning.is_empty()
+      {
+        self.account_response_event()?;
+        if self.reasoning_bytes.saturating_add(reasoning.len()) > MAX_RESPONSE_REASONING_BYTES {
+          return Err(self.response_limit_failure(format!(
+            "provider response exceeded the {}-byte aggregate reasoning limit",
+            MAX_RESPONSE_REASONING_BYTES
+          )));
         }
+        self.reasoning_bytes += reasoning.len();
+        // Server-generated thinking: the endpoint's declaration decides
+        // whether that is the model's own reasoning or a summary of it.
+        sink.emit(&ProviderEvent::ReasoningDelta {
+          text: reasoning.to_string(),
+          provenance,
+        });
+        self.emitted_output = true;
       }
       if let Some(text) = content_text(&delta) {
         if !text.is_empty() {
+          self.account_response_event()?;
+          if self.text_bytes.saturating_add(text.len()) > MAX_RESPONSE_TEXT_BYTES {
+            return Err(self.response_limit_failure(format!(
+              "provider response exceeded the {}-byte aggregate text limit",
+              MAX_RESPONSE_TEXT_BYTES
+            )));
+          }
+          self.text_bytes += text.len();
           sink.emit(&ProviderEvent::TextDelta(text.to_string()));
           self.emitted_output = true;
         }
@@ -372,6 +395,21 @@ impl Decoder {
     })
   }
 
+  #[allow(clippy::result_large_err)]
+  fn account_response_event(&mut self) -> Result<(), rupi_core::ModelFailure> {
+    if self.response_events >= MAX_RESPONSE_EVENTS {
+      return Err(self.response_limit_failure(format!(
+        "provider response exceeded the {MAX_RESPONSE_EVENTS}-event aggregate limit"
+      )));
+    }
+    self.response_events += 1;
+    Ok(())
+  }
+
+  fn response_limit_failure(&self, message: String) -> rupi_core::ModelFailure {
+    decode_failure(message).with_partial_output(self.emitted_output)
+  }
+
   /// Cold path only: the typed failure carries phase and partial-output state, and
   /// boxing it would add indirection to every match without protecting a hot path.
   #[allow(clippy::result_large_err)]
@@ -380,8 +418,11 @@ impl Decoder {
     call: &Value,
     uncorrelated_batch: bool,
   ) -> Result<(), rupi_core::ModelFailure> {
+    self.account_response_event()?;
     let provider_index = call.get("index").and_then(Value::as_u64);
-    let provider_id = provider_tool_id(call);
+    let raw_provider_id = provider_tool_id(call);
+    let provider_id = raw_provider_id.filter(|id| id.len() <= MAX_TOOL_ID_BYTES);
+    let oversized_id = raw_provider_id.is_some_and(|id| id.len() > MAX_TOOL_ID_BYTES);
     let index_slot = provider_index.and_then(|index| self.tool_indices.get(&index).copied());
     let id_slot = provider_id.and_then(|id| self.tool_ids.get(id).copied());
     let uncorrelated_slots = self.uncorrelated_tool_slots();
@@ -460,6 +501,9 @@ impl Decoder {
       }
     };
 
+    if oversized_id {
+      self.mark_correlation_error(slot, "provider tool-call id exceeded the response limit");
+    }
     if let Some(index) = provider_index {
       self.tool_indices.entry(index).or_insert(slot);
     }
@@ -475,19 +519,57 @@ impl Decoder {
       self.tool_ids.entry(id.to_string()).or_insert(slot);
       self.tools.get_mut(&slot).expect("allocated tool slot").id = Some(id.to_string());
     }
-    if provider_index.is_none() && provider_id.is_none() && singleton_fallback.is_none() {
+    if provider_index.is_none()
+      && provider_id.is_none()
+      && singleton_fallback.is_none()
+      && !oversized_id
+    {
       self.mark_correlation_error(
         slot,
         "tool-call fragment had neither a provider index nor a provider id",
       );
     }
-    let builder = self.tools.get_mut(&slot).expect("allocated tool slot");
     if let Some(function) = call.get("function") {
       if let Some(name) = function.get("name").and_then(Value::as_str) {
-        builder.name.push_str(name);
+        let current = self
+          .tools
+          .get(&slot)
+          .expect("allocated tool slot")
+          .name
+          .len();
+        if current.saturating_add(name.len()) > MAX_TOOL_NAME_BYTES {
+          self.mark_correlation_error(slot, "tool name exceeded the response limit");
+        } else {
+          self
+            .tools
+            .get_mut(&slot)
+            .expect("allocated tool slot")
+            .name
+            .push_str(name);
+        }
       }
       if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
-        builder.arguments.push_str(arguments);
+        let current = self
+          .tools
+          .get(&slot)
+          .expect("allocated tool slot")
+          .arguments
+          .len();
+        let call_bytes = current.saturating_add(arguments.len());
+        let total_bytes = self.tool_argument_bytes.saturating_add(arguments.len());
+        if call_bytes > MAX_TOOL_ARGUMENT_BYTES_PER_CALL {
+          self.mark_correlation_error(slot, "tool arguments exceeded the per-call byte limit");
+        } else if total_bytes > MAX_TOOL_ARGUMENT_BYTES_TOTAL {
+          self.mark_correlation_error(slot, "tool arguments exceeded the aggregate byte limit");
+        } else {
+          self
+            .tools
+            .get_mut(&slot)
+            .expect("allocated tool slot")
+            .arguments
+            .push_str(arguments);
+          self.tool_argument_bytes = total_bytes;
+        }
       }
     }
     Ok(())
@@ -495,6 +577,11 @@ impl Decoder {
 
   #[allow(clippy::result_large_err)]
   fn new_tool_slot(&mut self) -> Result<u64, rupi_core::ModelFailure> {
+    if self.tools.len() >= MAX_RESPONSE_TOOL_CALLS {
+      return Err(self.response_limit_failure(format!(
+        "provider response exceeded the {MAX_RESPONSE_TOOL_CALLS}-tool-call limit"
+      )));
+    }
     let slot = self.next_tool_slot;
     self.next_tool_slot = self
       .next_tool_slot
@@ -569,6 +656,15 @@ fn decode_failure(message: String) -> rupi_core::ModelFailure {
     FailurePhase::Normalizing,
     message,
   )
+}
+
+/// Classify invalid SSE framing as a protocol response failure, not a retryable
+/// transport outage.
+pub(crate) fn sse_framing_failure(
+  error: &io::Error,
+  emitted_output: bool,
+) -> rupi_core::ModelFailure {
+  decode_failure(error.to_string()).with_partial_output(emitted_output)
 }
 
 /// Where thinking text arrives, across the dialects seen in the wild.
@@ -866,27 +962,22 @@ mod tests {
     }
   }
 
-  /// The other direction is equally a claim: an endpoint that declares native
-  /// reasoning gets `Native`, and one that declares nothing keeps the field name
-  /// as the only evidence available. Local servers -- the common case here --
-  /// send real thinking in these fields without ever declaring it.
+  /// Without an endpoint declaration, field names are ambiguous between native
+  /// thinking and provider-authored summaries. They must not be promoted to a
+  /// semantic reasoning event.
   #[test]
-  fn undeclared_exposure_leaves_the_field_name_as_the_evidence() {
-    let (collector, _) = decode_as(
-      ReasoningExposure::None,
-      &[chunk(json!({"reasoning": "think"}))],
-    );
-    assert!(
-      matches!(
-        &collector.events()[0],
-        ProviderEvent::ReasoningDelta {
-          provenance: ReasoningProvenance::Native,
-          ..
-        }
-      ),
-      "{:?}",
-      collector.events()
-    );
+  fn undeclared_exposure_discards_reasoning_fields_without_guessing_provenance() {
+    for field in ["reasoning_content", "reasoning", "reasoning_text"] {
+      let (collector, _) = decode_as(
+        ReasoningExposure::None,
+        &[chunk(json!({field: "unclassified", "content": "answer"}))],
+      );
+      assert!(
+        matches!(collector.events(), [ProviderEvent::TextDelta(text)] if text == "answer"),
+        "{field}: {:?}",
+        collector.events()
+      );
+    }
   }
 
   #[test]
@@ -1507,6 +1598,148 @@ mod tests {
     assert!(failure.message.contains("chars truncated"));
     let detail = failure.detail.unwrap();
     assert!(detail.contains("chars truncated"), "{}", &detail[..80]);
+  }
+
+  struct NullEventSink;
+
+  impl rupi_core::ProviderEventSink for NullEventSink {
+    fn emit(&mut self, _event: &ProviderEvent) {}
+  }
+
+  #[test]
+  fn aggregate_limits_apply_across_thousands_of_tiny_sse_events() {
+    let frame = "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n";
+    let mut body = String::with_capacity(frame.len() * 2_000);
+    for _ in 0..2_000 {
+      body.push_str(frame);
+    }
+    let mut stream = crate::sse::SseStream::new(body.as_bytes());
+    let mut decoder = Decoder::new(ReasoningExposure::None);
+    let mut sink = NullEventSink;
+    let mut events = 0;
+    while let Some(event) = stream.next_event().unwrap() {
+      let value: Value = serde_json::from_str(&event.data).unwrap();
+      decoder.chunk(&value, &mut sink).unwrap();
+      events += 1;
+    }
+
+    assert_eq!(events, 2_000);
+    assert_eq!(decoder.text_bytes, 2_000);
+    assert_eq!(decoder.response_events, 2_000);
+  }
+
+  #[test]
+  fn aggregate_text_reasoning_and_event_limits_apply_across_fragments() {
+    let mut sink = NullEventSink;
+    let mut text = Decoder::new(ReasoningExposure::Native);
+    for _ in 0..(MAX_RESPONSE_TEXT_BYTES / 1_024) {
+      text
+        .chunk(&chunk(json!({"content": "x".repeat(1_024)})), &mut sink)
+        .unwrap();
+    }
+    let error = text
+      .chunk(&chunk(json!({"content": "x"})), &mut sink)
+      .unwrap_err();
+    assert!(error.message.contains("aggregate text limit"));
+    assert!(error.partial_output_emitted);
+
+    let mut reasoning = Decoder::new(ReasoningExposure::Native);
+    for _ in 0..(MAX_RESPONSE_REASONING_BYTES / 1_024) {
+      reasoning
+        .chunk(
+          &chunk(json!({"reasoning_content": "r".repeat(1_024)})),
+          &mut sink,
+        )
+        .unwrap();
+    }
+    let error = reasoning
+      .chunk(&chunk(json!({"reasoning_content": "r"})), &mut sink)
+      .unwrap_err();
+    assert!(error.message.contains("aggregate reasoning limit"));
+    assert!(error.partial_output_emitted);
+
+    let mut fragmented = Decoder::new(ReasoningExposure::None);
+    for _ in 0..MAX_RESPONSE_EVENTS {
+      fragmented
+        .chunk(&chunk(json!({"content": "x"})), &mut sink)
+        .unwrap();
+    }
+    let error = fragmented
+      .chunk(&chunk(json!({"content": "x"})), &mut sink)
+      .unwrap_err();
+    assert!(error.message.contains("event aggregate limit"));
+    assert!(error.partial_output_emitted);
+  }
+
+  #[test]
+  fn fragmented_tool_arguments_are_bounded_per_call_and_in_aggregate() {
+    let mut collector = Collector::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
+    for _ in 0..=(MAX_TOOL_ARGUMENT_BYTES_PER_CALL / 1_024) {
+      decoder
+        .chunk(
+          &chunk(json!({"tool_calls": [{
+            "index": 0,
+            "id": "large-arguments",
+            "function": {"name": "read", "arguments": " ".repeat(1_024)}
+          }]})),
+          &mut collector,
+        )
+        .unwrap();
+    }
+    decoder
+      .finish(StreamEnd::DoneSentinel, &mut collector)
+      .unwrap();
+    assert!(matches!(
+      &collector.events()[0],
+      ProviderEvent::ToolCallRejected { reason, .. }
+        if reason.contains("per-call byte limit")
+    ));
+
+    let mut collector = Collector::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
+    for index in 0..10 {
+      decoder
+        .chunk(
+          &chunk(json!({"tool_calls": [{
+            "index": index,
+            "id": format!("call-{index}"),
+            "function": {"name": "read", "arguments": " ".repeat(900_000)}
+          }]})),
+          &mut collector,
+        )
+        .unwrap();
+    }
+    decoder
+      .finish(StreamEnd::DoneSentinel, &mut collector)
+      .unwrap();
+    assert_eq!(collector.events().len(), 10);
+    assert!(matches!(
+      collector.events().last(),
+      Some(ProviderEvent::ToolCallRejected { reason, .. })
+        if reason.contains("aggregate byte limit")
+    ));
+  }
+
+  #[test]
+  fn two_thousand_tool_calls_are_bounded_before_emitting_a_partial_batch() {
+    let mut collector = Collector::default();
+    let mut decoder = Decoder::new(ReasoningExposure::None);
+    let calls = (0..2_000)
+      .map(|index| {
+        json!({
+          "index": index,
+          "id": format!("call-{index}"),
+          "function": {"name": "read", "arguments": "{}"}
+        })
+      })
+      .collect::<Vec<_>>();
+    let event = chunk(json!({"tool_calls": calls}));
+    let error = decoder.chunk(&event, &mut collector).unwrap_err();
+
+    assert!(error.message.contains("tool-call limit"));
+    assert_eq!(decoder.tools.len(), MAX_RESPONSE_TOOL_CALLS);
+    assert!(collector.events().is_empty());
   }
 
   #[test]

@@ -35,4 +35,4 @@ pub use decode::Decoder;
 pub use deferred::Deferred;
 pub use mapping::{request_body, serves};
 pub use openai::OpenAiCompat;
-pub use sse::{DONE, MAX_EVENT_BYTES, SseEvent, SseStream};
+pub use sse::{DONE, MAX_EVENT_BYTES, MAX_RESPONSE_FRAMES, SseEvent, SseStream};

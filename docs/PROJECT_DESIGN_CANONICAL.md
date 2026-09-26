@@ -495,7 +495,14 @@ Actual reasoning content emitted by the model/provider.
 provenance = native
 ```
 
-Preserve it as faithfully as practical.
+Preserve it as faithfully as practical. When the provider exposes native reasoning, retain
+its text and provenance in a successfully completed assistant message so canonical session
+history can represent what was exposed. Failed or truncated attempts remain trace-only.
+Storage is independent of replay: future requests include native reasoning only when the
+endpoint explicitly opts in, and generic endpoint constructors make no native-exposure claim.
+Replay configuration that conflicts with `exposed_reasoning != native` is invalid. When the
+endpoint has not declared an exposure, reasoning-shaped fields are omitted from normalized events
+rather than guessed from field names; raw provider payload retention remains opt-in.
 
 ### 10.2 Provider summary
 
@@ -827,6 +834,16 @@ normalization is recorded as a durable diagnostic. When opt-in adaptive mode obs
 model-specific performance knee, the knee is applied after the overrides and may only
 lower those thresholds further.
 
+When an endpoint declares an output ceiling, each request is budgeted from the assembled
+system prompt, messages, and exposed tools plus the desired output. The resolver deducts a safety
+reserve when computing the effective allowance; that reserve constrains the wire ceiling but is
+not itself a model token. The runtime keeps desired and effective output limits distinct; the
+effective value is the exact wire limit.
+If a useful output allowance does not fit, only safe pre-turn history may be evicted before
+dispatch, and the runtime refuses if that still cannot fit. An undeclared ceiling is not
+invented. Backup rebudgeting uses the same exact request construction and budget. Token-estimator
+calibration remains separate and deferred.
+
 Advanced numerical configuration can exist for specialized benchmarking.
 
 ---
@@ -1113,11 +1130,18 @@ directly to the configured failover decision. Committed output is not eligible f
 retries or failover replay.
 
 An explicit output-limit completion (`length` or `max_tokens`) has one narrow exception:
-when reported output usage is known and strictly below the request's explicit output
-ceiling, and pre-turn history can be safely compacted, the runtime may retry once on the
-same model. The failed deltas and unexecuted tool calls remain canonical trace evidence
-but are omitted from model-visible projections; no call from the incomplete response is
-executed. Full-ceiling, unmeasured, or uncompactable cases remain incomplete.
+when reported output usage is known and strictly below the request's explicit effective output
+ceiling, pre-turn history can be safely compacted, and no assistant text or reasoning has escaped
+to an irreversible live surface, the runtime may retry once on the same model. The failed deltas
+and unexecuted tool calls remain canonical trace evidence but are omitted from model-visible
+projections; no call from the incomplete response is executed. Full-ceiling, unmeasured,
+uncompactable, or user-visible cases remain incomplete.
+
+Provider decoders and the runtime collector impose finite per-response bounds on text,
+reasoning, semantic event count, raw SSE frame count/size, tool count, tool identities, and
+per-call/aggregate tool arguments. Empty and usage-only frames count toward the independent raw
+frame bound. Fragmented argument builders are checked before append. Text-limit failures are
+incomplete semantic responses; no partially accumulated tool call may execute.
 
 ### Eligible automatic failover cases
 
@@ -1199,7 +1223,10 @@ followed by a corrective request. Exhausting the request budget without a succes
 configured progress tool is `BudgetExhausted`, never `Completed`. The normal `Requested`,
 `Started`, `Succeeded`, `Failed`, or `Unknown` lifecycle remains authoritative; an
 attempt or a failed tool does not satisfy the boundary. A successful configured progress
-tool satisfies the one-shot boundary for the rest of that turn. The default remains
+tool satisfies the one-shot boundary for the rest of that turn. At activation and before each
+later request, the runtime resolves the effective executable set under current model capabilities,
+tool policy, and approval availability; an empty set is a durable semantic failure before another
+request, not a retry loop (including when failover changes capabilities). The default remains
 disabled so read-only tasks are not forced to mutate.
 
 This is a distributed-systems-style reliability invariant.

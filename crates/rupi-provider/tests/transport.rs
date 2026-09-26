@@ -23,7 +23,9 @@ use rupi_core::{
   ModelRef, ModelRequest, ProviderEvent, ReasoningChunk, ReasoningExposure, ReasoningProvenance,
   Role, ThinkingLevel, ToolSamplingConstraint, ToolSamplingStrictness,
 };
-use rupi_provider::{MaxTokensField, OpenAiCompat, ProviderConfig, ThinkingInput};
+use rupi_provider::{
+  MAX_RESPONSE_FRAMES, MaxTokensField, OpenAiCompat, ProviderConfig, ThinkingInput,
+};
 
 /// A one-shot HTTP server that answers a single request with raw bytes.
 struct FakeServer {
@@ -292,6 +294,20 @@ fn thinking_text_is_claimed_as_the_declaration_says() {
 }
 
 #[test]
+fn undeclared_reasoning_fields_are_not_promoted_to_native_events() {
+  let thinking = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"ambiguous\",\"content\":\"answer\"}}]}\n\n";
+  let server = FakeServer::answer(complete_sse(thinking));
+  let adapter = adapter_declaring(&server.base_url(), None, ReasoningExposure::None);
+  let (result, collector) = stream(&adapter, &request("why"));
+
+  result.expect("unclassified side-channel text does not invalidate the answer");
+  assert!(matches!(
+    collector.events(),
+    [ProviderEvent::TextDelta(text)] if text == "answer"
+  ));
+}
+
+#[test]
 fn a_tool_call_completes_only_at_finish() {
   let server = FakeServer::answer(sse(
     "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a.rs\\\"}\"}}]}}]}\n\n\
@@ -377,6 +393,27 @@ fn a_stream_that_reports_nothing_is_not_a_completion() {
   assert!(!failure.partial_output_emitted);
   assert!(collector.events().is_empty());
   server.request();
+}
+
+#[test]
+fn empty_and_usage_only_frames_cannot_exceed_the_raw_response_frame_limit() {
+  let mut body = String::with_capacity(MAX_RESPONSE_FRAMES * 40);
+  for index in 0..=MAX_RESPONSE_FRAMES {
+    if index % 2 == 0 {
+      body.push_str("data: {\"choices\":[{\"delta\":{}}]}\n\n");
+    } else {
+      body.push_str("data: {\"usage\":{\"prompt_tokens\":1}}\n\n");
+    }
+  }
+  let server = FakeServer::answer(sse(body));
+  let adapter = adapter(&server.base_url(), None);
+  let (result, collector) = stream(&adapter, &request("empty frame flood"));
+  let failure = result.expect_err("empty SSE frames are bounded independently");
+
+  assert_eq!(failure.kind, ModelFailureKind::Protocol);
+  assert!(failure.to_string().contains("response exceeds"));
+  assert!(!failure.partial_output_emitted);
+  assert!(collector.events().is_empty());
 }
 
 #[test]
@@ -531,6 +568,7 @@ fn a_non_streaming_endpoint_is_supported() {
   ));
   let mut config = ProviderConfig::local("local-vulkan", "qwen3.8-flash", server.base_url(), 8_192);
   config.stream = false;
+  config.capabilities.exposed_reasoning = ReasoningExposure::Native;
   let adapter = OpenAiCompat::new(config).expect("adapter");
   let (result, collector) = stream(&adapter, &request("hello"));
   let usage = result.expect("completion");

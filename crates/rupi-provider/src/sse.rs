@@ -10,12 +10,18 @@ use std::io::{self, BufReader, Read};
 
 use rupi_core::{BoundedLineReader, LineOverflow};
 
-/// Largest accepted event payload.
+/// Largest accepted SSE frame in bytes, including ignored metadata and comments.
 ///
 /// A confused or hostile endpoint that never emits a blank line must not be
-/// able to grow the buffer without bound. One chat-completion event is a few
+/// able to grow the buffer without bound. One chat-completion frame is a few
 /// hundred bytes; a whole megabyte is already far outside that.
 pub const MAX_EVENT_BYTES: usize = 1024 * 1024;
+
+/// Maximum complete SSE frames accepted for one streamed response.
+///
+/// Semantic event limits do not count empty-choice or usage-only frames, but
+/// they still consume parsing work and reset the transport idle timer.
+pub const MAX_RESPONSE_FRAMES: usize = 65_536;
 
 /// The termination sentinel used by OpenAI-compatible endpoints.
 pub const DONE: &str = "[DONE]";
@@ -40,6 +46,8 @@ pub struct SseStream<R> {
   lines: BoundedLineReader,
   pending_data: String,
   pending_received: bool,
+  pending_frame_bytes: usize,
+  response_frames: usize,
   finished: bool,
 }
 
@@ -50,8 +58,23 @@ impl<R: Read> SseStream<R> {
       lines: BoundedLineReader::new(),
       pending_data: String::new(),
       pending_received: false,
+      pending_frame_bytes: 0,
+      response_frames: 0,
       finished: false,
     }
+  }
+
+  fn finish_frame(&mut self) -> io::Result<()> {
+    if self.response_frames >= MAX_RESPONSE_FRAMES {
+      self.finished = true;
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("sse response exceeds {MAX_RESPONSE_FRAMES} frames"),
+      ));
+    }
+    self.response_frames += 1;
+    self.pending_frame_bytes = 0;
+    Ok(())
   }
 
   /// Next event, or `None` at end of stream.
@@ -78,6 +101,7 @@ impl<R: Read> SseStream<R> {
           self.pending_data.clear();
           self.pending_received = false;
           return if received {
+            self.finish_frame()?;
             Ok(Some(SseEvent { data }))
           } else {
             Ok(None)
@@ -92,12 +116,22 @@ impl<R: Read> SseStream<R> {
           return Err(error);
         }
       };
-      let line = String::from_utf8(line.into_bytes()).map_err(|error| {
+      let raw_line = line.into_bytes();
+      self.pending_frame_bytes = self.pending_frame_bytes.saturating_add(raw_line.len());
+      if self.pending_frame_bytes > MAX_EVENT_BYTES {
+        self.finished = true;
+        return Err(io::Error::new(
+          io::ErrorKind::InvalidData,
+          format!("sse frame exceeds {MAX_EVENT_BYTES} bytes"),
+        ));
+      }
+      let line = String::from_utf8(raw_line).map_err(|error| {
         self.finished = true;
         io::Error::new(io::ErrorKind::InvalidData, error)
       })?;
       let trimmed = line.trim_end_matches(['\n', '\r']);
       if trimmed.is_empty() {
+        self.finish_frame()?;
         self.finished |= received && data.trim() == DONE;
         self.pending_data.clear();
         self.pending_received = false;

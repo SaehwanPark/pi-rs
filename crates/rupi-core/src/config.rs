@@ -216,7 +216,7 @@ impl ModelEndpoint {
       api_key: None,
       capabilities: ModelCapabilities {
         tools: true,
-        exposed_reasoning: ReasoningExposure::Native,
+        exposed_reasoning: ReasoningExposure::None,
         ..ModelCapabilities::text_only(context_window)
       },
       max_output_tokens: None,
@@ -247,7 +247,7 @@ impl ModelEndpoint {
       api_key: None,
       capabilities: ModelCapabilities {
         tools: true,
-        exposed_reasoning: ReasoningExposure::Native,
+        exposed_reasoning: ReasoningExposure::None,
         ..ModelCapabilities::text_only(context_window)
       },
       max_output_tokens: None,
@@ -260,6 +260,16 @@ impl ModelEndpoint {
 
   pub fn reference(&self) -> ModelRef {
     ModelRef::new(self.provider.clone(), self.model.clone())
+  }
+
+  /// Capabilities with endpoint-level output limits resolved over declarations.
+  ///
+  /// Runtime consumers without a live adapter (notably lazy backup providers)
+  /// must see the same output ceiling the HTTP adapter will send.
+  pub fn effective_capabilities(&self) -> ModelCapabilities {
+    let mut capabilities = self.capabilities.clone();
+    capabilities.max_output_tokens = self.max_output_tokens.or(capabilities.max_output_tokens);
+    capabilities
   }
 }
 
@@ -664,9 +674,27 @@ impl RuntimeConfig {
           endpoint.provider, endpoint.model
         )));
       }
+      if endpoint
+        .max_output_tokens
+        .or(endpoint.capabilities.max_output_tokens)
+        == Some(0)
+      {
+        return Err(ConfigError(format!(
+          "endpoint {}/{} max_output_tokens must be greater than zero",
+          endpoint.provider, endpoint.model
+        )));
+      }
       if endpoint.base_url.as_deref().is_some_and(url_has_userinfo) {
         return Err(ConfigError(format!(
           "endpoint {}/{} URL must not contain userinfo credentials",
+          endpoint.provider, endpoint.model
+        )));
+      }
+      if endpoint.openai_compat.preserve_reasoning
+        && endpoint.capabilities.exposed_reasoning != ReasoningExposure::Native
+      {
+        return Err(ConfigError(format!(
+          "endpoint {}/{} may preserve reasoning only when exposed_reasoning is native",
           endpoint.provider, endpoint.model
         )));
       }
@@ -1015,6 +1043,7 @@ mod tests {
   #[test]
   fn openai_compat_endpoint_options_round_trip() {
     let mut config = sample_config();
+    config.endpoints[0].capabilities.exposed_reasoning = ReasoningExposure::Native;
     config.endpoints[0].openai_compat = OpenAiCompatOptions {
       stream: Some(false),
       stream_usage: Some(false),
@@ -1030,6 +1059,84 @@ mod tests {
       parsed.endpoints[0].openai_compat,
       config.endpoints[0].openai_compat
     );
+  }
+
+  #[test]
+  fn endpoint_effective_capabilities_resolve_output_ceiling_precedence() {
+    let mut endpoint = sample_config().endpoints.remove(0);
+    endpoint.capabilities.max_output_tokens = Some(1_024);
+    endpoint.max_output_tokens = Some(8_192);
+    assert_eq!(
+      endpoint.effective_capabilities().max_output_tokens,
+      Some(8_192)
+    );
+
+    endpoint.max_output_tokens = None;
+    assert_eq!(
+      endpoint.effective_capabilities().max_output_tokens,
+      Some(1_024)
+    );
+  }
+
+  #[test]
+  fn zero_output_ceilings_are_rejected() {
+    let mut config = sample_config();
+    config.endpoints[0].max_output_tokens = Some(0);
+    assert!(
+      config
+        .validate()
+        .unwrap_err()
+        .0
+        .contains("max_output_tokens must be greater than zero")
+    );
+
+    config.endpoints[0].max_output_tokens = None;
+    config.endpoints[0].capabilities.max_output_tokens = Some(0);
+    assert!(
+      config
+        .validate()
+        .unwrap_err()
+        .0
+        .contains("max_output_tokens must be greater than zero")
+    );
+  }
+
+  #[test]
+  fn generic_endpoint_constructors_do_not_claim_native_reasoning() {
+    let local = ModelEndpoint::local("local", "model", "http://127.0.0.1/v1", 8_192);
+    let remote = ModelEndpoint::remote("remote", "model", None::<String>, "API_KEY", 8_192);
+    assert_eq!(
+      local.capabilities.exposed_reasoning,
+      ReasoningExposure::None
+    );
+    assert_eq!(
+      remote.capabilities.exposed_reasoning,
+      ReasoningExposure::None
+    );
+  }
+
+  #[test]
+  fn reasoning_replay_requires_an_explicit_native_exposure_claim() {
+    let mut config = sample_config();
+    config.endpoints[0].openai_compat.preserve_reasoning = true;
+    assert!(
+      config
+        .validate()
+        .unwrap_err()
+        .0
+        .contains("only when exposed_reasoning is native")
+    );
+
+    config.endpoints[0].capabilities.exposed_reasoning = ReasoningExposure::Native;
+    assert!(config.validate().is_ok());
+    for exposure in [
+      ReasoningExposure::None,
+      ReasoningExposure::ProviderSummary,
+      ReasoningExposure::Declared,
+    ] {
+      config.endpoints[0].capabilities.exposed_reasoning = exposure;
+      assert!(config.validate().is_err(), "{exposure:?}");
+    }
   }
 
   #[test]

@@ -908,16 +908,17 @@ budgets. The recommended live model comparison cases 01, 02, 04, and 06 were not
 configured endpoint at `127.0.0.1:8000` was offline, and the documented 88-GB model checkpoint
 exceeds this host's approximately 64-GB physical memory. This does not establish Pi parity.
 
-### In-progress audit follow-up — Round 4
+### Completed audit follow-up — Round 4 (PR #123)
 
-`audits/pi-benchmark-audit/round04.md` identifies seven runtime/provider gaps. Work is tracked
-on the Round-4 PR and remains incomplete until each behavior has regression evidence:
+`audits/pi-benchmark-audit/round04.md` identified seven runtime/provider gaps. The Round-4
+implementation is merged and regression-covered; Round 5 records new boundary cases, not
+unfinished Round-4 requirements:
 
 - [x] Validate every supplied tool argument against the registered schema; reject extra fields
       on built-ins before preflight, approval, or execution (`crates/rupi-tools/src/registry.rs`;
       registry regressions cover optional fields, nested arrays/objects, enums, extra properties,
       and the pre-`ToolStarted` boundary).
-- [-] Enforce the progress boundary as a runtime postcondition, not only prompt/tool filtering.
+- [x] Enforce the progress boundary as a runtime postcondition, not only prompt/tool filtering.
       Required tool choice is sent as a provider hint; rejected text-only completion is omitted
       from model-visible history and final report text, and unsatisfied budget ends incomplete.
 - [x] Make same-model retry eligibility depend on request replay safety as well as failure kind.
@@ -946,11 +947,48 @@ on the Round-4 PR and remains incomplete until each behavior has regression evid
       normalized ordering is enforced, and adjustments emit one durable warning per model
       window. Adaptive knees apply afterward as caps that can only lower those thresholds.
       Core, adaptive-policy, failover, and durable-diagnostic regressions cover precedence.
-- [ ] Keep P2 tokenizer-estimator calibration and model-readable reduced-output recovery tracked;
-      these are outside the Round-4 blocking slice and must not be presented as implemented.
+- [x] Keep P2 tokenizer-estimator calibration and model-readable reduced-output recovery tracked;
+      these are outside the Round-4 blocking slice and remain deferred.
 
 The local-model behavior comparisons remain contingent on an available endpoint/model; deterministic
 fault-injection tests are the required gate for the runtime contracts in this slice.
+
+### Completed audit follow-up — Round 5 (PR #125)
+
+`audits/pi-benchmark-audit/round05.md` identified seven runtime/provider boundary gaps. The
+Round-5 implementation is regression-covered and verified:
+
+- [x] Output-limit recovery is blocked after reasoning or assistant text reaches an irreversible
+      live surface. Headless/buffered surfaces retain the one-shot recovery path; incomplete output
+      and never-executed tool calls remain out of the next model context.
+- [x] Request budgeting includes the assembled prompt and exposed tools, keeps desired and
+      effective output ceilings distinct, applies the effective limit exactly on the wire, and
+      leaves a safety reserve. Endpoint-only output ceilings are visible to runtime/recovery,
+      including lazy backup capability snapshots. When a useful clamp is impossible, only safe
+      pre-turn history is reduced before refusing;
+      backup rebudgeting uses the same accounting.
+- [x] Successfully completed assistant messages persist exposed reasoning in order with original
+      provenance. Truncated/failed attempts remain trace-only; undeclared reasoning-shaped fields
+      are not promoted to semantic reasoning; only endpoint-opted-in native reasoning is replayed.
+- [x] Generic local/remote endpoint constructors default reasoning exposure to `None`; config and
+      provider validation reject reasoning replay without an explicit native-exposure declaration.
+- [x] Adapter decoding and the runtime collector bound aggregate text/reasoning/semantic events,
+      raw SSE frames, tool calls, tool identities, and per-call/aggregate argument bytes before
+      accumulation or execution. Regressions exercise empty-frame floods, 2,000 tiny SSE events,
+      2,000 tool calls, oversized fragmented arguments, and stream-wide text/reasoning limits.
+- [x] Progress boundaries fail with a durable diagnostic before another provider request if no
+      executable progress tool remains under model, tool-policy, or live approval constraints.
+      Availability is rechecked after activation, including after a capability-changing failover.
+- [x] Token-estimator calibration and model-readable reduced-output recovery remain deferred; no
+      completion claim is made for either item.
+
+Evidence: `cargo fmt --all --check`, `cargo check -p rupi-core --all-features`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and
+`cargo doc --workspace --no-deps` passed. `bash bench/startup.sh --json
+bench/results/startup-ci.json` passed (cold 122.06 ms; warm mean 5.93 ms), and
+`bash bench/context_prefill.sh` passed all five budgets. No local llama.cpp comparison was run;
+this Round-5 safety slice relies on deterministic fixtures, and weak-model performance remains a
+later empirical focus.
 
 ### P2 — Later / deliberately deferred
 

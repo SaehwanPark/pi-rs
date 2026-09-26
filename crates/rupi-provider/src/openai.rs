@@ -182,6 +182,12 @@ impl OpenAiCompat {
           }
           continue;
         }
+        Err(error) if error.kind() == io::ErrorKind::InvalidData && !cancel.is_cancelled() => {
+          return Err(
+            decode::sse_framing_failure(&error, decoder.emitted_output())
+              .with_model(self.model_ref()),
+          );
+        }
         Err(error) => {
           // A cancel that lands while blocked in `read` surfaces as an IO
           // error: the user's intent outranks the transport symptom.
