@@ -89,6 +89,20 @@ impl ThinkingLevel {
   }
 }
 
+/// Provider instruction for tool use on one request.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ToolChoice {
+  /// Let the model choose whether and which exposed tool to call.
+  #[default]
+  Auto,
+  /// Do not ask the model to call any tool.
+  None,
+  /// Require the model to call one of the exposed tools.
+  Required,
+  /// Require this exposed tool by name.
+  Specific(String),
+}
+
 /// One tool exposed to the model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolSpec {
@@ -106,6 +120,7 @@ pub struct ModelRequest {
   pub system: Option<String>,
   pub messages: Vec<Message>,
   pub tools: Vec<ToolSpec>,
+  pub tool_choice: ToolChoice,
   pub max_output_tokens: Option<u64>,
   pub temperature: Option<f32>,
   pub thinking: ThinkingLevel,
@@ -120,6 +135,7 @@ impl ModelRequest {
       system: None,
       messages,
       tools: Vec::new(),
+      tool_choice: ToolChoice::Auto,
       max_output_tokens: None,
       temperature: None,
       thinking: ThinkingLevel::default(),
@@ -134,6 +150,11 @@ impl ModelRequest {
 
   pub fn with_tools(mut self, tools: Vec<ToolSpec>) -> Self {
     self.tools = tools;
+    self
+  }
+
+  pub fn with_tool_choice(mut self, choice: ToolChoice) -> Self {
+    self.tool_choice = choice;
     self
   }
 

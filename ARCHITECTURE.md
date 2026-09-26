@@ -344,13 +344,17 @@ pub struct ToolMetadata {
 Coding workflows may configure `RuntimeLimits::max_model_requests_without_progress` and
 an optional `progress_tool_names` allowlist. After the configured number of tool-bearing
 requests without one of those tools, `TurnLoop` records a runtime-owned model-visible
-instruction and exposes only the allowlisted tools on the next request. With no allowlist,
-all permitted mutating tools are exposed. The boundary is a bounded nudge, not a claim that
-the host changed: the normal `Requested`/`Started`/`Succeeded`/`Failed`/`Unknown` lifecycle
-still decides what actually happened. A successful configured progress tool satisfies the
+instruction, exposes only the allowlisted tools on the next request, and requests
+`ToolChoice::Required` where supported. That provider hint is not trusted as enforcement:
+a text-only completion while the boundary remains active is retained in the canonical trace,
+excluded from model-visible history and final report text, and followed by a corrective
+request. Exhausting the request budget without a successful configured progress tool ends
+as `BudgetExhausted`, never `Completed`. With no allowlist, all permitted mutating tools
+are exposed. The normal `Requested`/`Started`/`Succeeded`/`Failed`/`Unknown` lifecycle still
+decides what actually happened. A successful configured progress tool satisfies the
 one-shot boundary for the rest of that turn, and callers must verify the workspace
-independently.
-The default is disabled so read-only questions and inspection workflows remain unchanged.
+independently. The default is disabled so read-only questions and inspection workflows
+remain unchanged.
 
 ## 10. Context engine
 

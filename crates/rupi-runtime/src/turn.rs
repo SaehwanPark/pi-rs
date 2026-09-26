@@ -34,9 +34,9 @@ use rupi_core::{
   ModelEpochStarted, ModelFailover, ModelFailure, ModelFailureKind, ModelProvider, ModelRef,
   ModelRequest, ModelRequestCompleted, ModelRequestStarted, ModelRetry, ReasoningDelta,
   ReasoningProvenance, ReductionReason, Role, SessionEndReason, SessionEnded, SessionId,
-  SessionStarted, SinkError, ThinkingLevel, ToolCallBlock, ToolCompleted, ToolExecutionState,
-  ToolFailed, ToolOutcome, ToolProgress, ToolRequested, ToolResultBlock, ToolStarted, ToolUnknown,
-  TraceId, TurnCompleted, TurnId, TurnStatus, UserMessage,
+  SessionStarted, SinkError, ThinkingLevel, ToolCallBlock, ToolChoice, ToolCompleted,
+  ToolExecutionState, ToolFailed, ToolOutcome, ToolProgress, ToolRequested, ToolResultBlock,
+  ToolStarted, ToolUnknown, TraceId, TurnCompleted, TurnId, TurnStatus, UserMessage,
 };
 use rupi_tools::{Approval, ApprovalGate, Executed, ToolRegistry};
 
@@ -1164,13 +1164,23 @@ impl<'a> TurnLoop<'a> {
         }
         Err(TurnFailure::Sink(error)) => return Err(TurnError::from(error)),
       };
+      let rejected_completion = self.progress_boundary_active && response.calls.is_empty();
       let RecordedResponse {
         assistant_event_id,
         calls,
         rejected_calls,
-      } = self.record_response(response, &mut report)?;
+      } = self.record_response(response, &mut report, !rejected_completion)?;
 
       if calls.is_empty() {
+        if rejected_completion {
+          self.append_progress_retry_instruction(&turn_id)?;
+          self.diagnostic(
+            Some(turn_id.clone()),
+            DiagnosticLevel::Warn,
+            "progress boundary rejected a text-only completion; a configured progress tool must succeed before the turn can complete",
+          )?;
+          continue;
+        }
         // The model answered instead of asking: the turn is over.
         return self.finish(report, TurnStatus::Completed, clock, Some(turn_id.clone()));
       }
@@ -1214,6 +1224,21 @@ impl<'a> TurnLoop<'a> {
       self.observe_progress(&turn_id, progress_succeeded)?;
     }
 
+    if self.progress_boundary_active {
+      report.budget_exhausted = true;
+      self.diagnostic(
+        Some(turn_id.clone()),
+        DiagnosticLevel::Warn,
+        "request budget exhausted while the required progress boundary remained unsatisfied; the session can be resumed",
+      )?;
+      return self.finish(
+        report,
+        TurnStatus::BudgetExhausted,
+        clock,
+        Some(turn_id.clone()),
+      );
+    }
+
     if self.max_requests > 1 && self.requests.load(Ordering::SeqCst) < self.max_requests {
       if cancel.is_cancelled() {
         report.requests = self.requests.load(Ordering::SeqCst);
@@ -1244,7 +1269,7 @@ impl<'a> TurnLoop<'a> {
         assistant_event_id,
         calls,
         ..
-      } = self.record_response(response, &mut report)?;
+      } = self.record_response(response, &mut report, true)?;
       report.budget_exhausted = true;
       if calls.is_empty() {
         self.diagnostic(
@@ -2754,8 +2779,14 @@ impl<'a> TurnLoop<'a> {
     } else {
       Vec::new()
     };
+    let tool_choice = if self.progress_boundary_active && !tools.is_empty() {
+      ToolChoice::Required
+    } else {
+      ToolChoice::Auto
+    };
     let mut request = ModelRequest::new(provider.model().clone(), capabilities, messages)
       .with_tools(tools)
+      .with_tool_choice(tool_choice)
       .with_thinking(self.thinking);
     let mut system = self.system.clone().unwrap_or_default();
     if !system.is_empty() {
@@ -2858,6 +2889,29 @@ impl<'a> TurnLoop<'a> {
         ),
       )?;
     }
+    Ok(())
+  }
+
+  /// Correct a response that tried to complete without satisfying the boundary.
+  fn append_progress_retry_instruction(&mut self, turn_id: &TurnId) -> Result<(), TurnError> {
+    let tools = if self.progress_tool_names.is_empty() {
+      "a permitted mutating tool".to_string()
+    } else {
+      self.progress_tool_names.join(", ")
+    };
+    let text = format!(
+      "Runtime progress boundary remains unsatisfied: your previous response did not make a successful progress-tool call. Call one of {tools} now; do not claim completion until the requested change has been attempted."
+    );
+    let message = Message::user(text.clone());
+    let envelope = self.emit_message(
+      Some(turn_id.clone()),
+      AgentEvent::UserMessage(UserMessage {
+        text,
+        attachments: 0,
+      }),
+      &message,
+    )?;
+    self.push_message(message, envelope.meta.seq);
     Ok(())
   }
 
@@ -3038,6 +3092,7 @@ impl<'a> TurnLoop<'a> {
     &mut self,
     response: Response,
     report: &mut TurnReport,
+    include_assistant_message: bool,
   ) -> Result<RecordedResponse, TurnError> {
     let Response {
       epoch,
@@ -3050,7 +3105,7 @@ impl<'a> TurnLoop<'a> {
     report.requests = self.requests.load(Ordering::SeqCst);
 
     let mut blocks = Vec::new();
-    if let Some(text) = text.filter(|text| !text.is_empty()) {
+    if include_assistant_message && let Some(text) = text.filter(|text| !text.is_empty()) {
       blocks.push(ContentBlock::text(text.clone()));
       report.text.push_str(&text);
     }
@@ -6519,6 +6574,7 @@ mod tests {
         .collect::<Vec<_>>(),
       vec!["write_probe"]
     );
+    assert_eq!(requests[1].tool_choice, ToolChoice::Required);
     assert!(
       requests[1]
         .system
@@ -6531,6 +6587,7 @@ mod tests {
       2,
       "a successful progress tool ends the one-shot boundary"
     );
+    assert_eq!(requests[2].tool_choice, ToolChoice::Auto);
     assert!(
       requests[2]
         .system
@@ -6553,6 +6610,127 @@ mod tests {
           .unwrap_or_default()
           .contains("progress boundary active")
     }));
+  }
+
+  #[test]
+  fn text_only_completion_cannot_bypass_the_progress_boundary() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![
+      Box::new(Spy(Arc::clone(&seen))),
+      Box::new(MutatingSpy {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        outcome: ToolOutcome::succeeded("mutated"),
+      }),
+    ]);
+    let provider = Scripted::new(
+      "text-progress-bypass",
+      vec![
+        tool_call("spy", serde_json::json!({})),
+        text("Done, fixed."),
+      ],
+    );
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_progress_boundary(Some(1), vec!["write_probe".into()])
+    .with_max_requests(3)
+    .run_turn(
+      "build the project",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .unwrap();
+
+    assert_eq!(report.status, TurnStatus::BudgetExhausted);
+    assert!(report.budget_exhausted);
+    assert!(
+      report.text.is_empty(),
+      "rejected completion is not final text"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].tool_choice, ToolChoice::Required);
+    assert_eq!(requests[1].tools.len(), 1);
+    assert_eq!(requests[1].tools[0].name, "write_probe");
+    assert_eq!(
+      trace.count("assistant_delta"),
+      1,
+      "trace retains rejected text"
+    );
+    assert!(
+      trace
+        .diagnostics()
+        .iter()
+        .any(|message| { message.contains("progress boundary rejected a text-only completion") })
+    );
+  }
+
+  #[test]
+  fn unknown_tool_cannot_satisfy_progress_or_enable_text_completion() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let write_seen = Arc::new(Mutex::new(Vec::new()));
+    let tools = registry_with(vec![
+      Box::new(Spy(Arc::clone(&seen))),
+      Box::new(MutatingSpy {
+        seen: Arc::clone(&write_seen),
+        outcome: ToolOutcome::succeeded("mutated"),
+      }),
+    ]);
+    let provider = Scripted::new(
+      "unknown-progress-bypass",
+      vec![
+        tool_call("spy", serde_json::json!({})),
+        tool_call("unknown", serde_json::json!({})),
+        text("Done, fixed."),
+      ],
+    );
+    let mut trace = Recorder::default();
+    let policy = rupi_core::ProfilePolicy::new(
+      rupi_core::ContextProfile::Balanced,
+      provider.capabilities().context_window,
+    );
+
+    let report = TurnLoop::new(
+      &provider,
+      &tools,
+      &policy,
+      &mut trace,
+      SessionId::new(),
+      TraceId::new(),
+    )
+    .with_progress_boundary(Some(1), vec!["write_probe".into()])
+    .with_max_requests(4)
+    .run_turn(
+      "build the project",
+      &CancelToken::new(),
+      &mut SilentProgress,
+    )
+    .unwrap();
+
+    assert_eq!(report.status, TurnStatus::BudgetExhausted);
+    assert!(report.text.is_empty());
+    assert_eq!(write_seen.lock().unwrap().len(), 0);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(
+      requests[1..]
+        .iter()
+        .all(|request| { request.tool_choice == ToolChoice::Required })
+    );
+    assert_eq!(trace.count("tool_started"), 1, "only the initial read ran");
+    assert_eq!(trace.count("tool_failed"), 1, "unknown tool is rejected");
   }
 
   #[test]
@@ -6590,6 +6768,7 @@ mod tests {
       TraceId::new(),
     )
     .with_progress_boundary(Some(1), vec!["write_probe".into()])
+    .with_max_requests(5)
     .run_turn(
       "build the project",
       &CancelToken::new(),
@@ -6597,8 +6776,12 @@ mod tests {
     )
     .expect("a failed progress attempt should remain recoverable");
 
-    assert_eq!(report.status, TurnStatus::Completed);
-    assert_eq!(report.text, "done");
+    assert_eq!(report.status, TurnStatus::BudgetExhausted);
+    assert!(report.budget_exhausted);
+    assert!(
+      report.text.is_empty(),
+      "rejected completion is not final text"
+    );
     assert_eq!(read_seen.lock().unwrap().len(), 1);
     assert_eq!(write_seen.lock().unwrap().len(), 2);
     let requests = provider.requests();
@@ -6619,6 +6802,11 @@ mod tests {
         .collect::<Vec<_>>(),
       vec!["write_probe"],
       "failed progress must not restore the unrestricted tool set"
+    );
+    assert!(
+      requests[1..]
+        .iter()
+        .all(|request| { request.tool_choice == ToolChoice::Required })
     );
   }
 

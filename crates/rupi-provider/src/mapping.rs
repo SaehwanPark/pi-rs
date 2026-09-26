@@ -5,7 +5,7 @@
 //! a mapping bug: a tool call that was never replayed, an image dropped in
 //! silence, or thinking requested from a server that rejects the field.
 
-use rupi_core::{ContentBlock, Message, ModelRef, ModelRequest, Role, ThinkingLevel};
+use rupi_core::{ContentBlock, Message, ModelRef, ModelRequest, Role, ThinkingLevel, ToolChoice};
 use serde_json::{Value, json};
 
 use crate::config::{MaxTokensField, ProviderConfig, ThinkingInput};
@@ -40,7 +40,15 @@ pub fn request_body(config: &ProviderConfig, request: &ModelRequest) -> Value {
         })
         .collect(),
     );
-    body["tool_choice"] = json!("auto");
+    body["tool_choice"] = match &request.tool_choice {
+      ToolChoice::Auto => json!("auto"),
+      ToolChoice::None => json!("none"),
+      ToolChoice::Required => json!("required"),
+      ToolChoice::Specific(name) => json!({
+        "type": "function",
+        "function": { "name": name },
+      }),
+    };
   }
 
   if let Some(limit) = request
@@ -273,6 +281,24 @@ mod tests {
     let with = request_body(&config(), &capable);
     assert_eq!(with["tools"][0]["function"]["name"], "read");
     assert_eq!(with["tool_choice"], "auto");
+
+    capable.tool_choice = ToolChoice::Required;
+    assert_eq!(
+      request_body(&config(), &capable)["tool_choice"],
+      "required",
+      "the provider receives the runtime's assistive requirement"
+    );
+  }
+
+  #[test]
+  fn specific_tool_choice_names_the_required_function() {
+    let mut capable = with_tools(request(vec![Message::user("x")]));
+    capable.capabilities.tools = true;
+    capable.tool_choice = ToolChoice::Specific("read".into());
+    assert_eq!(
+      request_body(&config(), &capable)["tool_choice"],
+      json!({"type": "function", "function": {"name": "read"}})
+    );
   }
 
   #[test]

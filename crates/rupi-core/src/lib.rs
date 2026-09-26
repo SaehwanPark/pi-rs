@@ -72,7 +72,7 @@ pub use message::{ContentBlock, Message, Role, ToolCallBlock, ToolResultBlock};
 pub use provenance::{ReasoningChunk, ReasoningProvenance};
 pub use provider::{
   CancelToken, Collector, CompletionUsage, ModelProvider, ModelRequest, ProviderEvent,
-  ProviderEventSink, ThinkingLevel, ToolSpec,
+  ProviderEventSink, ThinkingLevel, ToolChoice, ToolSpec,
 };
 pub use redact::{Redacted, RedactionPolicy, SecretKind};
 pub use session::{

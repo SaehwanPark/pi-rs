@@ -1172,11 +1172,15 @@ Read-only operations are more safely retryable.
 
 For explicitly bounded implementation workflows, an opt-in progress boundary may count
 model requests that invoke tools without calling a configured progress tool. When the
-boundary activates, the runtime records its instruction and narrows the next request's
-tool schemas to the configured progress tools (or permitted mutating tools when no
-allowlist is supplied). This is a model-guidance and exposure boundary only: it must not
-claim that a host mutation succeeded, and the normal `Requested`, `Started`, `Succeeded`,
-`Failed`, or `Unknown` lifecycle remains authoritative. A successful configured progress
+boundary activates, the runtime records its instruction, narrows the next request's tool
+schemas to the configured progress tools (or permitted mutating tools when no allowlist is
+supplied), and requests required tool choice where the provider supports it. That hint is
+not enforcement: a text-only completion while the boundary remains active is retained in
+the canonical trace but excluded from model-visible history and final report text, then
+followed by a corrective request. Exhausting the request budget without a successful
+configured progress tool is `BudgetExhausted`, never `Completed`. The normal `Requested`,
+`Started`, `Succeeded`, `Failed`, or `Unknown` lifecycle remains authoritative; an
+attempt or a failed tool does not satisfy the boundary. A successful configured progress
 tool satisfies the one-shot boundary for the rest of that turn. The default remains
 disabled so read-only tasks are not forced to mutate.
 

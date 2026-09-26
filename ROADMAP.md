@@ -913,9 +913,13 @@ exceeds this host's approximately 64-GB physical memory. This does not establish
 `audits/pi-benchmark-audit/round04.md` identifies seven runtime/provider gaps. Work is tracked
 on the Round-4 PR and remains incomplete until each behavior has regression evidence:
 
-- [-] Validate every supplied tool argument against the registered schema; reject extra fields
-      on built-ins before preflight, approval, or execution.
-- [ ] Enforce the progress boundary as a runtime postcondition, not only prompt/tool filtering.
+- [x] Validate every supplied tool argument against the registered schema; reject extra fields
+      on built-ins before preflight, approval, or execution (`crates/rupi-tools/src/registry.rs`;
+      registry regressions cover optional fields, nested arrays/objects, enums, extra properties,
+      and the pre-`ToolStarted` boundary).
+- [-] Enforce the progress boundary as a runtime postcondition, not only prompt/tool filtering.
+      Required tool choice is sent as a provider hint; rejected text-only completion is omitted
+      from model-visible history and final report text, and unsatisfied budget ends incomplete.
 - [ ] Make same-model retry eligibility depend on request replay safety as well as failure kind.
 - [ ] Expose OpenAI-compatible dialect configuration through `ModelEndpoint`.
 - [ ] Add capability-gated preferred/required constrained tool sampling.
