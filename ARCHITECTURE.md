@@ -163,10 +163,12 @@ normalizable; the registry's pre-execution argument validator remains authoritat
 values are redacted from config serialization and debug output.
 
 Generic local and remote endpoint constructors conservatively declare
-`ReasoningExposure::None`; native exposure must be configured from endpoint evidence. Enabling
-reasoning replay requires that explicit native declaration. Successfully completed assistant
-messages retain exposed reasoning chunks with their original provenance, independently of the
-endpoint's opt-in replay policy; only native chunks are eligible for replay.
+`ReasoningExposure::None`; native exposure must be configured from endpoint evidence. Reasoning-
+shaped response fields are discarded from the semantic stream while exposure is undeclared rather
+than promoted to `Native` from their names. Enabling reasoning replay requires that explicit native
+declaration. Successfully completed assistant messages retain exposed reasoning chunks with their
+original provenance, independently of the endpoint's opt-in replay policy; only native chunks are
+eligible for replay.
 
 When an endpoint declares an output ceiling, each request keeps that desired value separate
 from its exact effective wire ceiling. After assembling the system prompt, messages, and tools,
@@ -176,8 +178,9 @@ request still cannot fit, it refuses before dispatch. With no declared ceiling, 
 not invent an untracked wire limit. The provider's capability snapshot includes endpoint output
 overrides, and the wire mapper sends only the ceiling recorded in `ModelRequest`.
 
-Provider decoders and the runtime collector enforce finite per-response text, reasoning, event,
-tool-count, tool-identity, and tool-argument limits. Fragmented tool arguments are bounded before
+Provider decoders and the runtime collector enforce finite per-response text, reasoning, semantic
+event, raw SSE-frame, tool-count, tool-identity, and tool-argument limits. Empty/usage-only SSE
+frames count toward the independent raw-frame bound. Fragmented tool arguments are bounded before
 append; no partial or oversized call is executable. Exceeding visible-text limits yields an
 incomplete protocol response, and the runtime never automatically retries it after irreversible
 assistant output has reached the live surface.
@@ -306,8 +309,9 @@ Where the claim comes from:
   response field the text arrived in. The same `reasoning_content` field carries the
   model's own thinking on one server and a provider-authored summary on another, and
   a claim of `Native` for the latter reports hidden chain of thought as recovered.
-- An endpoint that declares nothing leaves the field name as the only evidence, and
-  that evidence is admitted only for the fields known to carry native thinking.
+- An endpoint that declares nothing provides no defensible provenance claim. The
+  adapter discards reasoning-shaped fields rather than promoting their names to
+  evidence of native thinking; raw provider payload retention remains opt-in.
 - The claim travels unchanged: provider event, journal record, rendered line.
 
 Never serialize or render these as equivalent.

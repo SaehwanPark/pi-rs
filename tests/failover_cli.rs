@@ -294,6 +294,38 @@ fn an_ambiguous_post_timeout_skips_the_fake_same_model_retry() {
 }
 
 #[test]
+fn a_backup_endpoint_output_ceiling_is_budgeted_and_sent_after_takeover() {
+  let scene = takeover_with(
+    vec![text_response("served by the capped standby")],
+    |config| {
+      let standby = config
+        .endpoints
+        .iter_mut()
+        .find(|endpoint| endpoint.model == "standby")
+        .expect("standby endpoint");
+      standby.capabilities.context_window = 8_192;
+      standby.capabilities.max_output_tokens = None;
+      standby.max_output_tokens = Some(8_192);
+    },
+  );
+  let prompt = "x".repeat(10_000);
+
+  let output = run(&scene.config, &scene.workspace, &prompt);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(output.status.success(), "{stderr}");
+  assert_eq!(scene.primary.requests().len(), 2);
+  let requests = scene.standby.requests();
+  assert_eq!(requests.len(), 1);
+  let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+  let effective = body["max_tokens"].as_u64().expect("budgeted wire ceiling");
+  assert!((256..8_192).contains(&effective), "{effective}");
+  assert!(
+    stderr.contains("output budget reduced from 8192"),
+    "{stderr}"
+  );
+}
+
+#[test]
 fn a_failover_records_the_epoch_that_served_the_answer() {
   let scene = takeover(vec![text_response("served by the standby")]);
   let output = run(&scene.config, &scene.workspace, "go");

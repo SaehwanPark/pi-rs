@@ -667,7 +667,7 @@ fn backup_provider(config: &RuntimeConfig) -> Result<Option<Deferred>, String> {
   let endpoint = config
     .endpoint_for(&model)
     .ok_or_else(|| format!("invalid config: backup model {model} has no endpoint entry"))?;
-  let declared = endpoint.capabilities.clone();
+  let declared = endpoint.effective_capabilities();
   let endpoint = endpoint.clone();
   Ok(
     Deferred::new(model, declared, move || {

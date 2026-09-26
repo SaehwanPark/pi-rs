@@ -217,14 +217,14 @@ impl ProviderConfig {
       .ok_or(BuildError::Invalid(
         "base_url is required for an HTTP endpoint",
       ))?;
+    let capabilities = endpoint.effective_capabilities();
+    let max_output_tokens = capabilities.max_output_tokens;
     let mut config = Self {
       id: endpoint.provider.clone(),
       model: endpoint.model.clone(),
       base_url,
-      capabilities: endpoint.capabilities.clone(),
-      max_output_tokens: endpoint
-        .max_output_tokens
-        .or(endpoint.capabilities.max_output_tokens),
+      capabilities,
+      max_output_tokens,
       connect_timeout_ms: endpoint
         .connect_timeout_ms
         .unwrap_or(Self::default().connect_timeout_ms),
@@ -541,6 +541,18 @@ mod tests {
     assert_eq!(derived.max_output_tokens, None);
     assert_eq!(derived.request_timeout_ms, Some(120_000));
     assert_eq!(derived.id, "local");
+  }
+
+  #[test]
+  fn endpoint_output_ceiling_is_normalized_into_provider_capabilities() {
+    let mut endpoint = ModelEndpoint::local("local", "qwen", "http://127.0.0.1:8080/v1", 4_096);
+    endpoint.max_output_tokens = Some(2_048);
+    endpoint.capabilities.max_output_tokens = None;
+
+    let derived = ProviderConfig::from_endpoint(&endpoint).unwrap();
+
+    assert_eq!(derived.max_output_tokens, Some(2_048));
+    assert_eq!(derived.capabilities.max_output_tokens, Some(2_048));
   }
 
   #[test]

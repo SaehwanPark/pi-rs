@@ -500,7 +500,9 @@ its text and provenance in a successfully completed assistant message so canonic
 history can represent what was exposed. Failed or truncated attempts remain trace-only.
 Storage is independent of replay: future requests include native reasoning only when the
 endpoint explicitly opts in, and generic endpoint constructors make no native-exposure claim.
-Replay configuration that conflicts with `exposed_reasoning != native` is invalid.
+Replay configuration that conflicts with `exposed_reasoning != native` is invalid. When the
+endpoint has not declared an exposure, reasoning-shaped fields are omitted from normalized events
+rather than guessed from field names; raw provider payload retention remains opt-in.
 
 ### 10.2 Provider summary
 
@@ -1136,9 +1138,10 @@ projections; no call from the incomplete response is executed. Full-ceiling, unm
 uncompactable, or user-visible cases remain incomplete.
 
 Provider decoders and the runtime collector impose finite per-response bounds on text,
-reasoning, event count, tool count, tool identities, and per-call/aggregate tool arguments.
-Fragmented argument builders are checked before append. Text-limit failures are incomplete
-semantic responses; no partially accumulated tool call may execute.
+reasoning, semantic event count, raw SSE frame count/size, tool count, tool identities, and
+per-call/aggregate tool arguments. Empty and usage-only frames count toward the independent raw
+frame bound. Fragmented argument builders are checked before append. Text-limit failures are
+incomplete semantic responses; no partially accumulated tool call may execute.
 
 ### Eligible automatic failover cases
 

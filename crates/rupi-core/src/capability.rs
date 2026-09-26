@@ -96,10 +96,9 @@ impl ReasoningExposure {
   /// Returns `None` for [`ReasoningExposure::None`] so that the *absence* of a
   /// declaration is never read as a claim: silence about reasoning output is not
   /// evidence that thinking text is native, and it is not evidence that it is a
-  /// summary either. What a caller does with text that arrived anyway is its own
-  /// decision, and it has to say why. `rupi-provider` falls back to `Native` for
-  /// the response fields known to carry native thinking, which is the evidence the
-  /// field name actually supports.
+  /// summary either. Because hosted providers reuse native-shaped fields for
+  /// summaries, the adapter discards reasoning fields unless the endpoint
+  /// explicitly declares their provenance.
   pub fn implied_provenance(self) -> Option<crate::provenance::ReasoningProvenance> {
     use crate::provenance::ReasoningProvenance as P;
     match self {

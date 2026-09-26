@@ -122,17 +122,12 @@ impl Decoder {
   /// Provenance for thinking text arriving now.
   ///
   /// The claim comes from what the endpoint *declared*, not from the field the
-  /// text arrived in. `reasoning_content` holds the model's own thinking on a
-  /// llama.cpp or vLLM server and a provider-written summary of hidden reasoning
-  /// on a hosted one; deciding by field name alone would record hidden chain of
-  /// thought as if it had been exposed. An endpoint that declares nothing leaves
-  /// the field name as the only evidence, and the fields read here are the
-  /// native-shaped ones.
-  fn reasoning_provenance(&self) -> ReasoningProvenance {
-    self
-      .exposure
-      .implied_provenance()
-      .unwrap_or(ReasoningProvenance::Native)
+  /// text arrived in. `reasoning_content` holds model thinking on some local
+  /// servers and provider-written summaries on some hosted ones. When exposure is
+  /// undeclared, discard these fields from the semantic stream rather than guess;
+  /// raw payload retention remains an explicit opt-in.
+  fn reasoning_provenance(&self) -> Option<ReasoningProvenance> {
+    self.exposure.implied_provenance()
   }
 
   /// Whether visible output has already reached the sink.
@@ -208,24 +203,25 @@ impl Decoder {
       if let Some(finish) = choice.get("finish_reason").and_then(Value::as_str) {
         self.finish_reason = Some(finish.to_string());
       }
-      if let Some(reasoning) = reasoning_text(&delta) {
-        if !reasoning.is_empty() {
-          self.account_response_event()?;
-          if self.reasoning_bytes.saturating_add(reasoning.len()) > MAX_RESPONSE_REASONING_BYTES {
-            return Err(self.response_limit_failure(format!(
-              "provider response exceeded the {}-byte aggregate reasoning limit",
-              MAX_RESPONSE_REASONING_BYTES
-            )));
-          }
-          self.reasoning_bytes += reasoning.len();
-          // Server-generated thinking: the endpoint's declaration decides
-          // whether that is the model's own reasoning or a summary of it.
-          sink.emit(&ProviderEvent::ReasoningDelta {
-            text: reasoning.to_string(),
-            provenance: self.reasoning_provenance(),
-          });
-          self.emitted_output = true;
+      if let Some(reasoning) = reasoning_text(&delta)
+        && let Some(provenance) = self.reasoning_provenance()
+        && !reasoning.is_empty()
+      {
+        self.account_response_event()?;
+        if self.reasoning_bytes.saturating_add(reasoning.len()) > MAX_RESPONSE_REASONING_BYTES {
+          return Err(self.response_limit_failure(format!(
+            "provider response exceeded the {}-byte aggregate reasoning limit",
+            MAX_RESPONSE_REASONING_BYTES
+          )));
         }
+        self.reasoning_bytes += reasoning.len();
+        // Server-generated thinking: the endpoint's declaration decides
+        // whether that is the model's own reasoning or a summary of it.
+        sink.emit(&ProviderEvent::ReasoningDelta {
+          text: reasoning.to_string(),
+          provenance,
+        });
+        self.emitted_output = true;
       }
       if let Some(text) = content_text(&delta) {
         if !text.is_empty() {
@@ -662,6 +658,15 @@ fn decode_failure(message: String) -> rupi_core::ModelFailure {
   )
 }
 
+/// Classify invalid SSE framing as a protocol response failure, not a retryable
+/// transport outage.
+pub(crate) fn sse_framing_failure(
+  error: &io::Error,
+  emitted_output: bool,
+) -> rupi_core::ModelFailure {
+  decode_failure(error.to_string()).with_partial_output(emitted_output)
+}
+
 /// Where thinking text arrives, across the dialects seen in the wild.
 fn reasoning_text(delta: &Value) -> Option<&str> {
   ["reasoning_content", "reasoning", "reasoning_text"]
@@ -957,27 +962,22 @@ mod tests {
     }
   }
 
-  /// The other direction is equally a claim: an endpoint that declares native
-  /// reasoning gets `Native`, and one that declares nothing keeps the field name
-  /// as the only evidence available. Local servers -- the common case here --
-  /// send real thinking in these fields without ever declaring it.
+  /// Without an endpoint declaration, field names are ambiguous between native
+  /// thinking and provider-authored summaries. They must not be promoted to a
+  /// semantic reasoning event.
   #[test]
-  fn undeclared_exposure_leaves_the_field_name_as_the_evidence() {
-    let (collector, _) = decode_as(
-      ReasoningExposure::None,
-      &[chunk(json!({"reasoning": "think"}))],
-    );
-    assert!(
-      matches!(
-        &collector.events()[0],
-        ProviderEvent::ReasoningDelta {
-          provenance: ReasoningProvenance::Native,
-          ..
-        }
-      ),
-      "{:?}",
-      collector.events()
-    );
+  fn undeclared_exposure_discards_reasoning_fields_without_guessing_provenance() {
+    for field in ["reasoning_content", "reasoning", "reasoning_text"] {
+      let (collector, _) = decode_as(
+        ReasoningExposure::None,
+        &[chunk(json!({field: "unclassified", "content": "answer"}))],
+      );
+      assert!(
+        matches!(collector.events(), [ProviderEvent::TextDelta(text)] if text == "answer"),
+        "{field}: {:?}",
+        collector.events()
+      );
+    }
   }
 
   #[test]

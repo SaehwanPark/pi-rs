@@ -261,6 +261,16 @@ impl ModelEndpoint {
   pub fn reference(&self) -> ModelRef {
     ModelRef::new(self.provider.clone(), self.model.clone())
   }
+
+  /// Capabilities with endpoint-level output limits resolved over declarations.
+  ///
+  /// Runtime consumers without a live adapter (notably lazy backup providers)
+  /// must see the same output ceiling the HTTP adapter will send.
+  pub fn effective_capabilities(&self) -> ModelCapabilities {
+    let mut capabilities = self.capabilities.clone();
+    capabilities.max_output_tokens = self.max_output_tokens.or(capabilities.max_output_tokens);
+    capabilities
+  }
 }
 
 /// Numeric overrides for experts who need them. Absent means profile-derived.
@@ -1048,6 +1058,23 @@ mod tests {
     assert_eq!(
       parsed.endpoints[0].openai_compat,
       config.endpoints[0].openai_compat
+    );
+  }
+
+  #[test]
+  fn endpoint_effective_capabilities_resolve_output_ceiling_precedence() {
+    let mut endpoint = sample_config().endpoints.remove(0);
+    endpoint.capabilities.max_output_tokens = Some(1_024);
+    endpoint.max_output_tokens = Some(8_192);
+    assert_eq!(
+      endpoint.effective_capabilities().max_output_tokens,
+      Some(8_192)
+    );
+
+    endpoint.max_output_tokens = None;
+    assert_eq!(
+      endpoint.effective_capabilities().max_output_tokens,
+      Some(1_024)
     );
   }
 

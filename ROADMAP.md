@@ -963,18 +963,19 @@ Round-5 implementation is regression-covered and verified:
       and never-executed tool calls remain out of the next model context.
 - [x] Request budgeting includes the assembled prompt and exposed tools, keeps desired and
       effective output ceilings distinct, applies the effective limit exactly on the wire, and
-      leaves a safety reserve. Endpoint-only output ceilings are visible to runtime/recovery.
-      When a useful clamp is impossible, only safe pre-turn history is reduced before refusing;
+      leaves a safety reserve. Endpoint-only output ceilings are visible to runtime/recovery,
+      including lazy backup capability snapshots. When a useful clamp is impossible, only safe
+      pre-turn history is reduced before refusing;
       backup rebudgeting uses the same accounting.
 - [x] Successfully completed assistant messages persist exposed reasoning in order with original
-      provenance. Truncated/failed attempts remain trace-only, and only endpoint-opted-in native
-      reasoning is replayed.
+      provenance. Truncated/failed attempts remain trace-only; undeclared reasoning-shaped fields
+      are not promoted to semantic reasoning; only endpoint-opted-in native reasoning is replayed.
 - [x] Generic local/remote endpoint constructors default reasoning exposure to `None`; config and
       provider validation reject reasoning replay without an explicit native-exposure declaration.
-- [x] Adapter decoding and the runtime collector bound aggregate text/reasoning/events/tool calls,
-      tool identities, and per-call/aggregate argument bytes before accumulation or execution.
-      Regressions exercise 2,000 tiny SSE events, 2,000 tool calls, oversized fragmented arguments,
-      and stream-wide text/reasoning limits.
+- [x] Adapter decoding and the runtime collector bound aggregate text/reasoning/semantic events,
+      raw SSE frames, tool calls, tool identities, and per-call/aggregate argument bytes before
+      accumulation or execution. Regressions exercise empty-frame floods, 2,000 tiny SSE events,
+      2,000 tool calls, oversized fragmented arguments, and stream-wide text/reasoning limits.
 - [x] Progress boundaries fail with a durable diagnostic before another provider request if no
       executable progress tool remains under model, tool-policy, or live approval constraints.
       Availability is rechecked after activation, including after a capability-changing failover.
@@ -984,7 +985,7 @@ Round-5 implementation is regression-covered and verified:
 Evidence: `cargo fmt --all --check`, `cargo check -p rupi-core --all-features`,
 `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and
 `cargo doc --workspace --no-deps` passed. `bash bench/startup.sh --json
-bench/results/startup-ci.json` passed (cold 120.06 ms; warm mean 5.75 ms), and
+bench/results/startup-ci.json` passed (cold 122.06 ms; warm mean 5.93 ms), and
 `bash bench/context_prefill.sh` passed all five budgets. No local llama.cpp comparison was run;
 this Round-5 safety slice relies on deterministic fixtures, and weak-model performance remains a
 later empirical focus.
