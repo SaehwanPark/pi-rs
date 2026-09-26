@@ -150,6 +150,15 @@ pub enum ModelFailureKind {
 
 Only explicit categories should qualify for automatic failover.
 
+OpenAI-compatible endpoint quirks travel through `ModelEndpoint.openai_compat`, not provider
+adapter defaults that the CLI cannot reach. Streaming, usage inclusion, token-limit field,
+thinking-control dialect and safe extra headers are endpoint-scoped. An explicit thinking-off
+encoding is opt-in; adapters do not assume that every compatible server accepts
+`reasoning_effort: "none"`. Prior assistant reasoning is omitted by default and can only be
+replayed for an opted-in endpoint when its provenance is `Native`; provider summaries,
+declared rationale and reconstructed rationale are never relabeled as native reasoning.
+Header values are redacted from config serialization and debug output.
+
 ## 6. Event model
 
 Important runtime behavior must emit typed events.

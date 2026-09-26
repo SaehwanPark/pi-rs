@@ -47,8 +47,9 @@ pub use capability::{
 };
 pub use config::{
   ConfigError, ContextOverrides, DEFAULT_MAX_MODEL_REQUESTS_PER_TURN,
-  MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN, McpServerConfig, ModelEndpoint, RuntimeConfig,
-  RuntimeLimits, ToolPolicy, UiConfig,
+  MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN, McpServerConfig, ModelEndpoint, OpenAiCompatOptions,
+  OpenAiMaxTokensField, OpenAiThinkingDisable, OpenAiThinkingInput, RuntimeConfig, RuntimeLimits,
+  ToolPolicy, UiConfig,
 };
 pub use context::{
   CAPSULE_SCHEMA_VERSION, CapsuleArtifact, CapsuleDecision, ContextAction, ContextCapsule,

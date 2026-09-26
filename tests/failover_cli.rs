@@ -77,6 +77,7 @@ fn endpoint(model: &str, base_url: Option<String>) -> ModelEndpoint {
     connect_timeout_ms: None,
     read_timeout_ms: None,
     request_timeout_ms: None,
+    openai_compat: Default::default(),
   }
 }
 

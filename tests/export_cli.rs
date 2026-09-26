@@ -69,6 +69,7 @@ fn write_config(root: &Path, state: &Path) -> PathBuf {
     connect_timeout_ms: None,
     read_timeout_ms: None,
     request_timeout_ms: None,
+    openai_compat: Default::default(),
   });
   let path = root.join(format!(
     "config-{}.json",

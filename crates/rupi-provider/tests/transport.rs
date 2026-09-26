@@ -18,9 +18,10 @@ use std::{
 };
 
 use rupi_core::{
-  CancelToken, Collector, CompletionCertainty, CompletionUsage, FailurePhase, Message,
-  ModelCapabilities, ModelFailure, ModelFailureKind, ModelProvider, ModelRef, ModelRequest,
-  ProviderEvent, ReasoningExposure, ReasoningProvenance,
+  CancelToken, Collector, CompletionCertainty, CompletionUsage, ContentBlock, FailurePhase,
+  Message, ModelCapabilities, ModelEndpoint, ModelFailure, ModelFailureKind, ModelProvider,
+  ModelRef, ModelRequest, ProviderEvent, ReasoningChunk, ReasoningExposure, ReasoningProvenance,
+  Role, ThinkingLevel,
 };
 use rupi_provider::{MaxTokensField, OpenAiCompat, ProviderConfig, ThinkingInput};
 
@@ -420,6 +421,70 @@ fn a_decoded_tool_call_without_done_is_an_uncertain_completion() {
     Some(ProviderEvent::ToolCall(call)) if call.name == "write"
   ));
   server.request();
+}
+
+#[test]
+fn endpoint_json_drives_compatibility_headers_and_request_dialect() {
+  let server = FakeServer::answer(status(
+    200,
+    "OK",
+    r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#,
+    "",
+  ));
+  let endpoint: ModelEndpoint = serde_json::from_value(serde_json::json!({
+    "provider": "local-vulkan",
+    "model": "qwen3.8-flash",
+    "base_url": server.base_url(),
+    "capabilities": {
+      "text": true,
+      "images": false,
+      "tools": true,
+      "exposed_reasoning": "native",
+      "context_window": 8192
+    },
+    "openai_compat": {
+      "stream": false,
+      "stream_usage": false,
+      "max_tokens_field": "max_tokens",
+      "thinking_input": "reasoning_effort",
+      "thinking_disable": "reasoning_effort_none",
+      "preserve_reasoning": true,
+      "headers": {"x-routing-hint": "low-latency"}
+    }
+  }))
+  .unwrap();
+  let provider = OpenAiCompat::new(ProviderConfig::from_endpoint(&endpoint).unwrap()).unwrap();
+  let mut req = request("follow up");
+  req.thinking = ThinkingLevel::Off;
+  req.messages.insert(
+    1,
+    Message::new(
+      Role::Assistant,
+      vec![
+        ContentBlock::Reasoning(ReasoningChunk::new(
+          "native reasoning",
+          ReasoningProvenance::Native,
+        )),
+        ContentBlock::text("earlier answer"),
+      ],
+    ),
+  );
+  let (result, _) = stream(&provider, &req);
+  result.expect("one-shot completion");
+  let request_text = server.request();
+  assert!(
+    request_text
+      .to_lowercase()
+      .contains("x-routing-hint: low-latency"),
+    "{request_text}"
+  );
+  let body_start = request_text.find("\r\n\r\n").expect("body");
+  let body: serde_json::Value = serde_json::from_str(&request_text[body_start + 4..]).unwrap();
+  assert_eq!(body["stream"], false);
+  assert!(body.get("stream_options").is_none());
+  assert_eq!(body["max_tokens"], 256);
+  assert_eq!(body["reasoning_effort"], "none");
+  assert_eq!(body["messages"][1]["reasoning_content"], "native reasoning");
 }
 
 #[test]

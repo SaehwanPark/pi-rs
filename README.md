@@ -119,6 +119,25 @@ model: qwen3.8-flash-next
 }
 ```
 
+OpenAI-compatible dialect quirks are configured per endpoint rather than guessed. For
+example, an endpoint that requires an explicit reasoning-off value and supports native
+reasoning replay can use:
+
+```json
+"openai_compat": {
+  "stream": true,
+  "stream_usage": true,
+  "max_tokens_field": "max_tokens",
+  "thinking_input": "reasoning_effort",
+  "thinking_disable": "reasoning_effort_none",
+  "preserve_reasoning": true
+}
+```
+
+Add this object inside the endpoint entry only when the server needs these overrides.
+Reasoning replay is opt-in and sends only native reasoning blocks; provider summaries and
+runtime-authored rationale remain excluded.
+
 ### 4. Ask a read-only question
 
 ```bash

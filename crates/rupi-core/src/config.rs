@@ -43,6 +43,92 @@ pub const MAX_CONFIGURED_MODEL_REQUESTS_PER_TURN: u32 = 256;
 /// Default base URL for remote OpenAI-compatible cloud endpoints.
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
+/// OpenAI-compatible request dialect options for one endpoint.
+///
+/// `None` keeps the provider adapter's default, so older configs retain their
+/// existing behavior while endpoint-specific quirks remain explicit.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct OpenAiCompatOptions {
+  /// Whether to use SSE; `false` is useful for endpoints with broken streams.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub stream: Option<bool>,
+  /// Whether streamed responses should include a usage chunk.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub stream_usage: Option<bool>,
+  /// Accepted token ceiling field.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub max_tokens_field: Option<OpenAiMaxTokensField>,
+  /// Dialect used for reasoning control.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub thinking_input: Option<OpenAiThinkingInput>,
+  /// How to explicitly disable reasoning for dialects that support it.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub thinking_disable: Option<OpenAiThinkingDisable>,
+  /// Replay only native reasoning blocks in assistant history when enabled.
+  #[serde(default, skip_serializing_if = "is_false")]
+  pub preserve_reasoning: bool,
+  /// Extra endpoint-specific HTTP headers. Values are redacted on serialization
+  /// and omitted from debug output because they may contain credentials.
+  #[serde(
+    default,
+    skip_serializing_if = "BTreeMap::is_empty",
+    serialize_with = "serialize_redacted_values"
+  )]
+  pub headers: BTreeMap<String, String>,
+}
+
+impl fmt::Debug for OpenAiCompatOptions {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let header_names: Vec<&str> = self.headers.keys().map(String::as_str).collect();
+    formatter
+      .debug_struct("OpenAiCompatOptions")
+      .field("stream", &self.stream)
+      .field("stream_usage", &self.stream_usage)
+      .field("max_tokens_field", &self.max_tokens_field)
+      .field("thinking_input", &self.thinking_input)
+      .field("thinking_disable", &self.thinking_disable)
+      .field("preserve_reasoning", &self.preserve_reasoning)
+      .field("header_names", &header_names)
+      .finish()
+  }
+}
+
+/// Which token ceiling field an OpenAI-compatible endpoint accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiMaxTokensField {
+  /// `max_tokens`, used by OpenAI-compatible local servers.
+  #[default]
+  MaxTokens,
+  /// `max_completion_tokens`, used by newer OpenAI endpoints.
+  MaxCompletionTokens,
+}
+
+/// How an OpenAI-compatible endpoint accepts a thinking-level request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiThinkingInput {
+  /// Do not send a thinking-control field.
+  None,
+  /// OpenAI `reasoning_effort`.
+  #[default]
+  ReasoningEffort,
+  /// `chat_template_kwargs: { "thinking": bool }`, as llama.cpp builds expect.
+  ChatTemplateThinking,
+}
+
+/// How a dialect expresses explicitly disabled reasoning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiThinkingDisable {
+  /// Omit the field, preserving the historical default behavior.
+  #[default]
+  Omit,
+  /// Send `reasoning_effort: "none"` when using the effort dialect.
+  ReasoningEffortNone,
+}
+
 /// One configured model endpoint.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelEndpoint {
@@ -75,6 +161,9 @@ pub struct ModelEndpoint {
   /// generation. `None` preserves long-running-session behavior.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub request_timeout_ms: Option<u64>,
+  /// Endpoint-specific OpenAI-compatible request dialect options.
+  #[serde(default, skip_serializing_if = "OpenAiCompatOptions::is_empty")]
+  pub openai_compat: OpenAiCompatOptions,
 }
 
 impl fmt::Debug for ModelEndpoint {
@@ -91,6 +180,7 @@ impl fmt::Debug for ModelEndpoint {
       .field("connect_timeout_ms", &self.connect_timeout_ms)
       .field("read_timeout_ms", &self.read_timeout_ms)
       .field("request_timeout_ms", &self.request_timeout_ms)
+      .field("openai_compat", &self.openai_compat)
       .finish()
   }
 }
@@ -118,6 +208,7 @@ impl ModelEndpoint {
       connect_timeout_ms: None,
       read_timeout_ms: None,
       request_timeout_ms: None,
+      openai_compat: OpenAiCompatOptions::default(),
     }
   }
 
@@ -148,6 +239,7 @@ impl ModelEndpoint {
       connect_timeout_ms: None,
       read_timeout_ms: None,
       request_timeout_ms: None,
+      openai_compat: OpenAiCompatOptions::default(),
     }
   }
 
@@ -310,6 +402,16 @@ pub struct RuntimeConfig {
   pub redaction: RedactionPolicy,
   #[serde(default)]
   pub mcp_servers: Vec<McpServerConfig>,
+}
+
+fn is_false(value: &bool) -> bool {
+  !value
+}
+
+impl OpenAiCompatOptions {
+  fn is_empty(&self) -> bool {
+    self == &Self::default()
+  }
 }
 
 /// Configuration for an external MCP server.
@@ -548,6 +650,18 @@ impl RuntimeConfig {
           "endpoint {}/{} URL must not contain userinfo credentials",
           endpoint.provider, endpoint.model
         )));
+      }
+      for (name, value) in &endpoint.openai_compat.headers {
+        if !valid_http_header_name(name)
+          || value.contains('\r')
+          || value.contains('\n')
+          || is_protocol_header(name)
+        {
+          return Err(ConfigError(format!(
+            "endpoint {}/{} has an invalid HTTP header",
+            endpoint.provider, endpoint.model
+          )));
+        }
       }
       for (name, timeout) in [
         ("connect_timeout_ms", endpoint.connect_timeout_ms),
@@ -880,9 +994,30 @@ mod tests {
   }
 
   #[test]
+  fn openai_compat_endpoint_options_round_trip() {
+    let mut config = sample_config();
+    config.endpoints[0].openai_compat = OpenAiCompatOptions {
+      stream: Some(false),
+      stream_usage: Some(false),
+      max_tokens_field: Some(OpenAiMaxTokensField::MaxCompletionTokens),
+      thinking_input: Some(OpenAiThinkingInput::ChatTemplateThinking),
+      thinking_disable: Some(OpenAiThinkingDisable::ReasoningEffortNone),
+      preserve_reasoning: true,
+      headers: BTreeMap::new(),
+    };
+    let parsed = RuntimeConfig::parse(&config.to_json_string().unwrap()).unwrap();
+    assert_eq!(
+      parsed.endpoints[0].openai_compat,
+      config.endpoints[0].openai_compat
+    );
+  }
+
+  #[test]
   fn literal_credentials_are_never_written_or_debug_printed() {
     let mut config = sample_config();
     config.endpoints[0].api_key = Some("local-debug-key".into());
+    config.endpoints[0].openai_compat.headers =
+      BTreeMap::from([("x-gateway-token".into(), "endpoint-header-secret".into())]);
     config.redaction.literals = vec!["literal-redaction-secret".into()];
     config.mcp_servers.push(
       McpServerConfig::new("remote", "command")
@@ -897,9 +1032,18 @@ mod tests {
       !json.contains("local-debug-key"),
       "endpoint serialization must not carry secrets: {json}"
     );
+    assert!(!json.contains("endpoint-header-secret"), "{json}");
+    assert!(
+      json.contains("x-gateway-token"),
+      "header names remain visible"
+    );
     let endpoint_debug = format!("{:?}", config.endpoints[0]);
     assert!(
       !endpoint_debug.contains("local-debug-key"),
+      "{endpoint_debug}"
+    );
+    assert!(
+      !endpoint_debug.contains("endpoint-header-secret"),
       "{endpoint_debug}"
     );
     let runtime_debug = format!("{config:?}");
@@ -916,6 +1060,10 @@ mod tests {
       !runtime_debug.contains("Bearer mcp-secret"),
       "{runtime_debug}"
     );
+    assert!(
+      !runtime_debug.contains("endpoint-header-secret"),
+      "{runtime_debug}"
+    );
     let direct_json = serde_json::to_string(&config).unwrap();
     assert!(
       !direct_json.contains("literal-redaction-secret"),
@@ -923,6 +1071,10 @@ mod tests {
     );
     assert!(!direct_json.contains("env-secret"), "{direct_json}");
     assert!(!direct_json.contains("Bearer mcp-secret"), "{direct_json}");
+    assert!(
+      !direct_json.contains("endpoint-header-secret"),
+      "{direct_json}"
+    );
     let json = config.to_json_string().unwrap();
     assert!(
       !json.contains("local-debug-key"),
@@ -932,6 +1084,31 @@ mod tests {
     assert!(!json.contains("literal-redaction-secret"), "{json}");
     assert!(!json.contains("env-secret"), "{json}");
     assert!(!json.contains("Bearer mcp-secret"), "{json}");
+    assert!(!json.contains("endpoint-header-secret"), "{json}");
+  }
+
+  #[test]
+  fn endpoint_openai_compat_headers_are_validated() {
+    let mut config = sample_config();
+    config.endpoints[0].openai_compat.headers =
+      BTreeMap::from([("bad header".into(), "value".into())]);
+    assert!(
+      config
+        .validate()
+        .unwrap_err()
+        .0
+        .contains("invalid HTTP header")
+    );
+
+    config.endpoints[0].openai_compat.headers =
+      BTreeMap::from([("x-route".into(), "one\r\ntwo".into())]);
+    assert!(
+      config
+        .validate()
+        .unwrap_err()
+        .0
+        .contains("invalid HTTP header")
+    );
   }
 
   #[test]

@@ -5,10 +5,13 @@
 //! a mapping bug: a tool call that was never replayed, an image dropped in
 //! silence, or thinking requested from a server that rejects the field.
 
-use rupi_core::{ContentBlock, Message, ModelRef, ModelRequest, Role, ThinkingLevel, ToolChoice};
+use rupi_core::{
+  ContentBlock, Message, ModelRef, ModelRequest, ReasoningProvenance, Role, ThinkingLevel,
+  ToolChoice,
+};
 use serde_json::{Value, json};
 
-use crate::config::{MaxTokensField, ProviderConfig, ThinkingInput};
+use crate::config::{MaxTokensField, ProviderConfig, ThinkingDisableMode, ThinkingInput};
 
 /// Build a chat-completions body.
 pub fn request_body(config: &ProviderConfig, request: &ModelRequest) -> Value {
@@ -69,7 +72,7 @@ pub fn request_body(config: &ProviderConfig, request: &ModelRequest) -> Value {
   }
   apply_thinking(config, request.thinking, &mut body);
   if config.stream {
-    body["stream_options"] = json!({ "include_usage": true });
+    body["stream_options"] = json!({ "include_usage": config.stream_usage });
   }
   body
 }
@@ -80,6 +83,9 @@ fn apply_thinking(config: &ProviderConfig, level: ThinkingLevel, body: &mut Valu
     ThinkingInput::None => {}
     ThinkingInput::ReasoningEffort => {
       if level == ThinkingLevel::Off {
+        if config.thinking_disable == ThinkingDisableMode::ReasoningEffortNone {
+          body["reasoning_effort"] = json!("none");
+        }
         return;
       }
       body["reasoning_effort"] = json!(match level {
@@ -117,6 +123,7 @@ fn messages(config: &ProviderConfig, system: &Option<String>, history: &[Message
 /// One message, or `None` when it carries nothing a provider can use.
 fn message_json(config: &ProviderConfig, message: &Message) -> Option<Value> {
   let mut text = String::new();
+  let mut reasoning = String::new();
   let mut images: Vec<Value> = Vec::new();
   let mut tool_calls: Vec<Value> = Vec::new();
   let mut tool_result: Option<(String, String)> = None;
@@ -138,8 +145,15 @@ fn message_json(config: &ProviderConfig, message: &Message) -> Option<Value> {
           );
         }
       }
-      // Reasoning is never replayed: it records a previous generation, and
-      // resending it changes behaviour that nobody chose.
+      // Replay is endpoint opt-in and restricted to actual model-emitted
+      // reasoning; summaries or declared rationale are not relabeled as native.
+      ContentBlock::Reasoning(chunk)
+        if config.preserve_reasoning
+          && message.role == Role::Assistant
+          && chunk.provenance == ReasoningProvenance::Native =>
+      {
+        append(&mut reasoning, &chunk.text);
+      }
       ContentBlock::Reasoning(_) => {}
       ContentBlock::ToolCall(call) => tool_calls.push(json!({
         "id": call.id.as_str(),
@@ -179,7 +193,11 @@ fn message_json(config: &ProviderConfig, message: &Message) -> Option<Value> {
   if has_tool_calls {
     value["tool_calls"] = Value::Array(tool_calls);
   }
-  if value["content"] == json!("") && !has_tool_calls {
+  let has_reasoning = !reasoning.is_empty();
+  if has_reasoning {
+    value["reasoning_content"] = json!(reasoning);
+  }
+  if value["content"] == json!("") && !has_tool_calls && !has_reasoning {
     return None;
   }
   Some(value)
@@ -356,13 +374,22 @@ mod tests {
   }
 
   #[test]
-  fn thinking_off_sends_no_effort_but_still_turns_template_thinking_off() {
+  fn thinking_off_uses_only_the_endpoint_configured_disable_encoding() {
     let mut req = request(vec![Message::user("x")]);
     req.thinking = ThinkingLevel::Off;
     assert!(
       request_body(&config(), &req)
         .get("reasoning_effort")
         .is_none()
+    );
+    let explicit = ProviderConfig {
+      thinking_disable: ThinkingDisableMode::ReasoningEffortNone,
+      ..config()
+    };
+    assert_eq!(
+      request_body(&explicit, &req)["reasoning_effort"],
+      "none",
+      "some endpoints require an explicit off value"
     );
     let local = ProviderConfig {
       thinking_input: ThinkingInput::ChatTemplateThinking,
@@ -434,7 +461,7 @@ mod tests {
   }
 
   #[test]
-  fn reasoning_is_recorded_but_never_replayed() {
+  fn native_reasoning_is_not_replayed_by_default() {
     let chunk = rupi_core::ReasoningChunk::new(
       "I will read the file",
       rupi_core::ReasoningProvenance::Native,
@@ -449,6 +476,37 @@ mod tests {
     let body = request_body(&config(), &request(vec![message]));
     assert_eq!(body["messages"][0]["content"], "here you go");
     assert!(body["messages"][0].get("reasoning_content").is_none());
+  }
+
+  #[test]
+  fn endpoint_opt_in_replays_native_but_not_provider_summary_reasoning() {
+    let message = Message::new(
+      Role::Assistant,
+      vec![
+        ContentBlock::Reasoning(rupi_core::ReasoningChunk::new(
+          "native thought",
+          ReasoningProvenance::Native,
+        )),
+        ContentBlock::Reasoning(rupi_core::ReasoningChunk::new(
+          "provider summary",
+          ReasoningProvenance::ProviderSummary,
+        )),
+        ContentBlock::text("visible answer"),
+      ],
+    );
+    let endpoint = ProviderConfig {
+      preserve_reasoning: true,
+      ..config()
+    };
+    let sent = &request_body(&endpoint, &request(vec![message]))["messages"][0];
+    assert_eq!(sent["content"], "visible answer");
+    assert_eq!(sent["reasoning_content"], "native thought");
+    assert!(
+      !sent["reasoning_content"]
+        .as_str()
+        .unwrap()
+        .contains("provider summary")
+    );
   }
 
   #[test]
@@ -500,6 +558,14 @@ mod tests {
     let body = request_body(&config(), &request(vec![Message::user("x")]));
     assert_eq!(body["stream"], true);
     assert_eq!(body["stream_options"]["include_usage"], true);
+    let no_usage = ProviderConfig {
+      stream_usage: false,
+      ..config()
+    };
+    assert_eq!(
+      request_body(&no_usage, &request(vec![Message::user("x")]))["stream_options"]["include_usage"],
+      false
+    );
     let one_shot = ProviderConfig {
       stream: false,
       ..config()

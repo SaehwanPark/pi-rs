@@ -17,6 +17,11 @@ use std::{
 use rupi_core::{CapabilityGap, ModelCapabilities, ModelEndpoint, ReasoningExposure};
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 
+pub use rupi_core::{
+  OpenAiMaxTokensField as MaxTokensField, OpenAiThinkingDisable as ThinkingDisableMode,
+  OpenAiThinkingInput as ThinkingInput,
+};
+
 /// Base URL used when nothing is configured.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -55,9 +60,15 @@ pub struct ProviderConfig {
   pub max_tokens_field: MaxTokensField,
   /// How this endpoint wants the thinking switch expressed.
   pub thinking_input: ThinkingInput,
+  /// How this endpoint explicitly disables reasoning in the effort dialect.
+  pub thinking_disable: ThinkingDisableMode,
+  /// Whether native reasoning may be replayed with assistant history.
+  pub preserve_reasoning: bool,
   /// Whether to stream. One-shot mode is the documented workaround for
   /// gateways that corrupt SSE, not the default.
   pub stream: bool,
+  /// Whether streamed responses should include usage details.
+  pub stream_usage: bool,
   pub connect_timeout_ms: u64,
   /// Logical idle budget for waiting on response headers or the next body
   /// event. The adapter's worker boundary keeps cancellation independent from
@@ -84,7 +95,10 @@ impl fmt::Debug for ProviderConfig {
       .field("max_output_tokens", &self.max_output_tokens)
       .field("max_tokens_field", &self.max_tokens_field)
       .field("thinking_input", &self.thinking_input)
+      .field("thinking_disable", &self.thinking_disable)
+      .field("preserve_reasoning", &self.preserve_reasoning)
       .field("stream", &self.stream)
+      .field("stream_usage", &self.stream_usage)
       .field("connect_timeout_ms", &self.connect_timeout_ms)
       .field("read_timeout_ms", &self.read_timeout_ms)
       .field("request_timeout_ms", &self.request_timeout_ms)
@@ -113,7 +127,10 @@ impl Default for ProviderConfig {
       max_output_tokens: None,
       max_tokens_field: MaxTokensField::default(),
       thinking_input: ThinkingInput::default(),
+      thinking_disable: ThinkingDisableMode::default(),
+      preserve_reasoning: false,
       stream: true,
+      stream_usage: true,
       connect_timeout_ms: 10_000,
       // The adapter retries bounded socket polls across quiet reasoning
       // intervals, so this remains a generous logical idle budget for callers
@@ -122,31 +139,6 @@ impl Default for ProviderConfig {
       request_timeout_ms: None,
     }
   }
-}
-
-/// Which token-limit field an endpoint accepts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum MaxTokensField {
-  /// `max_tokens`. Accepted by OpenAI, vLLM, and llama.cpp OpenAI-compatible
-  /// surfaces, so it is the default for a harness that expects local servers.
-  #[default]
-  MaxTokens,
-  /// `max_completion_tokens`, the newer OpenAI name.
-  MaxCompletionTokens,
-}
-
-/// How to ask an endpoint for thinking output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ThinkingInput {
-  /// Send nothing. For endpoints that reject unknown fields.
-  None,
-  /// OpenAI `reasoning_effort`.
-  #[default]
-  ReasoningEffort,
-  /// `chat_template_kwargs: { "thinking": bool }`, as llama.cpp builds expect.
-  ChatTemplateThinking,
 }
 
 /// A configuration that cannot produce a working adapter.
@@ -236,6 +228,13 @@ impl ProviderConfig {
         .read_timeout_ms
         .unwrap_or(Self::default().read_timeout_ms),
       request_timeout_ms: endpoint.request_timeout_ms,
+      max_tokens_field: endpoint.openai_compat.max_tokens_field.unwrap_or_default(),
+      thinking_input: endpoint.openai_compat.thinking_input.unwrap_or_default(),
+      thinking_disable: endpoint.openai_compat.thinking_disable.unwrap_or_default(),
+      preserve_reasoning: endpoint.openai_compat.preserve_reasoning,
+      stream: endpoint.openai_compat.stream.unwrap_or(true),
+      stream_usage: endpoint.openai_compat.stream_usage.unwrap_or(true),
+      headers: endpoint.openai_compat.headers.clone(),
       api_key: endpoint.api_key.clone(),
       api_key_env: endpoint.api_key_env.clone(),
       ..Self::default()
@@ -508,6 +507,35 @@ mod tests {
     assert_eq!(derived.max_output_tokens, None);
     assert_eq!(derived.request_timeout_ms, Some(120_000));
     assert_eq!(derived.id, "local");
+  }
+
+  #[test]
+  fn endpoint_dialect_options_reach_the_provider_adapter() {
+    let mut endpoint = ModelEndpoint::local("local", "qwen", "http://127.0.0.1:8080/v1", 4_096);
+    endpoint.openai_compat = rupi_core::OpenAiCompatOptions {
+      stream: Some(false),
+      stream_usage: Some(false),
+      max_tokens_field: Some(MaxTokensField::MaxCompletionTokens),
+      thinking_input: Some(ThinkingInput::ChatTemplateThinking),
+      thinking_disable: Some(ThinkingDisableMode::ReasoningEffortNone),
+      preserve_reasoning: true,
+      headers: BTreeMap::from([("x-route".into(), "local-fast".into())]),
+    };
+
+    let derived = ProviderConfig::from_endpoint(&endpoint).unwrap();
+    assert!(!derived.stream);
+    assert!(!derived.stream_usage);
+    assert_eq!(
+      derived.max_tokens_field,
+      MaxTokensField::MaxCompletionTokens
+    );
+    assert_eq!(derived.thinking_input, ThinkingInput::ChatTemplateThinking);
+    assert_eq!(
+      derived.thinking_disable,
+      ThinkingDisableMode::ReasoningEffortNone
+    );
+    assert!(derived.preserve_reasoning);
+    assert_eq!(derived.headers["x-route"], "local-fast");
   }
 
   #[test]

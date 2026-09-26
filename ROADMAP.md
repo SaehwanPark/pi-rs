@@ -926,7 +926,10 @@ on the Round-4 PR and remains incomplete until each behavior has regression evid
       pre-dispatch failures retain retry behavior, while ambiguous timeouts go directly to
       failover/stop. Provider and CLI regressions assert quarantine, request counts, and no fake
       `ModelRetry` event.
-- [ ] Expose OpenAI-compatible dialect configuration through `ModelEndpoint`.
+- [x] Expose OpenAI-compatible dialect configuration through `ModelEndpoint`.
+      Endpoint options now reach adapter stream/usage mode, token-limit field, thinking input and
+      explicit-off dialect, native-reasoning replay, and redacted custom headers. Config parsing,
+      validation/redaction, adapter mapping, and fake-server wire regressions cover the path.
 - [ ] Add capability-gated preferred/required constrained tool sampling.
 - [ ] Add one bounded recovery attempt for eligible output truncation.
 - [ ] Apply context overrides consistently across active windows and adaptive policy.
